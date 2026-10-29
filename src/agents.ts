@@ -36,6 +36,7 @@ export function canClaimTask(directory: { ids: Partial<Record<Role, number>>; ag
 const dynamicTools: Record<string, string[]> = {
   research: ["memory_search", "memory_publish", "knowledge_search", "knowledge_unfold", "domain_list", "domain_inspect", "goal_list", "goal_inspect", "agent_list", "agent_inspect", "organization_status"],
   task_management: ["task_discover", "task_claim", "task_heartbeat", "task_release", "task_finish", "task_status", "agent_handoff", "agent_consolidate"],
+  domain_management: ["domain_assign", "domain_link", "domain_split", "domain_merge", "domain_transfer", "domain_proposal_list", "domain_analyze", "domain_discover", "domain_discovery_inspect", "domain_discovery_feedback"],
 };
 const ownContextTools = ["context_read", "context_edit", "context_history", "context_restore", "context_checkpoint"];
 export function canUseTool(directory: { ids: Partial<Record<Role, number>>; agents?: AgentRecord[] }, conversationId: number, tool: string): boolean {

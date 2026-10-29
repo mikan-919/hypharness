@@ -41,7 +41,7 @@ export async function reconcileDomains(harness: Harness, context: Context, now =
     const author = directory.ids.author;
     if (author === undefined) return;
     if (!state.domains.some(d => d.id === DEFAULT_DOMAIN)) state.domains.push({ id: DEFAULT_DOMAIN, name: "未分類", description: "未分類の共有知識", stewardId: String(author), status: "active", goalIds: [], parentIds: [], successorIds: [], revision: 0, createdAt: now, updatedAt: now });
-    for (const domain of state.domains.filter(d => d.status === "active")) if (!Object.values(directory.ids).some(id => String(id) === domain.stewardId)) throw new Error(`Domain steward is not registered: ${domain.id}`);
+    for (const domain of state.domains.filter(d => d.status === "active")) if (!Object.values(directory.ids).some(id => String(id) === domain.stewardId) && !directory.agents?.some(a => a.conversationId === domain.stewardId && ["active", "draining"].includes(a.status) && a.capabilities.includes("domain_management"))) throw new Error(`Domain steward is not registered: ${domain.id}`);
     let domain = state.domains.find(d => d.id === DEFAULT_DOMAIN);
     const visited = new Set<string>();
     while (domain && domain.status !== "active") {
@@ -65,8 +65,9 @@ export async function reconcileDomains(harness: Harness, context: Context, now =
       const members = state.memberships.filter(m => m.primaryId === candidate.id || m.relatedIds.includes(candidate.id));
       const signals = members.filter(m => m.relatedIds.length > 0).length + state.relations.filter(r => r.active && (r.from === candidate.id || r.to === candidate.id)).length;
       const role = (Object.entries(directory.ids).find(([, value]) => String(value) === candidate.stewardId)?.[0]) as Role | undefined;
+      const dynamicSteward = directory.agents?.find(a => a.conversationId === candidate.stewardId && a.status === "active" && a.capabilities.includes("domain_management"));
       const taskId = `domain-analysis:${candidate.id}:${candidate.revision}`;
-      if (role && members.length >= 4 && signals >= 2 && !board.tasks.some(t => t.id === taskId) && board.tasks.filter(t => t.type === "domain_analysis").length < 20) addTask(board, newTask({ id: taskId, type: "domain_analysis", description: candidate.id, role }, now));
+      if ((role || dynamicSteward) && members.length >= 4 && signals >= 2 && !board.tasks.some(t => t.id === taskId) && board.tasks.filter(t => t.type === "domain_analysis").length < 20) { const task = newTask({ id: taskId, type: "domain_analysis", description: candidate.id, role: role ?? "author" }, now); if (!role && dynamicSteward) task.assignedAgentId = dynamicSteward.id; addTask(board, task); }
     }
   }, context);
 }

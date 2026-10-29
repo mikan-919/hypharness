@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { createHash } from "node:crypto";
 import { defineExtension, defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord";
-import { AgentDirectory, type Role } from "../agents.ts";
+import { AgentDirectory, type AgentRecord, type Role } from "../agents.ts";
 import { DomainStore, activeDomain, applyDomainChange, assertMemberships, checkRelations, type DomainChange, type DomainState } from "../domains.ts";
 import { GoalStore, type GoalState } from "../goals.ts";
 import { KnowledgeStore } from "../knowledge.ts";
@@ -15,6 +15,9 @@ const membership = Type.Object({ knowledgeId: id, primaryId: id, relatedIds: Typ
 const relationType = Type.Union([Type.Literal("related"), Type.Literal("depends_on"), Type.Literal("overlaps"), Type.Literal("complements"), Type.Literal("contradicts")]);
 const output = (x: unknown) => ({ output: [{ type: "text" as const, text: JSON.stringify(x) }] });
 function identity(ids: Partial<Record<Role, number>>, conversation: number): Role { const pair = Object.entries(ids).find(([, value]) => value === conversation); if (!pair) throw new Error("Unregistered agent"); return pair[0] as Role; }
+type Directory = { ids: Partial<Record<Role, number>>; agents?: AgentRecord[] };
+function domainActor(directory: Directory, conversation: number) { if (Object.values(directory.ids).includes(conversation)) return; if (!directory.agents?.some(a => a.conversationId === String(conversation) && a.status === "active" && a.capabilities.includes("domain_management"))) throw new Error("Domain management capability required"); }
+function stewardIds(directory: Directory): number[] { const ids = new Set(Object.values(directory.ids)); for (const agent of directory.agents ?? []) { if (agent.status !== "active" || !agent.capabilities.includes("domain_management")) continue; const id = Number(agent.conversationId); if (!Number.isSafeInteger(id) || id < 0 || String(id) !== agent.conversationId) throw new Error("Invalid conversation ID"); ids.add(id); } return [...ids]; }
 function reviewRole(ids: Partial<Record<Role, number>>, author: number): Role { const role = (["author", "source_reviewer", "gist_reviewer"] as const).find(r => ids[r] !== undefined && ids[r] !== author); if (!role) throw new Error("Independent reviewer unavailable"); return role; }
 function checkGoalClaims(change: DomainChange, goals: GoalState, board: Board) {
   if (change.kind === "transfer") return;
@@ -24,7 +27,7 @@ const list = defineTool({ name: "domain_list", description: "List concise active
 const inspect = defineTool({ name: "domain_inspect", description: "Inspect domain metadata and a bounded page of knowledge IDs", parameters: Type.Object({ id, offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })) }), execute: async (args, api, ctx) => { const state = await api.snapshot(DomainStore, ctx); const domain = state?.domains.find(d => d.id === args.id); if (!domain) throw new Error("Domain not found"); const memberships = state!.memberships.filter(m => m.primaryId === args.id || m.relatedIds.includes(args.id)); const offset = args.offset ?? 0; return output({ domain, membershipCount: memberships.length, memberships: memberships.slice(offset, offset + (args.limit ?? 20)), relations: state!.relations.filter(r => r.active && (r.from === args.id || r.to === args.id)).slice(0, 20) }); } });
 const create = defineTool({ name: "domain_create", description: "Create an empty domain", parameters: Type.Object({ ...def.properties, goalIds: Type.Array(id, { maxItems: 32 }) }), replay: "safe", execute: async (args, api, ctx) => output(await api.commit(async tx => {
   const directory = await tx.doc(AgentDirectory); identity(directory.ids, api.conversationId);
-  if (!Object.values(directory.ids).some(x => String(x) === args.stewardId)) throw new Error("Unknown steward");
+  if (!stewardIds(directory).some(x => String(x) === args.stewardId)) throw new Error("Unknown steward");
   const state = await tx.doc(DomainStore); const existing = state.domains.find(d => d.id === args.id);
   if (existing) { if (existing.name === args.name && existing.description === args.description && existing.stewardId === args.stewardId && JSON.stringify(existing.goalIds) === JSON.stringify(args.goalIds)) return existing.id; throw new Error("Domain ID already used"); }
   const goals = await tx.doc(GoalStore); for (const goal of args.goalIds) if (!goals.goals.some(g => g.id === goal && g.status === "active")) throw new Error("Unknown goal");
@@ -33,7 +36,7 @@ const create = defineTool({ name: "domain_create", description: "Create an empty
   return args.id;
 }, ctx)) });
 const assign = defineTool({ name: "domain_assign", description: "Assign a knowledge reference, retaining one primary domain", parameters: Type.Object({ ...membership.properties, expectedRevision: Type.Integer({ minimum: 0 }) }), replay: "safe", execute: async (args, api, ctx) => output(await api.commit(async tx => {
-  const state = await tx.doc(DomainStore); const directory = await tx.doc(AgentDirectory); identity(directory.ids, api.conversationId); const domain = activeDomain(state, args.primaryId);
+  const state = await tx.doc(DomainStore); const directory = await tx.doc(AgentDirectory); domainActor(directory, api.conversationId); const domain = activeDomain(state, args.primaryId);
   const operationId = `assign:${api.conversationId}:${api.callId}`, fingerprint = JSON.stringify(args), prior = state.operations[operationId];
   if (prior) { if (prior.fingerprint !== fingerprint) throw new Error("Assignment operation reused"); return { knowledgeId: prior.result.knowledgeId, primaryId: prior.result.primaryId, relatedIds: [...prior.result.relatedIds] }; }
   if (domain.stewardId !== String(api.conversationId)) throw new Error("Only primary steward may assign knowledge");
@@ -49,7 +52,7 @@ const assign = defineTool({ name: "domain_assign", description: "Assign a knowle
 }, ctx)) });
 async function propose(change: DomainChange, args: { reason: string; benefits: string; risks: string; expectedRevisions: Record<string, number> }, api: ToolExecutionApi, ctx: Context) {
   return api.commit(async tx => {
-    const state = await tx.doc(DomainStore); const directory = await tx.doc(AgentDirectory); identity(directory.ids, api.conversationId);
+    const state = await tx.doc(DomainStore); const directory = await tx.doc(AgentDirectory); domainActor(directory, api.conversationId);
     const proposalId = `domain-proposal:${api.conversationId}:${api.callId}`;
     const previous = state.proposals.find(p => p.id === proposalId);
     if (previous) { if (JSON.stringify([previous.change, previous.reason, previous.benefits, previous.risks, previous.revisions]) !== JSON.stringify([change, args.reason, args.benefits, args.risks, args.expectedRevisions])) throw new Error("Proposal operation reused"); return proposalId; }
@@ -60,7 +63,7 @@ async function propose(change: DomainChange, args: { reason: string; benefits: s
     for (const domain of sourceDomains) if (domain.revision !== args.expectedRevisions[domain.id]) throw new Error("Domain revision conflict");
     if (state.audit.some(a => api.now() - a.at < 60000 && state.proposals.find(p => p.id === a.proposalId)?.change.sources.some(s => change.sources.includes(s)))) throw new Error("Domain reorganization cooldown");
     const board = await tx.doc(TaskBoard); const goals = await tx.doc(GoalStore); checkGoalClaims(change, goals, board); const claimed = board.tasks.filter(t => t.state === "claimed" && t.knowledgeId).map(t => t.knowledgeId!);
-    const copy: DomainState = JSON.parse(JSON.stringify(state)); applyDomainChange(copy, change, Object.values(directory.ids), claimed, api.now());
+    const copy: DomainState = JSON.parse(JSON.stringify(state)); applyDomainChange(copy, change, stewardIds(directory), claimed, api.now());
     state.proposals.push({ id: proposalId, author: String(api.conversationId), reviewer: null, status: "proposed", ...args, change, revisions: args.expectedRevisions, createdAt: api.now(), updatedAt: api.now(), review: "" });
     addTask(board, newTask({ id: `review:${proposalId}`, type: "domain_review", description: proposalId, role: reviewRole(directory.ids, api.conversationId) }, api.now()));
     return proposalId;
@@ -71,7 +74,7 @@ const split = defineTool({ name: "domain_split", description: "Propose a split w
 const merge = defineTool({ name: "domain_merge", description: "Propose merging domains", parameters: Type.Object({ sources: Type.Array(id, { minItems: 2, maxItems: 8 }), domain: def, ...reasons }), replay: "safe", execute: async (a, api, ctx) => output(await propose({ kind: "merge", sources: a.sources, domains: [a.domain], assignments: [] }, a, api, ctx)) });
 const transfer = defineTool({ name: "domain_transfer", description: "Propose transferring stewardship without changing any context", parameters: Type.Object({ source: id, stewardId: id, ...reasons }), replay: "safe", execute: async (a, api, ctx) => output(await propose({ kind: "transfer", sources: [a.source], stewardId: a.stewardId }, a, api, ctx)) });
 const link = defineTool({ name: "domain_link", description: "Link domains with evidence", parameters: Type.Object({ from: id, to: id, type: relationType, evidence: text, expectedRevision: Type.Integer({ minimum: 0 }) }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
-  const directory = await tx.doc(AgentDirectory); identity(directory.ids, api.conversationId); const state = await tx.doc(DomainStore);
+  const directory = await tx.doc(AgentDirectory); domainActor(directory, api.conversationId); const state = await tx.doc(DomainStore);
   const source = activeDomain(state, a.from); activeDomain(state, a.to); if (a.from === a.to || source.stewardId !== String(api.conversationId)) throw new Error("Invalid relation owner or target");
   const relId = `relation:${api.conversationId}:${api.callId}`; const previous = state.relations.find(r => r.id === relId);
   if (previous) { if (previous.from !== a.from || previous.to !== a.to || previous.type !== a.type || previous.evidence !== a.evidence) throw new Error("Relation operation reused"); return { ...previous }; }
@@ -88,7 +91,7 @@ const review = defineTool({ name: "domain_review", description: "Independently r
     if (a.decision === "approve") {
       for (const source of p.change.sources) if (activeDomain(state, source).revision !== p.revisions[source]) throw new Error("Domain revision conflict");
       const board = await tx.doc(TaskBoard); const goals = await tx.doc(GoalStore); checkGoalClaims(p.change, goals, board); const claimed = board.tasks.filter(t => t.state === "claimed" && t.knowledgeId).map(t => t.knowledgeId!);
-      const copy: DomainState = JSON.parse(JSON.stringify(state)); applyDomainChange(copy, p.change, Object.values(dir.ids), claimed, api.now());
+      const copy: DomainState = JSON.parse(JSON.stringify(state)); applyDomainChange(copy, p.change, stewardIds(dir), claimed, api.now());
     }
     p.status = a.decision === "approve" ? "approved" : "rejected"; p.review = a.reason;
   }
@@ -101,7 +104,7 @@ const apply = defineTool({ name: "domain_apply", description: "Atomically apply 
   if (p.status === "applied") return "applied"; if (p.status !== "approved" || p.author === p.reviewer || !p.reviewer) throw new Error("Proposal not independently approved");
   for (const source of p.change.sources) if (activeDomain(state, source).revision !== p.revisions[source]) throw new Error("Domain revision conflict");
   const board = await tx.doc(TaskBoard); const goals = await tx.doc(GoalStore); checkGoalClaims(p.change, goals, board); const claimed = board.tasks.filter(t => t.state === "claimed" && t.knowledgeId).map(t => t.knowledgeId!);
-  applyDomainChange(state, p.change, Object.values(dir.ids), claimed, api.now());
+  applyDomainChange(state, p.change, stewardIds(dir), claimed, api.now());
   if (p.change.kind !== "transfer") { const targets = p.change.domains.map(d => d.id); for (const goal of goals.goals) { if (goal.id === goals.globalId || !goal.domainIds.some(d => p.change.sources.includes(d))) continue; goal.domainIds = [...new Set(goal.domainIds.flatMap(d => p.change.sources.includes(d) ? targets : [d]))]; goal.revision++; goal.updatedAt = api.now(); } }
   p.status = "applied"; p.updatedAt = api.now(); state.audit.push({ proposalId: p.id, actor: String(api.conversationId), at: api.now(), detail: p.change.kind }); return p.status;
 }, ctx)) });
@@ -119,7 +122,7 @@ const analyze = defineTool({ name: "domain_analyze", description: "Analyze domai
   return output({ domainId: domain.id, revision: domain.revision, knowledgeCount: members.length, overlapCount: overlap, relationCount: related.length, contradictionCount: contradictions, claimedTasks: claimed, stalledTasks: stalled, openGoals, domainsWithSameSteward: sameSteward, suggestion, evidence: related.slice(0, 10).map(r => ({ id: r.id, evidence: r.evidence })), costs: "coordination, task continuity, context changes, and cache invalidation" });
 } });
 const discover = defineTool({ name: "domain_discover", description: "Explore linked domains and record an evidence-backed hypothesis and task; it is not verified knowledge", parameters: Type.Object({ domainIds: Type.Array(id, { minItems: 2, maxItems: 4 }), evidence: text, hypothesis: text, query: Type.Optional(text) }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
-  const dir = await tx.doc(AgentDirectory); identity(dir.ids, api.conversationId); const state = await tx.doc(DomainStore);
+  const dir = await tx.doc(AgentDirectory); domainActor(dir, api.conversationId); const state = await tx.doc(DomainStore);
   const ids = [...new Set(a.domainIds)].sort(); if (ids.length !== a.domainIds.length) throw new Error("Duplicate domains"); for (const domain of ids) activeDomain(state, domain);
   const discoveryId = `discovery:${createHash("sha256").update(JSON.stringify(ids)).digest("hex")}`; const old = state.discoveries.find(d => d.id === discoveryId);
   if (old) { if (old.evidence !== a.evidence || old.hypothesis !== a.hypothesis || old.query !== (a.query ?? "")) throw new Error("Combination already explored"); return { ...old, domainIds: [...old.domainIds], matches: [...old.matches] }; }
@@ -135,7 +138,7 @@ const discover = defineTool({ name: "domain_discover", description: "Explore lin
   const record = { id: discoveryId, domainIds: ids, evidence: a.evidence, hypothesis: a.hypothesis, query: a.query ?? "", matches, taskId, createdAt: api.now(), outcome: "pending" as const, outcomeReason: "" }; state.discoveries.push(record); return record;
 }, ctx)) });
 const feedback = defineTool({ name: "domain_discovery_feedback", description: "Record whether a completed hypothesis task produced useful evidence", parameters: Type.Object({ id, productive: Type.Boolean(), reason: text }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
-  const dir = await tx.doc(AgentDirectory); identity(dir.ids, api.conversationId); const state = await tx.doc(DomainStore); const discovery = state.discoveries.find(d => d.id === a.id); if (!discovery) throw new Error("Discovery missing");
+  const dir = await tx.doc(AgentDirectory); domainActor(dir, api.conversationId); const state = await tx.doc(DomainStore); const discovery = state.discoveries.find(d => d.id === a.id); if (!discovery) throw new Error("Discovery missing");
   const board = await tx.doc(TaskBoard); const task = board.tasks.find(t => t.id === discovery.taskId); if (!task || task.owner !== String(api.conversationId) || (task.state !== "completed" && task.state !== "failed")) throw new Error("Only the completed task owner may report an outcome");
   const outcome = a.productive ? "productive" : "unproductive"; if (discovery.outcome !== "pending") { if (discovery.outcome !== outcome || discovery.outcomeReason !== a.reason) throw new Error("Discovery outcome already recorded"); return outcome; }
   discovery.outcome = outcome; discovery.outcomeReason = a.reason; return outcome;
