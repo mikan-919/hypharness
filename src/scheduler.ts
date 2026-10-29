@@ -1,84 +1,113 @@
-import type { Context } from "@earendil-works/chord";
-import { AssistantEntry, type Conversation, type ConversationId, type Harness, type ToolExecutionApi } from "@earendil-works/pi-durable";
-import { AgentDirectory, canClaimTask, type Role } from "./agents.ts";
-import { TaskBoard, addTask, newTask, ready } from "./tasks.ts";
-import { reconcileKnowledge } from "./workflow.ts";
-import { AgentContext } from "./context/state.ts";
-import { reconcileDomains } from "./domains.ts";
-import { GoalStore } from "./goals.ts";
-import { ORGANIZATION_LIMITS, OrganizationConflict, OrganizationDeferred, OrganizationStore } from "./organization.ts";
-import { OrganizationExtension } from "./tools/organization.ts";
+import { BudgetExhausted, runEpisode, type Runtime } from "./agent.ts";
+import type { Agent, Goal, Store, Task } from "./db.ts";
+import { mirror } from "./tools.ts";
 
-export async function runScheduler(harness: Harness, agents: Record<Role, Conversation>, context: Context, options: { maxRounds?: number; run?: (agent: Conversation, prompt: string) => Promise<void>; now?: () => number; organizationLimits?: Partial<typeof ORGANIZATION_LIMITS> } = {}) {
-  const maxRounds = options.maxRounds ?? 20;
-  const limits = { ...ORGANIZATION_LIMITS, ...options.organizationLimits };
-  if (Object.values(limits).some(value => !Number.isSafeInteger(value) || value < 1)) throw new Error("Invalid organization limits");
-  const runId = crypto.randomUUID();
-  await harness.commit(async tx => { (await tx.doc(OrganizationStore)).run = { id: runId, round: 0, spawns: 0, roundSpawns: 0, roundChanges: 0, limits }; }, context);
-  const run = options.run ?? (async (agent, prompt) => {
-    const submission = await agent.submit({ type: "input", content: prompt }, context);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => { void agent.abort(context).catch(() => {}); reject(new Error(`Agent ${agent.id} timed out`)); }, 120_000);
+// Any open goal with nothing pending goes back to its owner to decide the next step (plan, act, refine, drop, or submit).
+export function steer(store: Store) {
+  for (const g of store.all<Goal>("select * from goals where status = 'open'")) {
+    const busy = store.get("select 1 from goals where parent = ?1 and status in ('open', 'review') union all select 1 from tasks where goal = ?1 and status in ('open', 'claimed', 'review')", g.id);
+    if (busy) continue;
+    store.addTask({
+      goal: g.id, kind: "steer", author: "host", assignee: g.owner,
+      description: `Goal ${g.id} has no pending work.\nGoal: ${g.description}${g.feedback ? `\nIts last submission was rejected: ${g.feedback}` : ""}\nDecide the next step: do the work yourself, create tasks or subgoals, refine or drop the goal, or submit it with goal_complete.`,
     });
-    const settled = await Promise.race([submission.wait(context), timeout]).finally(() => clearTimeout(timer));
-    if (settled.status !== "done" || settled.type !== "input") throw new Error(`Agent ${agent.id} did not finish`);
-    await agent.commit(tx => tx.entry(AssistantEntry, settled.answer), context);
-  });
-  for (let round = 0; round < maxRounds; round++) {
-    await harness.commit(async tx => { const run = (await tx.doc(OrganizationStore)).run; if (!run || run.id !== runId) throw new Error("Organization run superseded"); run.round = round; run.roundSpawns = 0; run.roundChanges = 0; }, context);
-    await reconcileKnowledge(harness, context, options.now?.() ?? Date.now());
-    await reconcileDomains(harness, context, options.now?.() ?? Date.now());
-    const organization = await harness.snapshot(OrganizationStore, context);
-    const approved = [...(organization?.proposals ?? []), ...(organization?.spawnProposals ?? []), ...(organization?.lifecycleProposals ?? []), ...(organization?.handoffs ?? [])].filter(p => p.status === "approved");
-    const apply = OrganizationExtension.tools!.find(tool => tool.name === "organization_apply")!;
-    for (const proposal of approved) {
-      const api = { conversationId: agents.author.id, now: () => options.now?.() ?? Date.now(), commit: harness.commit.bind(harness) } as unknown as ToolExecutionApi;
-      try { await apply.execute({ id: proposal.id }, api, context); }
-      catch (error) {
-        if (error instanceof OrganizationDeferred) continue;
-        if (!(error instanceof OrganizationConflict)) throw error;
-        await harness.commit(async tx => { const state = await tx.doc(OrganizationStore); const stale = [...state.proposals, ...(state.spawnProposals ?? []), ...(state.lifecycleProposals ?? []), ...(state.handoffs ?? [])].find(p => p.id === proposal.id && p.status === "approved"); if (stale) { stale.status = "rejected"; stale.review = `Reconciliation: ${error.message}`; stale.updatedAt = options.now?.() ?? Date.now(); if ("handoffStatus" in stale) { stale.handoffStatus = "failed"; stale.completedAt = stale.updatedAt; } } }, context);
-      }
-    }
-    if (round < limits.maxOrganizationRounds) await harness.commit(async tx => {
-      const board = await tx.doc(TaskBoard); const directory = await tx.doc(AgentDirectory); const organization = await tx.doc(OrganizationStore);
-      for (const task of [...board.tasks]) {
-        if (task.state !== "open" || task.type !== "subgoal" || !task.requiredSpecialty || !ready(board, task, options.now?.() ?? Date.now())) continue;
-        const specialist = directory.agents?.find(agent => agent.status === "active" && agent.role.trim().toLowerCase() === task.requiredSpecialty!.trim().toLowerCase());
-        if (specialist && canClaimTask(directory, task, Number(specialist.conversationId))) continue;
-        if ((organization.spawnProposals ?? []).some(p => p.taskId === task.id && ["proposed", "under_review", "approved"].includes(p.status))) continue;
-        const id = `organization-analysis:${task.id}:${task.revision}`;
-        if (!board.tasks.some(t => t.id === id) && board.tasks.filter(t => t.type === "organization_analysis").length < 20) addTask(board, newTask({ id, type: "organization_analysis", description: task.id, role: "author" }, options.now?.() ?? Date.now()));
-      }
-    }, context);
-    const board = await harness.snapshot(TaskBoard, context);
-    const goals = await harness.snapshot(GoalStore, context);
-    const directory = await harness.snapshot(AgentDirectory, context);
-    const availableAgents = [...Object.values(agents)];
-    for (const record of directory?.agents ?? []) {
-      if (record.status !== "active" || availableAgents.some(a => String(a.id) === record.conversationId)) continue;
-      const id = Number(record.conversationId);
-      if (!Number.isSafeInteger(id) || id < 0 || String(id) !== record.conversationId) throw new Error("Invalid conversation ID");
-      const agent = await harness.conversation(id as ConversationId, context); if (!agent) throw new Error(`Agent conversation missing: ${record.id}`);
-      availableAgents.push(agent);
-    }
-    const priority = (type: string) => type === "organization_review" ? 2 : type === "organization_analysis" ? 1 : 0;
-    const candidates = [...(board?.tasks ?? [])].sort((a, b) => priority(b.type) - priority(a.type));
-    const available = candidates.find(task => {
-      if (!board || !ready(board, task, options.now?.() ?? Date.now())) return false;
-      if (!directory || !availableAgents.some(agent => canClaimTask(directory, task, agent.id))) return false;
-      if (!task.goalId || task.type === "goal_plan") return true;
-      const goal = goals?.goals.find(g => g.id === task.goalId);
-      return goal?.status === "active" && goal.dependencies.every(id => goals?.goals.some(g => g.id === id && g.status === "completed"));
-    });
-    if (!available) return { status: board?.tasks.some(t => t.state === "claimed" || t.state === "open") ? "waiting" as const : "idle" as const, rounds: round };
-    const agent = availableAgents.find(agent => canClaimTask(directory!, available, agent.id))!;
-    const currentContext = await harness.snapshot(AgentContext, agent.id, context);
-    const prompt = `現在の文脈バージョンは ${currentContext?.version ?? 0} です。タスク ${JSON.stringify(available)} を実行してください。まず task_claim を現在の revision と leaseMs=3600000、固有の operationId で呼んでください。取得できなければ作業せず終了してください。取得結果の token と revision を使ってください。review_source または review_gist の場合は knowledge_unfold で原資料を確認し、knowledge_review に id、stage、approved、reason、token、revision を渡してください。投稿タスクの場合は description をそのまま raw として、根拠付き summary と gist、taskId、token、revision を knowledge_propose に渡してください。この操作がタスクを完了します。domain_review または goal_review では提案を domain_proposal_list または goal_proposal_inspect で読み、独立に検証し、対応する review ツールで start と approve または reject を呼び、承認した場合は apply ツールを呼んでください。domain_analysis では domain_analyze で根拠とコストを検討し、必要な場合のみ提案してください。関連領域に根拠がある場合は domain_discover で未検証の仮説を探索してください。goal_plan では最上位目的との関係を説明できる下位目標を提案してください。subgoal は関連領域の知識を調べて実行し、完了後に goal_propose で完了を提案できます。hypothesis は未検証の仮説として扱い、task_finish 後に domain_discovery_feedback で成果と根拠を記録してください。discovery_feedback は description の発見 ID を domain_discovery_inspect で調べ、成果を記録してください。これらのタスクは作業後 task_finish で完了してください。各操作の operationId は重複しない値にしてください。`;
-    const isBase = Object.values(directory!.ids).includes(agent.id);
-    await run(agent, isBase ? prompt + " organization_review の場合は organization_status で提案を読み、applied または rejected なら task_finish、approved なら organization_apply 後に task_finish、それ以外は organization_review で start と approve または reject を行い、承認した場合は organization_apply を呼んでから task_finish してください。organization_analysis の場合は organization_analyze と agent_list、task_status で対象を調べ、現状維持、既存エージェントへの引き継ぎ、休眠からの復帰を優先してください。既存エージェントを使えず専門性が必要な場合のみ organization_propose を呼び、理由と費用とリスクを記録してください。分析結果を task_finish で記録してください。" : `現在の文脈バージョンは ${currentContext?.version ?? 0} です。過去の作業記憶は最新とは限りません。必要な目標・領域・共有知識を照合してください。タスク ${JSON.stringify(available)} を実行してください。task_claim で取得し、共有知識を調べて、domain_analysis では domain_analyze も実行し、結果を task_finish で記録してください。`);
   }
-  await reconcileKnowledge(harness, context, options.now?.() ?? Date.now());
-  return { status: "round_limit" as const, rounds: maxRounds };
+}
+
+function claimable(store: Store, agent: Agent) {
+  const candidates = store.all<Task>(
+    `select * from tasks where status = 'open' and (assignee is null or assignee = ?1) and (exclude is null or exclude != ?1)
+     order by assignee is null, kind != 'verify', created_at`, agent.id);
+  for (const t of candidates) if (store.claim(t.id, agent.id)) return store.task(t.id)!;
+}
+
+// A verify task excludes its author; if no active agent can take it, wake or create one rather than self-verify.
+function unblockVerification(store: Store) {
+  const blocked = store.all<Task>("select * from tasks where status = 'open' and kind = 'verify' and exclude is not null");
+  for (const t of blocked) {
+    const active = store.get<Agent>("select * from agents where status = 'active' and id != ?", t.exclude);
+    if (active) continue;
+    const dormant = store.get<Agent>("select * from agents where status = 'dormant' and id != ?", t.exclude);
+    if (dormant) {
+      store.run("update agents set status = 'active', idle = 0 where id = ?", dormant.id);
+      store.log("host", "agent_woken", { id: dormant.id, for: t.id });
+      return true;
+    }
+    if (store.config.organization === "dynamic" && store.agents().length < store.config.maxAgents && !store.agent("verifier")) {
+      store.addAgent("verifier", "verifier: independently checks results and knowledge against the actual artifacts and sources", "host");
+      return true;
+    }
+  }
+  return false;
+}
+
+export type Report = {
+  status: "done" | "budget" | "stalled" | "rounds";
+  rounds: number; modelCalls: number; elapsedMs: number;
+  input: number; output: number; cacheRead: number; cacheWrite: number; maxPromptChars: number;
+  agents: number; activeAgents: number; tasksDone: number; organizationChanges: number;
+};
+
+export function report(store: Store, status: Report["status"], rounds: number, elapsedMs: number): Report {
+  const u = store.get<Record<string, number>>("select coalesce(sum(input),0) input, coalesce(sum(output),0) output, coalesce(sum(cache_read),0) cacheRead, coalesce(sum(cache_write),0) cacheWrite, coalesce(max(prompt_chars),0) maxPromptChars from usage")!;
+  return {
+    status, rounds, modelCalls: Number(store.meta("model_calls")), elapsedMs,
+    input: u.input!, output: u.output!, cacheRead: u.cacheRead!, cacheWrite: u.cacheWrite!, maxPromptChars: u.maxPromptChars!,
+    agents: store.agents().length, activeAgents: store.agents("active").length,
+    tasksDone: store.get<{ n: number }>("select count(*) n from tasks where status = 'done' and kind = 'work'")!.n,
+    organizationChanges: store.get<{ n: number }>("select count(*) n from log where event in ('agent_created', 'agent_dormant', 'agent_woken', 'goal_transferred', 'domain_split', 'domain_merged', 'domain_transferred')")!.n,
+  };
+}
+
+export async function runScheduler(rt: Runtime, maxRounds = 100): Promise<Report> {
+  const { store } = rt;
+  const started = Date.now();
+  for (const a of store.agents()) mirror(rt, a.id);
+  let round = 0;
+  for (; round < maxRounds; round++) {
+    store.reclaimExpired();
+    steer(store);
+    if (store.goal("G0")!.status === "done") return report(store, "done", round, Date.now() - started);
+    if (Number(store.meta("model_calls")) >= store.config.maxModelCalls) return report(store, "budget", round, Date.now() - started);
+
+    // ponytail: single host process assumed; a second process would need a host lease before resuming running episodes
+    const work: [Agent, Task][] = [];
+    for (const agent of store.agents("active")) {
+      if (work.length >= store.config.maxConcurrency) break;
+      const resumable = store.get<Task>("select t.* from episodes e join tasks t on t.id = e.task where e.agent = ? and e.status = 'running' and t.status = 'claimed' and t.claimed_by = e.agent", agent.id);
+      const task = resumable ?? claimable(store, agent);
+      if (task) {
+        work.push([agent, task]);
+        store.run("update agents set idle = 0 where id = ?", agent.id);
+      } else if (store.config.organization === "dynamic" && agent.id !== "lead" && agent.idle + 1 >= store.config.idleRounds) {
+        store.run("update agents set status = 'dormant', idle = 0 where id = ?", agent.id);
+        store.log("host", "agent_dormant", { id: agent.id, reason: "idle" });
+      } else {
+        store.run("update agents set idle = idle + 1 where id = ?", agent.id);
+      }
+    }
+    if (!work.length) {
+      if (unblockVerification(store)) continue;
+      return report(store, "stalled", round, Date.now() - started);
+    }
+
+    // ponytail: rounds wait for the slowest episode; switch to a worker pool if agents' task lengths diverge a lot
+    const results = await Promise.allSettled(work.map(([agent, task]) => runEpisode(rt, agent, task)));
+    for (const [i, r] of results.entries()) {
+      const [agent, task] = work[i]!;
+      if (r.status === "fulfilled") rt.log?.(`[${agent.id}] ${task.id} ${r.value}`);
+      else {
+        if (r.reason instanceof BudgetExhausted) continue;
+        store.log(agent.id, "episode_error", { task: task.id, rev: task.rev, error: String(r.reason) });
+        rt.log?.(`[${agent.id}] ${task.id} error: ${r.reason}`);
+        // Repeated failures on the same claim give the task back instead of retrying forever.
+        const failures = store.get<{ n: number }>("select count(*) n from log where event = 'episode_error' and agent = ? and json_extract(detail, '$.task') = ? and json_extract(detail, '$.rev') = ?", agent.id, task.id, task.rev)!.n;
+        if (failures >= 3) store.tx(() => {
+          store.run("update tasks set status = 'open', claimed_by = null, lease_until = null, feedback = ?, rev = rev + 1 where id = ? and claimed_by = ?", `previous attempt failed: ${String(r.reason).slice(0, 300)}`, task.id, agent.id);
+          store.run("update episodes set status = 'failed' where agent = ? and task = ? and status = 'running'", agent.id, task.id);
+        });
+      }
+    }
+  }
+  return report(store, "rounds", round, Date.now() - started);
 }

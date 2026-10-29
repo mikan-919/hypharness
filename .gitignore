@@ -39,5 +39,5 @@ session.sqlite
 # auth
 auth.json
 
-# agent context mirrors
-contexts/
+# harness state, workspace, and context mirrors
+.hyph/

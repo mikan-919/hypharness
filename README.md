@@ -1,32 +1,58 @@
 # hypharness
 
-To install dependencies:
+最上位の目的を与えると、複数のエージェントが目標・タスク・知識・担当領域・エージェント構成を自分たちで変えながら作業し、検証済みの成果物を作業ディレクトリに残すエージェントハーネス（モデル呼び出し、ツール実行、状態管理を受け持つ実行基盤）です。共有状態の管理（DeLM）と各エージェントの文脈管理（CLM）を分けて実装しています。
+
+## 使い方
+
+`auth.json` に ChatGPT の認証情報がある状態で、目的を渡して起動します。モデルは `OPENAI_MODEL`（既定値 `gpt-6-sol`）、推論の強さは `REASONING`（既定値 `medium`）で指定します。
 
 ```bash
 bun install
+bun run start 'CSVを集計するCLIを書き、テストを通す' --constraints 'TypeScriptのみ' --allow-shell --calls 80
+bun run start --allow-shell --calls 160   # 同じ状態から再開する
+bun run start status                     # 目標・エージェント・使用量を表示する
 ```
 
-Run with an existing `auth.json` and a source text to submit for review:
+状態は `.hyph/state.sqlite`、成果物は `.hyph/workspace/`、各エージェントの文脈の写しは `.hyph/contexts/<agent>.md` に置かれます。別の場所を使う場合は `--dir` を指定します。目的は最初の起動時に固定され、別の目的で同じ状態を開くとエラーになります。
+
+| オプション | 意味 |
+| --- | --- |
+| `--mode single\|fixed\|dynamic` | 組織の形。single は1体、fixed は lead・worker・reviewer の3体で増減なし、dynamic はエージェントが生成・休眠を判断する（既定値） |
+| `--calls N` | モデル呼び出し回数の上限（既定値 200）。状態に保存され、再開時に指定すると上書きされる |
+| `--agents N` / `--concurrency N` | エージェント数と同時実行数の上限 |
+| `--allow-shell` | `shell` ツールを許可する。許可は起動ごとに判断し、指定しない起動では拒否される |
+| `--rounds N` | スケジューラーの巡回回数の上限 |
+| `--check 'cmd'` | 終了後に作業ディレクトリで実行する検査コマンド。終了コードを結果に含める |
+
+## 比較実験
 
 ```bash
-bun run start 'The source text to review.'
+bun run bench 'ToDo管理のCLIを書く' --calls 60 --allow-shell --check 'bun test'
 ```
 
-Run without an argument to resume work in `session.sqlite`. The scheduler stops when no task can be claimed, or after 20 rounds. A claimed task becomes available again after its lease expires. Each agent run has a two-minute timeout; generation requests are capped at 200 per process.
+同じ目的・モデル・呼び出し上限で single、fixed、dynamic を別々の状態で順に実行し、完了状態、最上位目標が独立検証されたか、検査コマンドの終了コード、モデル呼び出し数、入出力トークン数、キャッシュ読み取りトークン数、最大入力文字数、経過時間、エージェント数、組織変更数を `.hyph/bench-<時刻>/report.json` に書きます。モデルの応答は実行ごとに変わるため、結果も実行ごとに変わります。
 
-To initialize an immutable global goal and queue subgoal planning, run `bun run start --goal 'Your goal'`. A later run can omit `--goal` to resume; supplying a different goal for the same session is rejected. Domains hold references to knowledge, not copies. Split, merge, and transfer proposals require an independent review and an atomic apply. Cross-domain hypotheses are recorded as unverified tasks. Analysis is triggered by accumulated knowledge and cross-domain signals; discovery and reorganization have persistent limits.
+## 仕組み
 
-An agent can propose delegating an open `subgoal` or `hypothesis` task to another registered base agent with `agent_delegate`. A claimed task must first be released by its owner. An independent agent reviews the proposal with `organization_review` and applies it with `organization_apply`; revisions are checked again at apply. The scheduler reconciles approved proposals after a restart. Knowledge and administrative review tasks retain their existing role assignments. `organization_propose` can propose a new specialist for an open subgoal with a matching `requiredSpecialty`; it requires a reason existing agents cannot be reused and independent approval. Spawn is limited by the scheduler's organization limits and creates the conversation and context atomically. Dynamic agents receive research and task-management capabilities and may receive domain-management capability for an assigned domain. `agent_handoff` proposes a transfer of open work, goal assignments, and domain stewardship with a bounded summary and verified knowledge IDs; a dynamic steward needs domain-management capability. `agent_consolidate` proposes transferring all of a dynamic agent's responsibilities and retiring it in the same commit. `agent_retire`, `agent_reuse`, and `agent_reassign` propose retirement, resumption, and role changes of dynamic agents. Retirement requires no assigned open or claimed tasks, no running durable work, and no active domain stewardship; base agents are protected. Conversation and context remain stored. `organization_analyze` records a qualitative decision based on open tasks and registered specialties; it reports unavailable utilization and usage data as `null`. An uncovered specialty queues an analysis task, capped at 20 per session.
+**実行の循環。** スケジューラーは巡回ごとに、待ち作業がない未完了の目標を見つけると、その目標の所有者に「次の手を決める」タスク（steer）を割り当てます。所有者は自分で作業する、タスクや下位目標を作る、目標を修正・破棄する、`goal_complete` で提出する、のいずれかを選びます。最初の作業も同じ規則で lead に割り当てられ、計画の手順は固定されていません。最上位目標 G0 の内容は変更できません。
 
-Each agent has a separate persistent context. `context_read` reads bounded portions of another agent's context; context edits and restores affect only the caller. `contexts/<conversation-id>/LIVE_CTX.md` is a generated mirror, not an input file, and is rebuilt on startup. The default context budget is 32768 estimated tokens, with 4096 reserved for output and 4096 for recent history. Set `CLM_MAX_TOKENS` for newly initialized contexts; existing contexts retain their stored budget. Requests over budget fail instead of silently dropping required history. A checkpoint replaces history only when the recorded entry boundary and exact message prefix can be verified; otherwise the history remains intact.
+**検証。** 作業タスクの完了と目標の提出は、提出者以外のエージェントによる検証タスクを生みます。合格するまで完了扱いになりません。dynamic で検証できるエージェントがいない場合は、休眠中のエージェントを起こすか `verifier` を生成します。single では自己検証として `verified_by` に本人が記録されます。知識は常に未検証の仮説として登録され、`knowledge_verify` による検証で verified か rejected になります。
 
-To type check and test without calling an external model:
+**知識。** 知識は Gist（1行）、Summary（短い説明）、Raw（原資料）の3段と出典を持ちます。検索結果は Gist だけを返し、必要なときに `knowledge_get` で展開します。担当領域（domain）は知識への参照だけを持つため、分割・統合・移譲で知識本体は複製も削除もされません。領域の変更は管理者（steward）だけが行えます。
+
+**文脈（CLM）。** 各エージェントは、タスクをまたいで残る作業記憶と、実行中のタスクの文脈（live context）を持ちます。作業記憶は `memory_write` で書き換え、上限（既定値 6000 文字）を超えると拒否されます。旧版は履歴に残り、`memory_restore` で戻せます。実行中の文脈は `context_outline` と `context_edit` で、読み終えた大きな出力などを短い注記に置き換えられ、次の生成から反映されます。置き換え前の文脈は `episode_history` に残ります。他のエージェントの文脈は `context_read` で一部だけ読めますが、編集はできません。他者の動きは自動では入力に挿入されず、`news` で前回の確認以降の差分を要約で取得します。
+
+**入力の大きさ。** システムプロンプトには目的・制約・役割・規則だけを入れ、時刻や件数を入れないため、プロンプトキャッシュ（同じ先頭部分の計算結果をプロバイダーが再利用する仕組み）が効きます。各タスクは作業記憶とタスク説明だけから始まり、1タスクの手数（既定値 16）とツール出力の長さ（既定値 4000 文字）に上限があるため、作業量が増えても1回の入力は一定の範囲に収まります。
+
+**継続と整合性。** すべての状態は SQLite に置かれ、各手番の後に文脈を保存します。タスクの取得は条件付き更新で1体だけが成功し、取得には期限（lease）があり、期限切れは再び取得可能になります。ツール呼び出しは (エピソード, 呼び出しID) ごとに結果を記録し、再開時に記録済みの呼び出しは再実行しません。同じタスクで3回続けてモデルエラーが起きると、タスクを手放します。ファイル操作は作業ディレクトリの外（シンボリックリンク経由を含む）を拒否します。
+
+## 開発
 
 ```bash
-bunx tsrs --noEmit
-bun test
+bun run check   # 型検査
+bun test        # 擬似プロバイダーによる結合テスト（外部モデルを呼ばない）
 ```
 
-To compare the fixed three-agent limit with dynamic organization on the same inputs, run `bun run experiment --goal 'Goal' --task 'First task' --task 'Second task'`. This makes model calls and runs each configuration in a separate in-memory session; it does not open `session.sqlite`. It reports completion counts, elapsed time, request counts, organization changes, and UTF-8 context sizes. Token and cache counts are `null`: the installed provider normalizes missing usage fields to zero, so this entry point cannot distinguish unavailable values from reported zeroes. Results can vary between runs because model responses and service latency vary.
+テストは、目的だけからの計画・実行・独立検証・完了、検証のためだけに組織が変わること、停止後の再開でツールの副作用が重複しないこと、作業量を増やしても入力が増えないこと、作業ディレクトリ外へのパスの拒否を確認します。
 
-This project was created using `bun init` in bun v1.4.4. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
+ホストは1プロセスで動かす前提です。複数プロセスで同じ状態を開くと、実行中エピソードの再開が衝突します。

@@ -15,7 +15,7 @@
 
 ## 実行と検証
 
-- Bun を使う。実行は `bun run start`、開発時は `bun run dev`、型検査は `bun run check`、テストは `bun test`。`README.md` や `CLAUDE.md` と食い違う場合は `package.json` と実際の構成を確認する。
+- Bun を使う。実行は `bun run start`、比較実験は `bun run bench`、型検査は `bun run check`、テストは `bun test`。`README.md` や `CLAUDE.md` と食い違う場合は `package.json` と実際の構成を確認する。
 - OpenSpec は `bunx @fission-ai/openspec` で実行する。依頼に必要な場合を除き、仕様書や計画書を増やさない。
 - 変更に応じて型検査と関連するテストを実行する。新しい振る舞いや不具合の修正には、壊れたときに失敗するテストを必要な分だけ追加する。外部サービスや認証が必要で実行できない検証は、実行できなかった理由とともに報告する。
 - 完了前に差分を読み直し、不要なコード、ファイル、依存関係、秘密情報が混入していないか確認する。実行した検証と結果、未検証の事項を報告する。

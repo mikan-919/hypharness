@@ -1,81 +1,109 @@
-import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
+import { mkdirSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { parseArgs } from "node:util";
+import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { createRegistry, defineExtension, GenerationTask, Harness, hook } from "@earendil-works/pi-durable";
-import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { FileCredentialStore } from "./auth.ts";
-import { AgentPermissionExtension, restoreAgents } from "./agents.ts";
-import { MemoryExtension } from "./tools/memory.ts";
-import { KnowledgeExtension } from "./tools/knowledge.ts";
-import { TaskExtension } from "./tools/tasks.ts";
-import { TaskBoard, addTask, newTask } from "./tasks.ts";
-import { runScheduler } from "./scheduler.ts";
-import { AgentContext, DEFAULT_BUDGET } from "./context/state.ts";
-import { createContextExtension } from "./context/extension.ts";
-import { syncMirror } from "./context/mirror.ts";
-import { DomainExtension } from "./tools/domains.ts";
-import { GoalExtension } from "./tools/goals.ts";
-import { OrganizationExtension } from "./tools/organization.ts";
-import { DomainStore, DEFAULT_DOMAIN, reconcileDomains } from "./domains.ts";
-import { GoalStore, initializeGlobalGoal } from "./goals.ts";
+import { defaultConfig, Store, type Config } from "./db.ts";
+import { report, runScheduler } from "./scheduler.ts";
+import type { Runtime } from "./agent.ts";
 
-const credentials = await FileCredentialStore.open();
-const models = createModels({ credentials });
-models.setProvider(openaiProvider());
-const modelId = process.env.OPENAI_MODEL ?? "gpt-6-sol";
-const maxTokens = Number(process.env.CLM_MAX_TOKENS ?? DEFAULT_BUDGET.maxTokens);
-if (!Number.isSafeInteger(maxTokens) || maxTokens <= DEFAULT_BUDGET.reserveTokens + DEFAULT_BUDGET.keepRecentTokens) throw new Error("Invalid CLM_MAX_TOKENS");
-if (!(await models.getAuth("openai"))) throw new Error("ChatGPTでのログインが必要です");
-if (!models.getModel("openai", modelId)) throw new Error(`未対応のモデル: ${modelId}`);
-const registry = createRegistry();
-registry.install(AgentPermissionExtension);
-registry.install(MemoryExtension);
-registry.install(KnowledgeExtension);
-registry.install(TaskExtension);
-registry.install(DomainExtension);
-registry.install(GoalExtension);
-registry.install(OrganizationExtension);
-let requestCount = 0;
-registry.install(defineExtension({ name: "delm-request-limit", hooks: [hook(GenerationTask, {
-  beforeRequest: () => {
-    if (++requestCount > 200) throw new Error("Model request limit reached");
+const { values: opts, positionals } = parseArgs({
+  allowPositionals: true,
+  options: {
+    dir: { type: "string", default: ".hyph" },
+    constraints: { type: "string", default: "" },
+    mode: { type: "string", default: "dynamic" },
+    calls: { type: "string" },
+    agents: { type: "string" },
+    concurrency: { type: "string" },
+    rounds: { type: "string", default: "100" },
+    "allow-shell": { type: "boolean", default: false },
+    check: { type: "string" },
   },
-})] }));
-const storage = await openNodeSqliteStorage("./session.sqlite");
-const harness = await Harness.open(storage, { models, registry, settings: { stream: { maxRetries: 0 } } }, context);
-registry.install(createContextExtension(harness));
-try {
-  const agents = await restoreAgents(harness, context);
-  await reconcileDomains(harness, context);
-  const args = process.argv.slice(2);
-  const goalIndex = args.indexOf("--goal");
-  if (goalIndex !== -1) {
-    const goal = args[goalIndex + 1];
-    if (!goal) throw new Error("--goal requires a value");
-    await initializeGlobalGoal(harness, goal, context);
-    args.splice(goalIndex, 2);
+});
+
+const int = (v: string | undefined, name: string) => {
+  if (v === undefined) return undefined;
+  const n = Number(v);
+  if (!Number.isSafeInteger(n) || n < 1) throw new Error(`--${name} must be a positive integer`);
+  return n;
+};
+
+async function openModel() {
+  const models = createModels({ credentials: await FileCredentialStore.open() });
+  models.setProvider(openaiProvider());
+  const modelId = process.env.OPENAI_MODEL ?? "gpt-6-sol";
+  if (!(await models.getAuth("openai"))) throw new Error("ChatGPTでのログインが必要です");
+  const model = models.getModel("openai", modelId) ?? (() => { throw new Error(`未対応のモデル: ${modelId}`); })();
+  return { models, model, reasoning: (process.env.REASONING ?? "medium") as ThinkingLevel };
+}
+
+function open(dir: string) {
+  mkdirSync(join(dir, "workspace"), { recursive: true });
+  return { store: new Store(join(dir, "state.sqlite")), workspace: resolve(dir, "workspace"), contextDir: resolve(dir, "contexts") };
+}
+
+function configFor(mode: string): Config {
+  if (mode === "single") return { ...defaultConfig, organization: "single", maxAgents: 1, maxConcurrency: 1 };
+  if (mode === "fixed") return { ...defaultConfig, organization: "fixed", maxAgents: 3 };
+  if (mode === "dynamic") return { ...defaultConfig };
+  throw new Error("--mode must be single, fixed, or dynamic");
+}
+
+// Host-side permissions and budgets come from this run's flags; the purpose and organization mode stay as stored.
+function applyFlags(store: Store, base: Config) {
+  store.setMeta("config", JSON.stringify({
+    ...base, allowShell: opts["allow-shell"],
+    maxModelCalls: int(opts.calls, "calls") ?? base.maxModelCalls,
+    maxAgents: base.organization === "single" ? 1 : int(opts.agents, "agents") ?? base.maxAgents,
+    maxConcurrency: base.organization === "single" ? 1 : int(opts.concurrency, "concurrency") ?? base.maxConcurrency,
+  }));
+}
+
+async function checkWorkspace(workspace: string) {
+  if (!opts.check) return null;
+  const proc = Bun.spawn(["sh", "-c", opts.check], { cwd: workspace, stdout: "inherit", stderr: "inherit" });
+  return await proc.exited;
+}
+
+const [command, ...rest] = positionals;
+const log = (line: string) => console.log(line);
+
+if (command === "status") {
+  const { store } = open(opts.dir!);
+  if (!store.purpose) throw new Error(`No session in ${opts.dir}`);
+  console.log(`purpose: ${store.purpose}`);
+  for (const g of store.all<Record<string, string>>("select * from goals order by created_at")) console.log(`${g.id} [${g.status}] owner=${g.owner}: ${g.description}`);
+  for (const a of store.agents()) console.log(`agent ${a.id} [${a.status}]: ${a.role}`);
+  console.log(JSON.stringify(report(store, "rounds", 0, 0), null, 2));
+} else if (command === "bench") {
+  const purpose = rest.join(" ").trim();
+  if (!purpose) throw new Error("bench requires a purpose");
+  const llm = await openModel();
+  const root = join(opts.dir!, `bench-${Date.now()}`);
+  const results: Record<string, unknown> = {};
+  for (const mode of ["single", "fixed", "dynamic"]) {
+    const env = open(join(root, mode));
+    env.store.init(purpose, opts.constraints!, configFor(mode));
+    applyFlags(env.store, env.store.config);
+    log(`== ${mode}`);
+    const r = await runScheduler({ ...env, ...llm, log }, int(opts.rounds, "rounds"));
+    results[mode] = { ...r, verified: env.store.goal("G0")!.verified_by !== null, checkExit: await checkWorkspace(env.workspace) };
+    env.store.db.close();
   }
-  const goals = await harness.snapshot(GoalStore, context);
-  const globalGoal = goals?.goals.find(g => g.id === goals.globalId);
-  if (globalGoal) await harness.commit(async tx => {
-    const domains = await tx.doc(DomainStore); const domain = domains.domains.find(d => d.id === DEFAULT_DOMAIN && d.status === "active") ?? domains.domains.find(d => d.status === "active");
-    if (domain && !domain.goalIds.includes(globalGoal.id)) { domain.goalIds.push(globalGoal.id); domain.revision++; domain.updatedAt = Date.now(); }
-    const board = await tx.doc(TaskBoard);
-    if (!board.tasks.some(t => t.id === "goal:initial-plan")) addTask(board, newTask({ id: "goal:initial-plan", type: "goal_plan", description: globalGoal.description, role: "author", goalId: globalGoal.id }, Date.now()));
-  }, context);
-  for (const [role, agent] of Object.entries(agents)) {
-    const existing = await harness.snapshot(AgentContext, agent.id, context);
-    if (!existing) await harness.commit(async tx => { (await tx.doc(AgentContext, agent.id)).budget.maxTokens = maxTokens; }, context);
-    await syncMirror(harness, agent.id, context);
-    await agent.configure({ model: { provider: "openai", modelId }, thinkingLevel: "high", instructions: `あなたの役割は ${role} です。最上位目的: ${globalGoal?.description ?? "未設定"}。この目的は変更できません。共有タスクを取得してから処理してください。原資料のない情報を追加せず、検証では根拠を確認してください。文脈は context_read、context_edit、context_history、context_restore、context_checkpoint で管理してください。領域と下位目標の変更は独立した検証を経てください。` }, context);
-  }
-  const raw = args.join(" ").trim();
-  if (raw) await harness.commit(async tx => {
-    const board = await tx.doc(TaskBoard);
-    const id = `author:${crypto.randomUUID()}`;
-    addTask(board, newTask({ id, type: "propose", description: raw, role: "author" }, Date.now()));
-  }, context);
-  console.log(await runScheduler(harness, agents, context));
-} finally {
-  await harness.close(context);
+  await Bun.write(join(root, "report.json"), JSON.stringify(results, null, 2));
+  console.table(results);
+  console.log(`report: ${join(root, "report.json")}`);
+} else {
+  const purpose = [command, ...rest].filter(Boolean).join(" ").trim();
+  const env = open(opts.dir!);
+  if (purpose) env.store.init(purpose, opts.constraints!, configFor(opts.mode!));
+  else if (!env.store.purpose) throw new Error("Give a purpose to start, e.g. bun run start 'Write a CLI that ...'");
+  applyFlags(env.store, env.store.config);
+  const rt: Runtime = { ...env, ...(await openModel()), log };
+  const r = await runScheduler(rt, int(opts.rounds, "rounds"));
+  console.log(JSON.stringify({ ...r, checkExit: await checkWorkspace(env.workspace) }, null, 2));
+  env.store.db.close();
 }
