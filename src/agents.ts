@@ -64,6 +64,7 @@ export async function restoreAgents(harness: Harness, context: Context): Promise
     if (ids.gist_reviewer === root.id || (valid[0] && ids.gist_reviewer === ids.source_reviewer)) valid[1] = false;
     for (const [index, role] of reviewerRoles.entries()) {
       if (valid[index]) continue;
+      if (ids[role] !== undefined) throw new Error(`Registered conversation is missing or duplicated: ${role}`);
       const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
       ids[role] = conversation.id;
     }

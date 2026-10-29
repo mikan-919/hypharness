@@ -119,3 +119,15 @@ test("conversation creation and directory registration roll back together", asyn
     expect((await harness.snapshot(AgentDirectory, context))!.agents!.some(a => a.id === "agent:test")).toBe(false);
   } finally { await harness.close(context); await rm(dir, { recursive: true, force: true }); }
 });
+
+test("restore refuses to replace an existing missing conversation", async () => {
+  const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, context);
+  try {
+    await restoreAgents(harness, context);
+    await harness.commit(async tx => { (await tx.doc(AgentDirectory)).ids.source_reviewer = 999999; }, context);
+    const before = await harness.commit(tx => tx.scanConversations({}, 100), context);
+    await expect(restoreAgents(harness, context)).rejects.toThrow("Registered conversation is missing or duplicated");
+    expect((await harness.snapshot(AgentDirectory, context))!.ids.source_reviewer).toBe(999999);
+    expect((await harness.commit(tx => tx.scanConversations({}, 100), context)).items.map(c => c.id)).toEqual(before.items.map(c => c.id));
+  } finally { await harness.close(context); }
+});
