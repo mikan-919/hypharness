@@ -1,0 +1,21 @@
+{
+  "name": "hypharness",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "check": "tsrs --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "tsrs": "^0.20.1-ts7.1.0-beta"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "^1.4.0",
+    "@earendil-works/pi-ai": "^1.4.0",
+    "@earendil-works/pi-durable": "^1.4.0"
+  }
+}
