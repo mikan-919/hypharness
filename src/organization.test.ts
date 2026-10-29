@@ -242,3 +242,28 @@ test("handoff moves open tasks and domain stewardship without moving context", a
     expect((await harness.snapshot(OrganizationStore, context))!.handoffs!.find(p => p.id === proposal)!.handoffStatus).toBe("committed");
   } finally { await harness.close(context); await rm(dir, { recursive: true, force: true }); }
 });
+
+test("consolidation transfers open work and retains the source conversation and context", async () => {
+  const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, context);
+  try {
+    const agents = await restoreAgents(harness, context);
+    const dynamicId = await harness.commit(async tx => {
+      const directory = await tx.doc(AgentDirectory); const board = await tx.doc(TaskBoard); const organization = await tx.doc(OrganizationStore);
+      const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
+      (await tx.doc(AgentContext, conversation.id)).workingMemory = "preserved source";
+      directory.agents!.push({ id: "agent:dynamic", conversationId: String(conversation.id), name: "worker", role: "research", capabilities: ["research", "task_management"], status: "active", domainIds: [], goalIds: [], parentAgentId: null, createdAt: 0, updatedAt: 0, lastActiveAt: null, revision: 0 });
+      const task = newTask({ id: "dynamic-task", type: "subgoal", role: "author", description: "work" }, 0); task.assignedAgentId = "agent:dynamic"; addTask(board, task);
+      organization.run = { id: "test", round: 0, spawns: 0, roundSpawns: 0, roundChanges: 0, limits: { ...ORGANIZATION_LIMITS } }; return conversation.id;
+    }, context);
+    const call = async (name: string, args: Record<string, unknown>, conversationId: typeof dynamicId) => { const tool = OrganizationExtension.tools!.find(t => t.name === name)!; const api = { conversationId, callId: name, now: () => 100000, commit: harness.commit.bind(harness), snapshot: harness.snapshot.bind(harness) } as unknown as ToolExecutionApi; const result = await tool.execute(args, api, context); const item = result.output?.[0]; return item?.type === "text" ? JSON.parse(item.text) : null; };
+    const target = (await harness.snapshot(AgentDirectory, context))!.agents!.find(a => a.role === "source_reviewer")!;
+    const proposal = await call("agent_consolidate", { toAgentId: target.id, fromRevision: 0, toRevision: target.revision, taskIds: ["dynamic-task"], domainIds: [], goalIds: [], knowledgeIds: [], taskRevisions: { "dynamic-task": 0 }, domainRevisions: {}, goalRevisions: {}, summary: "handoff", reason: "overlap", benefits: "fewer agents", risks: "coordination" }, dynamicId);
+    await call("organization_review", { id: proposal, decision: "start", reason: "review" }, agents.author.id);
+    await call("organization_review", { id: proposal, decision: "approve", reason: "review" }, agents.author.id);
+    await call("organization_apply", { id: proposal }, agents.author.id);
+    expect((await harness.snapshot(AgentDirectory, context))!.agents!.find(a => a.id === "agent:dynamic")!.status).toBe("dormant");
+    expect((await harness.snapshot(TaskBoard, context))!.tasks.find(t => t.id === "dynamic-task")!.assignedAgentId).toBe(target.id);
+    expect((await harness.snapshot(AgentContext, dynamicId, context))!.workingMemory).toBe("preserved source");
+    expect(await harness.conversation(dynamicId, context)).toBeDefined();
+  } finally { await harness.close(context); }
+});

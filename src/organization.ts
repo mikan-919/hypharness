@@ -24,7 +24,7 @@ export type HandoffProposal = {
   taskIds: string[]; domainIds: string[]; goalIds: string[]; knowledgeIds: string[];
   taskRevisions: Record<string, number>; domainRevisions: Record<string, number>; goalRevisions: Record<string, number>;
   summary: string; reason: string; benefits: string; risks: string; review: string; createdAt: number; updatedAt: number;
-  handoffStatus: "proposed" | "committed" | "failed"; completedAt: number | null;
+  handoffStatus: "proposed" | "committed" | "failed"; completedAt: number | null; kind?: "handoff" | "consolidate";
 };
 export const ORGANIZATION_LIMITS = { maxActiveAgents: 6, maxConcurrentAgents: 3, maxSpawnsPerRun: 3, maxSpawnsPerRound: 1, maxOrganizationChangesPerRound: 2, maxOrganizationRounds: 10 };
 export type OrganizationRun = { id: string; round: number; spawns: number; roundSpawns: number; roundChanges: number; limits: typeof ORGANIZATION_LIMITS };

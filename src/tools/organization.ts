@@ -77,7 +77,13 @@ function validateHandoff(directory: Directory, board: Board, domains: DomainStat
   for (const id of p.taskIds) { const task = board.tasks.find(t => t.id === id); if (!task || task.state !== "open" || task.revision !== p.taskRevisions[id] || !canClaimTask(directory, task, Number(from.conversationId)) || !["subgoal", "hypothesis"].includes(task.type) || (!targetBase && task.type !== "subgoal")) throw new Error("Handoff task unavailable or revision conflict"); }
   for (const id of p.domainIds) { const domain = domains.domains.find(d => d.id === id && d.status === "active"); if (!domain || domain.revision !== p.domainRevisions[id] || domain.stewardId !== from.conversationId || !targetBase) throw new Error("Handoff domain unavailable or revision conflict"); }
   for (const id of p.goalIds) { const goal = goals.goals.find(g => g.id === id && g.status === "active"); if (!goal || goal.revision !== p.goalRevisions[id] || !from.goalIds.includes(id)) throw new Error("Handoff goal unavailable or revision conflict"); }
-  if (!p.taskIds.length && !p.domainIds.length && !p.goalIds.length) throw new Error("Empty handoff");
+  if (p.kind === "consolidate") {
+    if (Object.values(directory.ids).some(id => String(id) === from.conversationId)) throw new Error("Base agents are protected");
+    if (!targetBase && !from.capabilities.some(capability => to.capabilities.includes(capability))) throw new Error("Agent roles do not overlap");
+    if (board.tasks.some(task => (task.state === "claimed" && task.owner === from.conversationId) || (task.state === "open" && task.assignedAgentId === from.id && !p.taskIds.includes(task.id)))) throw new Error("Consolidation has unfinished tasks");
+    if (domains.domains.some(domain => domain.status === "active" && domain.stewardId === from.conversationId && !p.domainIds.includes(domain.id))) throw new Error("Consolidation has untransferred domains");
+    if (from.goalIds.some(id => !p.goalIds.includes(id))) throw new Error("Consolidation has untransferred goals");
+  } else if (!p.taskIds.length && !p.domainIds.length && !p.goalIds.length) throw new Error("Empty handoff");
   return { from, to };
 }
 const list = defineTool({ name: "agent_list", description: "List registered agents", parameters: Type.Object({}), execute: async (_a, api, ctx) => output((await api.snapshot(AgentDirectory, ctx))?.agents ?? []) });
@@ -125,17 +131,19 @@ function lifecycleTool(kind: "retire" | "reuse") {
 }
 const retire = lifecycleTool("retire");
 const reuse = lifecycleTool("reuse");
-const handoff = defineTool({ name: "agent_handoff", description: "Propose a handoff of your open tasks and responsibilities; release claimed tasks first", parameters: Type.Object({ toAgentId: id, fromRevision: Type.Integer({ minimum: 0 }), toRevision: Type.Integer({ minimum: 0 }), taskIds: Type.Array(id, { maxItems: 32 }), domainIds: Type.Array(id, { maxItems: 16 }), goalIds: Type.Array(id, { maxItems: 16 }), knowledgeIds: Type.Array(id, { maxItems: 32 }), taskRevisions: Type.Record(id, Type.Integer({ minimum: 0 })), domainRevisions: Type.Record(id, Type.Integer({ minimum: 0 })), goalRevisions: Type.Record(id, Type.Integer({ minimum: 0 })), summary: text, reason: text, benefits: text, risks: text }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
+function handoffTool(kind: "handoff" | "consolidate") { return defineTool({ name: `agent_${kind}`, description: "Propose a handoff of your open tasks and responsibilities; release claimed tasks first", parameters: Type.Object({ toAgentId: id, fromRevision: Type.Integer({ minimum: 0 }), toRevision: Type.Integer({ minimum: 0 }), taskIds: Type.Array(id, { maxItems: 32 }), domainIds: Type.Array(id, { maxItems: 16 }), goalIds: Type.Array(id, { maxItems: 16 }), knowledgeIds: Type.Array(id, { maxItems: 32 }), taskRevisions: Type.Record(id, Type.Integer({ minimum: 0 })), domainRevisions: Type.Record(id, Type.Integer({ minimum: 0 })), goalRevisions: Type.Record(id, Type.Integer({ minimum: 0 })), summary: text, reason: text, benefits: text, risks: text }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
   const directory = await tx.doc(AgentDirectory); const author = identityAny(directory, api.conversationId); const board = await tx.doc(TaskBoard); const domains = await tx.doc(DomainStore); const goals = await tx.doc(GoalStore); const knowledge = await tx.doc(KnowledgeStore); const state = await tx.doc(OrganizationStore); state.handoffs ??= [];
-  const proposalId = `handoff:${api.conversationId}:${api.callId}`; const old = state.handoffs.find(p => p.id === proposalId);
-  if (old) { const { id: _id, author: _author, fromAgentId: _from, reviewer: _reviewer, status: _status, review: _review, createdAt: _created, updatedAt: _updated, handoffStatus: _handoffStatus, completedAt: _completedAt, ...input } = old; if (JSON.stringify(input) !== JSON.stringify(a)) throw new Error("Proposal operation reused"); return proposalId; }
-  const p: HandoffProposal = { id: proposalId, author: author.id, fromAgentId: author.id, reviewer: null, status: "proposed", ...a, review: "", createdAt: api.now(), updatedAt: api.now(), handoffStatus: "proposed", completedAt: null };
+  const proposalId = `${kind}:${api.conversationId}:${api.callId}`; const old = state.handoffs.find(p => p.id === proposalId);
+  if (old) { const { id: _id, author: _author, fromAgentId: _from, reviewer: _reviewer, status: _status, review: _review, createdAt: _created, updatedAt: _updated, handoffStatus: _handoffStatus, completedAt: _completedAt, kind: _kind, ...input } = old; if (JSON.stringify(input) !== JSON.stringify(a)) throw new Error("Proposal operation reused"); return proposalId; }
+  const p: HandoffProposal = { id: proposalId, author: author.id, fromAgentId: author.id, reviewer: null, status: "proposed", ...a, review: "", createdAt: api.now(), updatedAt: api.now(), handoffStatus: "proposed", completedAt: null, kind };
   validateHandoff(directory, board, domains, goals, p); checkChangeBudget(state.run);
   if (p.knowledgeIds.some(id => !knowledge.entries.some(entry => entry.id === id && entry.status === "verified"))) throw new Error("Verified knowledge required");
   const reviewer = (["author", "source_reviewer", "gist_reviewer"] as Role[]).find(role => directory.ids[role] !== undefined && directory.ids[role] !== api.conversationId && directory.agents?.some(agent => agent.conversationId === String(directory.ids[role]) && agent.status === "active"));
   if (!reviewer) throw new Error("Independent reviewer unavailable");
   state.handoffs.push(p); addTask(board, newTask({ id: `review:${proposalId}`, type: "organization_review", description: proposalId, role: reviewer }, api.now())); return proposalId;
-}, ctx)) });
+}, ctx)) }); }
+const handoff = handoffTool("handoff");
+const consolidate = handoffTool("consolidate");
 const status = defineTool({ name: "organization_status", description: "Inspect an organization proposal", parameters: Type.Object({ id }), execute: async (a, api, ctx) => { const state = await api.snapshot(OrganizationStore, ctx); const p = state?.proposals.find(p => p.id === a.id) ?? state?.spawnProposals?.find(p => p.id === a.id) ?? state?.lifecycleProposals?.find(p => p.id === a.id) ?? state?.handoffs?.find(p => p.id === a.id); if (!p) throw new Error("Proposal missing"); return output(p); } });
 const review = defineTool({ name: "organization_review", description: "Independently review a delegation proposal", parameters: Type.Object({ id, decision: Type.Union([Type.Literal("start"), Type.Literal("approve"), Type.Literal("reject")]), reason: text }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
   const directory = await tx.doc(AgentDirectory); const actor = identity(directory, api.conversationId); const state = await tx.doc(OrganizationStore); const spawn = state.spawnProposals?.find(p => p.id === a.id); const lifecycle = state.lifecycleProposals?.find(p => p.id === a.id); const transfer = state.handoffs?.find(p => p.id === a.id); const p = spawn ?? lifecycle ?? transfer ?? state.proposals.find(p => p.id === a.id); if (!p) throw new Error("Proposal missing");
@@ -154,11 +162,19 @@ const apply = defineTool({ name: "organization_apply", description: "Apply an in
   const board = await tx.doc(TaskBoard);
   if (transfer) {
     const domains = await tx.doc(DomainStore); const goals = await tx.doc(GoalStore); const { from, to } = validateHandoff(directory, board, domains, goals, transfer); checkChangeBudget(state.run); const now = api.now();
+    if (transfer.kind === "consolidate") {
+      if (now < from.updatedAt + 60000) throw new Error("Agent is in cooldown");
+      const id = Number(from.conversationId); if (!Number.isSafeInteger(id) || id < 0 || String(id) !== from.conversationId) throw new Error("Invalid conversation ID");
+      for (const status of ["pending", "running", "waiting", "sleeping", "completing"] as const) if ((await tx.scanTasks({ conversationId: id as ConversationId, status }, 1)).items.length) throw new Error("Agent has running durable work");
+      if (state.handoffs?.some(p => p.id !== transfer.id && p.fromAgentId === from.id && ["proposed", "under_review", "approved"].includes(p.status))) throw new Error("Agent has an unfinished handoff");
+    }
     for (const id of transfer.taskIds) { const task = board.tasks.find(t => t.id === id)!; task.assignedAgentId = to.id; touch(task, now); }
     for (const id of transfer.domainIds) { const domain = domains.domains.find(d => d.id === id)!; domain.stewardId = to.conversationId; domain.revision++; domain.updatedAt = now; }
     from.domainIds = from.domainIds.filter(id => !transfer.domainIds.includes(id)); to.domainIds = [...new Set([...to.domainIds, ...transfer.domainIds])];
     from.goalIds = from.goalIds.filter(id => !transfer.goalIds.includes(id)); to.goalIds = [...new Set([...to.goalIds, ...transfer.goalIds])];
-    from.revision++; from.updatedAt = now; to.revision++; to.updatedAt = now; state.run!.roundChanges++; transfer.status = "applied"; transfer.handoffStatus = "committed"; transfer.completedAt = now; transfer.updatedAt = now; return transfer.status;
+    from.revision++; from.updatedAt = now; to.revision++; to.updatedAt = now;
+    if (transfer.kind === "consolidate") { transitionAgent(from, from.revision, "draining", now); transitionAgent(from, from.revision, "dormant", now); }
+    state.run!.roundChanges++; transfer.status = "applied"; transfer.handoffStatus = "committed"; transfer.completedAt = now; transfer.updatedAt = now; return transfer.status;
   }
   if (lifecycle) {
     const agent = validateLifecycle(directory, board, await tx.doc(DomainStore), lifecycle, api.now(), state.handoffs); checkChangeBudget(state.run);
@@ -191,4 +207,4 @@ const apply = defineTool({ name: "organization_apply", description: "Apply an in
   task.assignedAgentId = delegation.targetAgentId; touch(task, api.now()); if (state.run) state.run.roundChanges++; delegation.status = "applied"; delegation.updatedAt = api.now(); return delegation.status;
 }, ctx)) });
 const spawn = defineTool({ name: "agent_spawn", description: "Apply an independently approved organization proposal", parameters: Type.Object({ id }), replay: "safe", execute: apply.execute });
-export const OrganizationExtension = defineExtension({ name: "delm-organization", tools: [list, inspect, analyze, propose, spawnPropose, retire, reuse, handoff, status, review, apply, spawn] });
+export const OrganizationExtension = defineExtension({ name: "delm-organization", tools: [list, inspect, analyze, propose, spawnPropose, retire, reuse, handoff, consolidate, status, review, apply, spawn] });

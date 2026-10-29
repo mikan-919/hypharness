@@ -34,7 +34,7 @@ export function canClaimTask(directory: { ids: Partial<Record<Role, number>>; ag
 // Base roles retain their existing tool-specific authorization; dynamic agents use an explicit allowlist.
 const dynamicTools: Record<string, string[]> = {
   research: ["memory_search", "memory_publish", "knowledge_search", "knowledge_unfold", "domain_list", "domain_inspect", "goal_list", "goal_inspect", "agent_list", "agent_inspect", "organization_status"],
-  task_management: ["task_discover", "task_claim", "task_heartbeat", "task_release", "task_finish", "task_status", "agent_handoff"],
+  task_management: ["task_discover", "task_claim", "task_heartbeat", "task_release", "task_finish", "task_status", "agent_handoff", "agent_consolidate"],
 };
 const ownContextTools = ["context_read", "context_edit", "context_history", "context_restore", "context_checkpoint"];
 export function canUseTool(directory: { ids: Partial<Record<Role, number>>; agents?: AgentRecord[] }, conversationId: number, tool: string): boolean {
