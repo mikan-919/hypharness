@@ -38,3 +38,6 @@ session.sqlite
 
 # auth
 auth.json
+
+# agent context mirrors
+contexts/
