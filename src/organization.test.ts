@@ -224,7 +224,7 @@ test("approved spawn is atomic, idempotent and discoverable by scheduler", async
     await initializeGlobalGoal(harness, "fixed goal", context);
     let now = 1000;
     await harness.commit(async tx => {
-      addTask(await tx.doc(TaskBoard), newTask({ id: "specialized", type: "subgoal", role: "author", description: "specialized work", goalId: "goal:global", requiredSpecialty: "specialist" }, 0));
+      addTask(await tx.doc(TaskBoard), newTask({ id: "specialized", type: "subgoal", role: "author", description: "specialized work", requiredSpecialty: "specialist" }, 0));
       (await tx.doc(OrganizationStore)).run = { id: "test-run", round: 0, spawns: 0, roundSpawns: 0, roundChanges: 0, limits: { ...ORGANIZATION_LIMITS } };
     }, context);
     const call = async (name: string, args: Record<string, unknown>, agent = agents.author, callId = name) => {
@@ -232,7 +232,7 @@ test("approved spawn is atomic, idempotent and discoverable by scheduler", async
       const api = { conversationId: agent.id, callId, now: () => now, commit: harness.commit.bind(harness), snapshot: harness.snapshot.bind(harness) } as unknown as ToolExecutionApi;
       const result = await tool.execute(args, api, context); const item = result.output?.[0]; return item?.type === "text" ? JSON.parse(item.text) : null;
     };
-    const args = { name: "specialist", role: "specialist", capabilities: ["research", "task_management"], initialGoalIds: ["goal:global"], initialDomainIds: [], taskId: "specialized", taskRevision: 0, goalRevisions: { "goal:global": 0 }, domainRevisions: {}, reason: "specialist needed", reuseReason: "no specialist", benefits: "specialization", costs: "model calls", risks: "coordination" };
+    const args = { name: "specialist", role: "specialist", capabilities: ["research", "task_management"], initialGoalIds: [], initialDomainIds: [], taskId: "specialized", taskRevision: 0, goalRevisions: {}, domainRevisions: {}, reason: "specialist needed", reuseReason: "no specialist", benefits: "specialization", costs: "model calls", risks: "coordination" };
     const proposal = await call("organization_propose", args);
     expect(await call("organization_propose", args)).toBe(proposal);
     await expect(call("agent_spawn", { id: proposal })).rejects.toThrow("Independent approval required");
@@ -256,6 +256,9 @@ test("approved spawn is atomic, idempotent and discoverable by scheduler", async
     const lifecycle = { agentId: agent.id, agentRevision: agent.revision, reason: "work complete", benefits: "fewer calls", risks: "restart" };
     await expect(call("agent_retire", lifecycle)).rejects.toThrow("Agent has unfinished tasks");
     await harness.commit(async tx => { const task = (await tx.doc(TaskBoard)).tasks.find(t => t.id === "specialized")!; task.state = "completed"; (await tx.doc(AgentContext, Number(agent.conversationId) as typeof agents.author.id)).workingMemory = "retained"; }, context);
+    await harness.commit(async tx => { (await tx.doc(AgentDirectory)).agents!.find(a => a.id === agent.id)!.goalIds.push("goal:global"); }, context);
+    await expect(call("agent_retire", lifecycle)).rejects.toThrow("Agent has active goal assignments");
+    await harness.commit(async tx => { (await tx.doc(AgentDirectory)).agents!.find(a => a.id === agent.id)!.goalIds = []; }, context);
     const retirement = await call("agent_retire", lifecycle);
     await call("organization_review", { id: retirement, decision: "start", reason: "review" }, agents.source_reviewer);
     await call("organization_review", { id: retirement, decision: "approve", reason: "review" }, agents.source_reviewer);

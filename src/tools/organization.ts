@@ -66,12 +66,14 @@ function validateLifecycle(directory: Directory, board: Board, domains: DomainSt
     if (board.tasks.some(task => (task.state === "open" && task.assignedAgentId === agent.id) || (task.state === "claimed" && task.owner === agent.conversationId))) throw new OrganizationConflict("Agent has unfinished tasks");
     if (handoffs.some(p => p.fromAgentId === agent.id && ["proposed", "under_review", "approved"].includes(p.status))) throw new OrganizationConflict("Agent has an unfinished handoff");
     if (domains.domains.some(domain => domain.status === "active" && domain.stewardId === agent.conversationId)) throw new OrganizationConflict("Agent is a domain steward");
+    if (agent.goalIds.some(id => goals?.goals.some(goal => goal.id === id && goal.status === "active"))) throw new OrganizationConflict("Agent has active goal assignments");
   } else if (proposal.kind === "reuse") { if (agent.status !== "dormant") throw new OrganizationConflict("Dormant agent required"); }
   else {
     if (agent.status !== "active" || !proposal.newRole?.trim() || proposal.newRole === agent.role) throw new OrganizationConflict("Invalid role reassignment");
     if (directory.agents?.some(other => other.id !== agent.id && ["active", "dormant"].includes(other.status) && other.role.trim().toLowerCase() === proposal.newRole!.trim().toLowerCase())) throw new OrganizationConflict("Existing agent can be reused for this role");
     if (board.tasks.some(task => (task.state === "claimed" && task.owner === agent.conversationId) || (task.state === "open" && task.assignedAgentId === agent.id && task.requiredSpecialty && task.requiredSpecialty.trim().toLowerCase() !== proposal.newRole!.trim().toLowerCase()))) throw new OrganizationConflict("Agent has incompatible tasks");
     if (!goals?.globalId || !proposal.goalRevisions || !proposal.domainRevisions) throw new OrganizationConflict("Goal and domain revisions required");
+    if (!goals.goals.some(goal => goal.id === goals.globalId && goal.status === "active" && goal.revision === proposal.goalRevisions![goals.globalId!])) throw new OrganizationConflict("Global goal revision conflict");
     for (const [id, revision] of Object.entries(proposal.goalRevisions)) if (!goals.goals.some(goal => goal.id === id && goal.status === "active" && goal.revision === revision)) throw new OrganizationConflict("Goal revision conflict");
     for (const [id, revision] of Object.entries(proposal.domainRevisions)) if (!domains.domains.some(domain => domain.id === id && domain.status === "active" && domain.revision === revision)) throw new OrganizationConflict("Domain revision conflict");
   }
@@ -91,7 +93,7 @@ function validateHandoff(directory: Directory, board: Board, domains: DomainStat
     if (!targetBase && !from.capabilities.some(capability => to.capabilities.includes(capability))) throw new OrganizationConflict("Agent roles do not overlap");
     if (board.tasks.some(task => (task.state === "claimed" && task.owner === from.conversationId) || (task.state === "open" && task.assignedAgentId === from.id && !p.taskIds.includes(task.id)))) throw new OrganizationConflict("Consolidation has unfinished tasks");
     if (domains.domains.some(domain => domain.status === "active" && domain.stewardId === from.conversationId && !p.domainIds.includes(domain.id))) throw new OrganizationConflict("Consolidation has untransferred domains");
-    if (from.goalIds.some(id => !p.goalIds.includes(id))) throw new OrganizationConflict("Consolidation has untransferred goals");
+    if (from.goalIds.some(id => goals.goals.some(goal => goal.id === id && goal.status === "active") && !p.goalIds.includes(id))) throw new OrganizationConflict("Consolidation has untransferred goals");
   } else if (!p.taskIds.length && !p.domainIds.length && !p.goalIds.length) throw new OrganizationConflict("Empty handoff");
   return { from, to };
 }
@@ -145,7 +147,7 @@ function lifecycleTool(kind: "retire" | "reuse" | "reassign") {
     if (old) { if (JSON.stringify([old.agentId, old.agentRevision, old.newRole, old.reason, old.benefits, old.risks]) !== JSON.stringify([a.agentId, a.agentRevision, a.newRole, a.reason, a.benefits, a.risks])) throw new Error("Proposal operation reused"); return proposalId; }
     if (kind !== "reassign" && a.newRole !== undefined) throw new Error("Role is only valid for reassignment");
     const p: LifecycleProposal = { id: proposalId, operationId: `apply:${proposalId}`, estimatedCost: null, author: author.id, reviewer: null, status: "proposed", kind, ...a, review: "", createdAt: api.now(), updatedAt: api.now() };
-    if (kind === "reassign") { const target = directory.agents?.find(agent => agent.id === p.agentId); if (!target || !goals.globalId) throw new Error("Agent and global goal required"); p.goalRevisions = Object.fromEntries([...new Set([goals.globalId, ...target.goalIds])].map(id => { const goal = goals.goals.find(g => g.id === id && g.status === "active"); if (!goal) throw new Error("Active goal missing"); return [id, goal.revision]; })); p.domainRevisions = Object.fromEntries(target.domainIds.map(id => { const domain = domains.domains.find(d => d.id === id && d.status === "active"); if (!domain) throw new Error("Active domain missing"); return [id, domain.revision]; })); }
+    if (kind === "reassign") { const target = directory.agents?.find(agent => agent.id === p.agentId); if (!target || !goals.globalId) throw new Error("Agent and global goal required"); p.goalRevisions = Object.fromEntries(goals.goals.filter(goal => goal.status === "active" && (goal.id === goals.globalId || target.goalIds.includes(goal.id))).map(goal => [goal.id, goal.revision])); p.domainRevisions = Object.fromEntries(domains.domains.filter(domain => domain.status === "active" && target.domainIds.includes(domain.id)).map(domain => [domain.id, domain.revision])); }
     validateLifecycle(directory, board, domains, p, api.now(), state.handoffs, goals); checkChangeBudget(state.run); if (kind === "reuse") checkCapacity(directory, state.run!);
     const reviewer = (["author", "source_reviewer", "gist_reviewer"] as Role[]).find(role => directory.ids[role] !== undefined && directory.ids[role] !== api.conversationId && directory.agents?.some(agent => agent.conversationId === String(directory.ids[role]) && agent.status === "active"));
     if (!reviewer) throw new Error("Independent reviewer unavailable");
@@ -214,8 +216,8 @@ const apply = defineTool({ name: "organization_apply", description: "Apply an in
     else if (lifecycle.kind === "reuse") { transitionAgent(agent, agent.revision, "recovering", api.now()); transitionAgent(agent, agent.revision, "active", api.now()); }
     else {
       const global = goals.goals.find(goal => goal.id === goals.globalId)!;
-      const summary = agent.domainIds.map(id => { const domain = domains.domains.find(d => d.id === id)!; return `${domain.name}: ${domain.description.slice(0, 300)}`; }).join("; ");
-      const subgoals = agent.goalIds.map(id => goals.goals.find(g => g.id === id)!.description.slice(0, 300)).join("; ");
+      const summary = domains.domains.filter(domain => domain.status === "active" && agent.domainIds.includes(domain.id)).map(domain => `${domain.name}: ${domain.description.slice(0, 300)}`).join("; ");
+      const subgoals = goals.goals.filter(goal => goal.status === "active" && agent.goalIds.includes(goal.id)).map(goal => goal.description.slice(0, 300)).join("; ");
       await configure(tx, Number(agent.conversationId) as ConversationId, { instructions: `最上位目的: ${global.description}\n役割: ${lifecycle.newRole}\n領域: ${summary}\n下位目標: ${subgoals}\n共有記憶と知識を参照し、タスクを取得してから作業する。最上位目的を変更しない。` });
       agent.role = lifecycle.newRole!; agent.revision++; agent.updatedAt = api.now();
     }
