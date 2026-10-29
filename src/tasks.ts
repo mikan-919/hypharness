@@ -8,6 +8,7 @@ export type BoardTask = {
   parent: string | null; dependencies: string[]; knowledgeId: string | null;
   result: string | null; createdAt: number; updatedAt: number;
   goalId?: string;
+  assignedAgentId?: string;
 };
 export type Board = { tasks: BoardTask[]; operations: Record<string, { fingerprint: string; result: string }> };
 export const TaskBoard = defineDoc<Board>({

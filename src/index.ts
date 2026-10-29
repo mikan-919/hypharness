@@ -15,6 +15,7 @@ import { createContextExtension } from "./context/extension.ts";
 import { syncMirror } from "./context/mirror.ts";
 import { DomainExtension } from "./tools/domains.ts";
 import { GoalExtension } from "./tools/goals.ts";
+import { OrganizationExtension } from "./tools/organization.ts";
 import { DomainStore, DEFAULT_DOMAIN, reconcileDomains } from "./domains.ts";
 import { GoalStore, initializeGlobalGoal } from "./goals.ts";
 
@@ -32,6 +33,7 @@ registry.install(KnowledgeExtension);
 registry.install(TaskExtension);
 registry.install(DomainExtension);
 registry.install(GoalExtension);
+registry.install(OrganizationExtension);
 let requestCount = 0;
 registry.install(defineExtension({ name: "delm-request-limit", hooks: [hook(GenerationTask, {
   beforeRequest: () => {

@@ -24,6 +24,12 @@ export const AgentDirectory = defineDoc<{ ids: Partial<Record<Role, number>>; ag
   initial: () => ({ ids: {} }), checkpointWhen: () => false,
 });
 
+export function canClaimTask(directory: { ids: Partial<Record<Role, number>>; agents?: AgentRecord[] }, task: { role: Role; assignedAgentId?: string }, conversationId: number): boolean {
+  const agent = directory.agents?.find(a => a.conversationId === String(conversationId));
+  if (agent && agent.status !== "active") return false;
+  return task.assignedAgentId ? agent?.id === task.assignedAgentId : directory.ids[task.role] === conversationId;
+}
+
 export async function restoreAgents(harness: Harness, context: Context): Promise<Record<Role, Conversation>> {
   const root = await harness.root(context);
   await harness.commit(async (tx) => {

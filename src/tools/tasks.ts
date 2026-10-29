@@ -1,9 +1,10 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { AgentDirectory, type Role } from "../agents.ts";
+import { AgentDirectory, canClaimTask, type Role } from "../agents.ts";
 import { TaskBoard, addTask, checkCycles, newTask, operation, owned, ready, touch } from "../tasks.ts";
 import { DomainStore } from "../domains.ts";
 import { GoalStore } from "../goals.ts";
+import { OrganizationStore } from "../organization.ts";
 
 const roleSchema = Type.Union([Type.Literal("author"), Type.Literal("source_reviewer"), Type.Literal("gist_reviewer")]);
 const text = Type.String({ minLength: 1, maxLength: 12000 });
@@ -19,14 +20,13 @@ const create = defineTool({ name: "task_create", description: "Create a task wit
 }, context)) });
 const discover = defineTool({ name: "task_discover", description: "Find tasks available to your role", parameters: Type.Object({}), execute: async (_args, api, context) => {
   const directory = await api.snapshot(AgentDirectory, context); const board = await api.snapshot(TaskBoard, context);
-  const role = Object.entries(directory?.ids ?? {}).find(([, id]) => id === api.conversationId)?.[0];
-  if (!role) throw new Error("Unregistered agent");
-  return output((board?.tasks ?? []).filter(t => t.role === role && ready(board!, t, api.now())));
+  if (!directory || !Object.values(directory.ids).includes(api.conversationId)) throw new Error("Unregistered agent");
+  return output((board?.tasks ?? []).filter(t => canClaimTask(directory, t, api.conversationId) && ready(board!, t, api.now())));
 } });
 const claimTool = defineTool({ name: "task_claim", description: "Claim an available task using its current revision", parameters: Type.Object({ id: text, revision: Type.Integer({ minimum: 0 }), leaseMs: lease, operationId: text }), replay: "safe", execute: async (args, api, context) => output(await api.commit(async tx => {
   const directory = await tx.doc(AgentDirectory); const board = await tx.doc(TaskBoard); const now = api.now();
   return operation(board, `${api.conversationId}:${args.operationId}`, JSON.stringify(["claim", args]), () => {
-    const task = board.tasks.find(t => t.id === args.id); if (!task || directory.ids[task.role] !== api.conversationId || task.revision !== args.revision || !ready(board, task, now)) throw new Error("Task unavailable");
+    const task = board.tasks.find(t => t.id === args.id); if (!task || !canClaimTask(directory, task, api.conversationId) || task.revision !== args.revision || !ready(board, task, now)) throw new Error("Task unavailable");
     task.state = "claimed"; task.owner = String(api.conversationId); task.token = crypto.randomUUID(); task.leaseUntil = now + args.leaseMs; touch(task, now); return JSON.stringify(task);
   });
 }, context)) });
@@ -43,6 +43,7 @@ const finish = defineTool({ name: "task_finish", description: "Finish a current 
   const current = board.tasks.find(t => t.id === args.id);
   if (current && !args.failed && current.type === "domain_review") { const proposals = await tx.doc(DomainStore); const proposal = proposals.proposals.find(p => p.id === current.description); if (!proposal || (proposal.status !== "applied" && proposal.status !== "rejected")) throw new Error("Domain review is not resolved"); }
   if (current && !args.failed && current.type === "goal_review") { const proposals = await tx.doc(GoalStore); const proposal = proposals.proposals.find(p => p.id === current.description); if (!proposal || (proposal.status !== "applied" && proposal.status !== "rejected")) throw new Error("Goal review is not resolved"); }
+  if (current && !args.failed && current.type === "organization_review") { const proposals = await tx.doc(OrganizationStore); const proposal = proposals.proposals.find(p => p.id === current.description); if (!proposal || (proposal.status !== "applied" && proposal.status !== "rejected")) throw new Error("Organization review is not resolved"); }
   if (current && !args.failed && current.type === "discovery_feedback") { const domains = await tx.doc(DomainStore); const discovery = domains.discoveries.find(d => d.id === current.description); if (!discovery || discovery.outcome === "pending") throw new Error("Discovery outcome is not recorded"); }
   return operation(board, `${api.conversationId}:${args.operationId}`, JSON.stringify(["finish", args]), () => { const task = board.tasks.find(t => t.id === args.id); if (!task) throw new Error("Task missing"); owned(task, String(api.conversationId), args.token, args.revision, now); if (!args.failed && (task.type.startsWith("review_") || task.type === "propose")) throw new Error("Finish knowledge tasks using the knowledge tools"); task.state = args.failed ? "failed" : "completed"; task.result = args.result; task.token = null; task.leaseUntil = null; touch(task, now); return JSON.stringify(task); });
 }, context)) });
