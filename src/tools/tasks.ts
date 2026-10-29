@@ -20,7 +20,7 @@ const create = defineTool({ name: "task_create", description: "Create a task wit
 }, context)) });
 const discover = defineTool({ name: "task_discover", description: "Find tasks available to your role", parameters: Type.Object({}), execute: async (_args, api, context) => {
   const directory = await api.snapshot(AgentDirectory, context); const board = await api.snapshot(TaskBoard, context);
-  if (!directory || !Object.values(directory.ids).includes(api.conversationId)) throw new Error("Unregistered agent");
+  if (!directory?.agents?.some(agent => agent.conversationId === String(api.conversationId))) throw new Error("Unregistered agent");
   return output((board?.tasks ?? []).filter(t => canClaimTask(directory, t, api.conversationId) && ready(board!, t, api.now())));
 } });
 const claimTool = defineTool({ name: "task_claim", description: "Claim an available task using its current revision", parameters: Type.Object({ id: text, revision: Type.Integer({ minimum: 0 }), leaseMs: lease, operationId: text }), replay: "safe", execute: async (args, api, context) => output(await api.commit(async tx => {

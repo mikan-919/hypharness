@@ -1,5 +1,5 @@
 import type { Context } from "@earendil-works/chord";
-import { defineDoc, type Conversation, type ConversationId, type Harness } from "@earendil-works/pi-durable";
+import { defineDoc, defineExtension, hook, ToolTask, type Conversation, type ConversationId, type Harness } from "@earendil-works/pi-durable";
 
 export type Role = "author" | "source_reviewer" | "gist_reviewer";
 export const roles: Role[] = ["author", "source_reviewer", "gist_reviewer"];
@@ -27,8 +27,29 @@ export const AgentDirectory = defineDoc<{ ids: Partial<Record<Role, number>>; ag
 export function canClaimTask(directory: { ids: Partial<Record<Role, number>>; agents?: AgentRecord[] }, task: { role: Role; assignedAgentId?: string }, conversationId: number): boolean {
   const agent = directory.agents?.find(a => a.conversationId === String(conversationId));
   if (agent && agent.status !== "active") return false;
+  if (!Object.values(directory.ids).includes(conversationId) && !agent?.capabilities.includes("task_management")) return false;
   return task.assignedAgentId ? agent?.id === task.assignedAgentId : directory.ids[task.role] === conversationId;
 }
+
+// Base roles retain their existing tool-specific authorization; dynamic agents use an explicit allowlist.
+const dynamicTools: Record<string, string[]> = {
+  research: ["memory_search", "memory_publish", "knowledge_search", "knowledge_unfold", "domain_list", "domain_inspect", "goal_list", "goal_inspect"],
+  task_management: ["task_discover", "task_claim", "task_heartbeat", "task_release", "task_finish", "task_status"],
+};
+const ownContextTools = ["context_read", "context_edit", "context_history", "context_restore", "context_checkpoint"];
+export function canUseTool(directory: { ids: Partial<Record<Role, number>>; agents?: AgentRecord[] }, conversationId: number, tool: string): boolean {
+  const agent = directory.agents?.find(a => a.conversationId === String(conversationId));
+  if (!agent || !["active", "draining"].includes(agent.status)) return false;
+  if (Object.values(directory.ids).includes(conversationId)) return true;
+  if (ownContextTools.includes(tool)) return true;
+  return agent.capabilities.some(capability => dynamicTools[capability]?.includes(tool));
+}
+export const AgentPermissionExtension = defineExtension({ name: "delm-agent-permissions", hooks: [hook(ToolTask, {
+  beforeTool: async (call, api, context) => {
+    const directory = await api.snapshot(AgentDirectory, context);
+    if (!directory || !canUseTool(directory, api.conversationId, call.name)) return { block: "Agent is not authorized to use this tool" };
+  },
+})] });
 
 export async function restoreAgents(harness: Harness, context: Context): Promise<Record<Role, Conversation>> {
   const root = await harness.root(context);

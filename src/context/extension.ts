@@ -13,7 +13,9 @@ const output = (data: unknown) => ({ output: [{ type: "text" as const, text: JSO
 export function createContextExtension(harness: Harness, mirrorRoot = "contexts") {
   const read = defineTool({ name: "context_read", description: "Read a bounded section of an agent context", parameters: Type.Object({ agentId: Type.Integer({ minimum: 0 }), section: Type.Optional(Type.Union([Type.Literal("workingMemory"), Type.Literal("checkpoint")])), maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 4096 })), offset: Type.Optional(Type.Integer({ minimum: 0 })) }), execute: async (args, api, context) => {
     const directory = await api.snapshot(AgentDirectory, context);
-    if (!Object.values(directory?.ids ?? {}).includes(args.agentId)) throw new Error("Unknown agent");
+    const callerIsBase = Object.values(directory?.ids ?? {}).includes(api.conversationId);
+    if (!callerIsBase && args.agentId !== api.conversationId) throw new Error("Dynamic agents can only read their own context");
+    if (!directory?.agents?.some(agent => agent.conversationId === String(args.agentId))) throw new Error("Unknown agent");
     const state = await api.snapshot(AgentContext, args.agentId as ConversationId, context);
     if (!state) throw new Error("Context not initialized");
     const text = args.section === "checkpoint" ? state.checkpoint.summary : state.workingMemory;

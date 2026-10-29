@@ -4,7 +4,7 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { createRegistry, defineExtension, GenerationTask, Harness, hook } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { FileCredentialStore } from "./auth.ts";
-import { restoreAgents } from "./agents.ts";
+import { AgentPermissionExtension, restoreAgents } from "./agents.ts";
 import { MemoryExtension } from "./tools/memory.ts";
 import { KnowledgeExtension } from "./tools/knowledge.ts";
 import { TaskExtension } from "./tools/tasks.ts";
@@ -28,6 +28,7 @@ if (!Number.isSafeInteger(maxTokens) || maxTokens <= DEFAULT_BUDGET.reserveToken
 if (!(await models.getAuth("openai"))) throw new Error("ChatGPTでのログインが必要です");
 if (!models.getModel("openai", modelId)) throw new Error(`未対応のモデル: ${modelId}`);
 const registry = createRegistry();
+registry.install(AgentPermissionExtension);
 registry.install(MemoryExtension);
 registry.install(KnowledgeExtension);
 registry.install(TaskExtension);

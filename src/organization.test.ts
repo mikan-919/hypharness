@@ -1,16 +1,44 @@
 import { expect, test } from "bun:test";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, Harness, MemoryStorage, type ToolExecutionApi } from "@earendil-works/pi-durable";
+import { createRegistry, Harness, MemoryStorage, type HookApi, type ToolHookCall, type ToolHooks, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentDirectory, restoreAgents } from "./agents.ts";
+import { AgentDirectory, AgentPermissionExtension, canClaimTask, canUseTool, restoreAgents, type AgentRecord } from "./agents.ts";
 import { TaskBoard, addTask, newTask } from "./tasks.ts";
 import { OrganizationExtension } from "./tools/organization.ts";
 import { TaskExtension } from "./tools/tasks.ts";
 import { runScheduler } from "./scheduler.ts";
+
+test("dynamic permissions are bound to the registered conversation and deny unknown capabilities", () => {
+  const agent: AgentRecord = { id: "dynamic", conversationId: "42", name: "researcher", role: "researcher", capabilities: ["research"], status: "active", domainIds: [], goalIds: [], parentAgentId: null, createdAt: 0, updatedAt: 0, lastActiveAt: null, revision: 0 };
+  const directory = { ids: {}, agents: [agent] };
+  expect(canUseTool(directory, 42, "knowledge_search")).toBe(true);
+  expect(canUseTool(directory, 42, "organization_review")).toBe(false);
+  expect(canUseTool(directory, 43, "knowledge_search")).toBe(false);
+  expect(canClaimTask(directory, { role: "author", assignedAgentId: agent.id }, 42)).toBe(false);
+  agent.capabilities.push("unknown_permission");
+  expect(canUseTool(directory, 42, "organization_review")).toBe(false);
+  agent.capabilities.push("task_management");
+  expect(canClaimTask(directory, { role: "author", assignedAgentId: agent.id }, 42)).toBe(true);
+  agent.status = "draining";
+  expect(canClaimTask(directory, { role: "author", assignedAgentId: agent.id }, 42)).toBe(false);
+});
+
+test("tool hook blocks unregistered and unauthorized conversations", async () => {
+  const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, context);
+  try {
+    const agents = await restoreAgents(harness, context);
+    const hook = AgentPermissionExtension.hooks![0]!.handlers as ToolHooks;
+    const api = { conversationId: agents.author.id, snapshot: harness.snapshot.bind(harness) } as unknown as HookApi;
+    const call = { name: "knowledge_search" } as ToolHookCall;
+    expect(await hook.beforeTool(call, api, context)).toBeUndefined();
+    const missing = { ...api, conversationId: 999999 as typeof agents.author.id } as HookApi;
+    expect(await hook.beforeTool(call, missing, context)).toEqual({ block: "Agent is not authorized to use this tool" });
+  } finally { await harness.close(context); }
+});
 
 test("delegation requires independent approval, preserves claims, and assigns a new token", async () => {
   const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, context);
