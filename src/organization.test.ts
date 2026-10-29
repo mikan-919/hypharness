@@ -61,6 +61,16 @@ test("tool hook blocks unregistered and unauthorized conversations", async () =>
   } finally { await harness.close(context); }
 });
 
+test("base agents cannot be retired", async () => {
+  const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, context);
+  try {
+    const agents = await restoreAgents(harness, context); const directory = (await harness.snapshot(AgentDirectory, context))!; const target = directory.agents!.find(a => a.role === "source_reviewer")!;
+    const tool = OrganizationExtension.tools!.find(t => t.name === "agent_retire")!;
+    const api = { conversationId: agents.author.id, callId: "retire-base", now: () => Date.now() + 60001, commit: harness.commit.bind(harness) } as unknown as ToolExecutionApi;
+    await expect(tool.execute({ agentId: target.id, agentRevision: target.revision, reason: "retire", benefits: "capacity", risks: "review" }, api, context)).rejects.toThrow("Base agents are protected");
+  } finally { await harness.close(context); }
+});
+
 test("delegation requires independent approval, preserves claims, and assigns a new token", async () => {
   const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, context);
   try {
@@ -224,11 +234,13 @@ test("approved spawn is atomic, idempotent and discoverable by scheduler", async
     };
     const args = { name: "specialist", role: "specialist", capabilities: ["research", "task_management"], initialGoalIds: ["goal:global"], initialDomainIds: [], taskId: "specialized", taskRevision: 0, goalRevisions: { "goal:global": 0 }, domainRevisions: {}, reason: "specialist needed", reuseReason: "no specialist", benefits: "specialization", costs: "model calls", risks: "coordination" };
     const proposal = await call("organization_propose", args);
+    expect(await call("organization_propose", args)).toBe(proposal);
     await expect(call("agent_spawn", { id: proposal })).rejects.toThrow("Independent approval required");
     await call("organization_review", { id: proposal, decision: "start", reason: "review" }, agents.source_reviewer);
     await call("organization_review", { id: proposal, decision: "approve", reason: "review" }, agents.source_reviewer);
     expect(await call("agent_spawn", { id: proposal })).toBe("applied");
     expect(await call("agent_spawn", { id: proposal })).toBe("applied");
+    expect(await call("organization_propose", args)).toBe(proposal);
     const directory = await harness.snapshot(AgentDirectory, context); const agent = directory!.agents!.find(a => a.id === `agent:${proposal}`)!;
     expect(agent.status).toBe("active");
     expect((await harness.snapshot(OrganizationStore, context))!.run!.spawns).toBe(1);

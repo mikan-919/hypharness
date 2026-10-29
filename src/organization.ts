@@ -5,12 +5,14 @@ export class OrganizationDeferred extends Error {}
 
 export type DelegationProposal = {
   id: string; author: string; reviewer: string | null; taskId: string; taskRevision: number;
+  operationId?: string; estimatedCost?: string | null;
   targetAgentId: string; targetRevision: number; reason: string; benefits: string; risks: string;
   status: "proposed" | "under_review" | "approved" | "rejected" | "applied";
   review: string; createdAt: number; updatedAt: number;
 };
 export type SpawnProposal = {
   id: string; author: string; reviewer: string | null; status: "proposed" | "under_review" | "approved" | "rejected" | "applied";
+  operationId?: string; estimatedCost?: string | null;
   name: string; role: string; capabilities: string[]; initialGoalIds: string[]; initialDomainIds: string[];
   taskId: string; taskRevision: number; domainRevisions: Record<string, number>; goalRevisions: Record<string, number>;
   reason: string; reuseReason: string; benefits: string; costs: string; risks: string; review: string;
@@ -18,12 +20,14 @@ export type SpawnProposal = {
 };
 export type LifecycleProposal = {
   id: string; author: string; reviewer: string | null; status: "proposed" | "under_review" | "approved" | "rejected" | "applied";
+  operationId?: string; estimatedCost?: string | null;
   kind: "retire" | "reuse" | "reassign"; agentId: string; agentRevision: number; newRole?: string; reason: string; benefits: string; risks: string;
   domainRevisions?: Record<string, number>; goalRevisions?: Record<string, number>;
   review: string; createdAt: number; updatedAt: number;
 };
 export type HandoffProposal = {
   id: string; author: string; reviewer: string | null; status: "proposed" | "under_review" | "approved" | "rejected" | "applied";
+  operationId?: string; estimatedCost?: string | null;
   fromAgentId: string; toAgentId: string; fromRevision: number; toRevision: number;
   taskIds: string[]; domainIds: string[]; goalIds: string[]; knowledgeIds: string[];
   taskRevisions: Record<string, number>; domainRevisions: Record<string, number>; goalRevisions: Record<string, number>;
