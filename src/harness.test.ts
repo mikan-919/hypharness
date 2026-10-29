@@ -102,3 +102,13 @@ test("workspace paths cannot escape, including through symlinks", () => {
   expect(() => safePath(dir, "../x")).toThrow();
   expect(() => safePath(dir, "link/x")).toThrow();
 });
+
+test("a provider that keeps failing stops the run instead of spending the budget", async () => {
+  const { rt } = setup({});
+  const faux = fauxProvider();
+  rt.models.setProvider(faux.provider);
+  faux.setResponses(Array(50).fill(fauxAssistantMessage("", { stopReason: "error", errorMessage: "usage limit" })));
+  const r = await runScheduler({ ...rt, model: faux.getModel() });
+  expect(r.status).toBe("error");
+  expect(r.modelCalls).toBe(3);
+});

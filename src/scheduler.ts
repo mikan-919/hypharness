@@ -42,7 +42,7 @@ function unblockVerification(store: Store) {
 }
 
 export type Report = {
-  status: "done" | "budget" | "stalled" | "rounds";
+  status: "done" | "budget" | "stalled" | "error" | "rounds";
   rounds: number; modelCalls: number; elapsedMs: number;
   input: number; output: number; cacheRead: number; cacheWrite: number; maxPromptChars: number;
   agents: number; activeAgents: number; tasksDone: number; organizationChanges: number;
@@ -63,7 +63,7 @@ export async function runScheduler(rt: Runtime, maxRounds = 100): Promise<Report
   const { store } = rt;
   const started = Date.now();
   for (const a of store.agents()) mirror(rt, a.id);
-  let round = 0;
+  let round = 0, failedRounds = 0;
   for (; round < maxRounds; round++) {
     store.reclaimExpired();
     steer(store);
@@ -93,6 +93,12 @@ export async function runScheduler(rt: Runtime, maxRounds = 100): Promise<Report
 
     // ponytail: rounds wait for the slowest episode; switch to a worker pool if agents' task lengths diverge a lot
     const results = await Promise.allSettled(work.map(([agent, task]) => runEpisode(rt, agent, task)));
+    // Persistent provider errors (quota, auth) would otherwise spend the whole call budget on retries.
+    failedRounds = results.every(r => r.status === "rejected" && !(r.reason instanceof BudgetExhausted)) ? failedRounds + 1 : 0;
+    if (failedRounds >= 3) {
+      rt.log?.(`stopping after ${failedRounds} rounds in which every episode failed`);
+      return report(store, "error", round + 1, Date.now() - started);
+    }
     for (const [i, r] of results.entries()) {
       const [agent, task] = work[i]!;
       if (r.status === "fulfilled") rt.log?.(`[${agent.id}] ${task.id} ${r.value}`);
