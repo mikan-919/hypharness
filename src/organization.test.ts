@@ -221,6 +221,30 @@ test("approved spawn is atomic, idempotent and discoverable by scheduler", async
   } finally { await harness.close(context); await rm(dir, { recursive: true, force: true }); }
 });
 
+test("concurrent approved spawns cannot exceed the active agent limit", async () => {
+  const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, context);
+  try {
+    const agents = await restoreAgents(harness, context); await initializeGlobalGoal(harness, "goal", context);
+    await harness.commit(async tx => {
+      const board = await tx.doc(TaskBoard);
+      for (const n of [1, 2]) addTask(board, newTask({ id: `work-${n}`, type: "subgoal", role: "author", description: "work", requiredSpecialty: `specialist-${n}` }, 0));
+      (await tx.doc(OrganizationStore)).run = { id: "test", round: 0, spawns: 0, roundSpawns: 0, roundChanges: 0, limits: { ...ORGANIZATION_LIMITS, maxActiveAgents: 4, maxSpawnsPerRound: 3 } };
+    }, context);
+    const call = async (name: string, args: Record<string, unknown>, agent = agents.author, callId = name) => { const tool = OrganizationExtension.tools!.find(t => t.name === name)!; const api = { conversationId: agent.id, callId, now: () => 1000, commit: harness.commit.bind(harness), snapshot: harness.snapshot.bind(harness) } as unknown as ToolExecutionApi; const result = await tool.execute(args, api, context); const item = result.output?.[0]; return item?.type === "text" ? JSON.parse(item.text) : null; };
+    const proposals: string[] = [];
+    for (const n of [1, 2]) {
+      const p = await call("organization_propose", { name: `agent-${n}`, role: `specialist-${n}`, capabilities: ["research", "task_management"], initialGoalIds: [], initialDomainIds: [], taskId: `work-${n}`, taskRevision: 0, goalRevisions: {}, domainRevisions: {}, reason: "specialist needed", reuseReason: "no specialist", benefits: "specialization", costs: "calls", risks: "coordination" }, agents.author, `p-${n}`);
+      await call("organization_review", { id: p, decision: "start", reason: "review" }, agents.source_reviewer);
+      await call("organization_review", { id: p, decision: "approve", reason: "review" }, agents.source_reviewer); proposals.push(p);
+    }
+    const results = await Promise.allSettled(proposals.map(id => call("agent_spawn", { id })));
+    expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(r => r.status === "rejected")).toHaveLength(1);
+    expect((await harness.snapshot(AgentDirectory, context))!.agents!.filter(a => a.status === "active")).toHaveLength(4);
+    expect((await harness.snapshot(OrganizationStore, context))!.run!.spawns).toBe(1);
+  } finally { await harness.close(context); }
+});
+
 test("handoff moves open tasks and domain stewardship without moving context", async () => {
   const dir = await mkdtemp(join(tmpdir(), "delm-handoff-")); const path = join(dir, "test.sqlite");
   let harness = await Harness.open(await openNodeSqliteStorage(path), { models: createModels(), registry: createRegistry() }, context);
