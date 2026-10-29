@@ -62,6 +62,7 @@ export function report(store: Store, status: Report["status"], rounds: number, e
 export async function runScheduler(rt: Runtime, maxRounds = 100): Promise<Report> {
   const { store } = rt;
   const started = Date.now();
+  store.adoptRunning();
   for (const a of store.agents()) mirror(rt, a.id);
   let round = 0, failedRounds = 0;
   for (; round < maxRounds; round++) {

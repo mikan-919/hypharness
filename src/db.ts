@@ -92,19 +92,19 @@ export class Store {
       this.setMeta("constraints", constraints);
       this.setMeta("config", JSON.stringify(config));
       this.setMeta("model_calls", "0");
-      this.addAgent("lead", "lead: owns the top-level purpose, plans, organizes, and delivers", null);
+      this.addAgent("lead", "lead: owns the top-level purpose, plans, organizes, and delivers", null, "agent_initialized");
       if (config.organization === "fixed") {
-        this.addAgent("worker", "worker: carries out assigned work and produces artifacts", "lead");
-        this.addAgent("reviewer", "reviewer: verifies results and knowledge independently", "lead");
+        this.addAgent("worker", "worker: carries out assigned work and produces artifacts", "lead", "agent_initialized");
+        this.addAgent("reviewer", "reviewer: verifies results and knowledge independently", "lead", "agent_initialized");
       }
       this.run("insert into goals(id, parent, description, status, owner, created_at) values('G0', null, ?, 'open', 'lead', ?)", purpose, Date.now());
     });
   }
 
-  addAgent(id: string, role: string, parent: string | null) {
+  addAgent(id: string, role: string, parent: string | null, event = "agent_created") {
     this.run("insert into agents(id, role, status, parent, created_at) values(?, ?, 'active', ?, ?)", id, role, parent, Date.now());
     this.run("insert into context(agent, memory, version) values(?, '', 0)", id);
-    this.log(parent, "agent_created", { id, role });
+    this.log(parent, event, { id, role });
   }
 
   agents(status?: string) { return status ? this.all<Agent>("select * from agents where status = ?", status) : this.all<Agent>("select * from agents"); }
@@ -131,7 +131,15 @@ export class Store {
   }
 
   reclaimExpired(now = Date.now()) {
-    return this.run("update tasks set status = 'open', claimed_by = null, lease_until = null, rev = rev + 1 where status = 'claimed' and lease_until < ?", now);
+    return this.tx(() => {
+      this.run("update episodes set status = 'expired' where status = 'running' and task in (select id from tasks where status = 'claimed' and lease_until < ?)", now);
+      return this.run("update tasks set status = 'open', claimed_by = null, lease_until = null, rev = rev + 1 where status = 'claimed' and lease_until < ?", now);
+    });
+  }
+
+  // Leases left by a previous host process are void: its running episodes resume here instead of restarting.
+  adoptRunning() {
+    this.run("update tasks set lease_until = ? where status = 'claimed' and exists (select 1 from episodes e where e.task = tasks.id and e.agent = tasks.claimed_by and e.status = 'running')", Date.now() + this.config.leaseMs);
   }
 
   // Counts a model call against the persistent budget before it is made.

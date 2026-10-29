@@ -75,6 +75,7 @@ test("C: a stopped run resumes from the same state without repeating tool side e
   const messages: Message[] = JSON.parse(ep.messages);
   expect(messages.at(-1)).toMatchObject({ role: "toolResult", toolName: "file_write" });
   first.store.run("update episodes set messages = ? where id = ?", JSON.stringify(messages.slice(0, -1)), ep.id);
+  first.store.run("update tasks set lease_until = 0"); // the stop outlasted the lease
   first.store.db.close();
 
   const second = setup({}, 2, first.dir);
@@ -111,4 +112,16 @@ test("a provider that keeps failing stops the run instead of spending the budget
   const r = await runScheduler({ ...rt, model: faux.getModel() });
   expect(r.status).toBe("error");
   expect(r.modelCalls).toBe(3);
+});
+
+test("fixed organization: three agents work concurrently, verify each other, and stay three", async () => {
+  const { store, rt } = setup({ organization: "fixed", maxAgents: 3, maxConcurrency: 3 }, 4);
+  const r = await runScheduler(rt);
+  expect(r.status).toBe("done");
+  expect(r.agents).toBe(3);
+  expect(r.organizationChanges).toBe(0);
+  const work = store.all<{ verified_by: string; claimed_by: string }>("select * from tasks where kind = 'work'");
+  expect(work).toHaveLength(4);
+  for (const t of work) expect(t.verified_by).not.toBe(t.claimed_by);
+  expect(store.goal("G0")!.verified_by).not.toBe("lead");
 });
