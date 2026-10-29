@@ -235,5 +235,5 @@ const apply = defineTool({ name: "organization_apply", description: "Apply an in
   const delegation = p as DelegationProposal; validate(directory, board, delegation); const task = board.tasks.find(t => t.id === delegation.taskId)!;
   task.assignedAgentId = delegation.targetAgentId; touch(task, api.now()); if (state.run) state.run.roundChanges++; delegation.status = "applied"; delegation.updatedAt = api.now(); return delegation.status;
 }, ctx)) });
-const spawn = defineTool({ name: "agent_spawn", description: "Apply an independently approved organization proposal", parameters: Type.Object({ id }), replay: "safe", execute: apply.execute });
+const spawn = defineTool({ name: "agent_spawn", description: "Apply an independently approved spawn proposal", parameters: Type.Object({ id }), replay: "safe", execute: async (a, api, ctx) => { if (!(await api.snapshot(OrganizationStore, ctx))?.spawnProposals?.some(p => p.id === a.id)) throw new Error("Spawn proposal missing"); return apply.execute(a, api, ctx); } });
 export const OrganizationExtension = defineExtension({ name: "delm-organization", tools: [list, inspect, analyze, propose, spawnPropose, retire, reuse, reassign, handoff, consolidate, status, review, apply, spawn] });

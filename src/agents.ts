@@ -3,6 +3,7 @@ import { defineDoc, defineExtension, hook, ToolTask, type Conversation, type Con
 
 export type Role = "author" | "source_reviewer" | "gist_reviewer";
 export const roles: Role[] = ["author", "source_reviewer", "gist_reviewer"];
+const baseCapabilities = (role: Role) => ["research", "task_management", "domain_management", "goal_management", "organization_propose", "organization_review", role === "author" ? "knowledge_publish" : "knowledge_review"];
 export type AgentStatus = "initializing" | "active" | "draining" | "dormant" | "recovering" | "failed";
 export type AgentRecord = {
   id: string; conversationId: string; name: string; role: string; capabilities: string[];
@@ -78,7 +79,9 @@ export async function restoreAgents(harness: Harness, context: Context): Promise
       if (directory.agents.some(agent => agent.id !== id && agent.conversationId === conversationId)) throw new Error("Duplicate agent conversation");
       if (!existing) {
         const now = Date.now();
-        directory.agents.push({ id, conversationId, name: role, role, capabilities: [], status: "active", domainIds: [], goalIds: [], parentAgentId: null, createdAt: now, updatedAt: now, lastActiveAt: null, revision: 0 });
+        directory.agents.push({ id, conversationId, name: role, role, capabilities: baseCapabilities(role), status: "active", domainIds: [], goalIds: [], parentAgentId: null, createdAt: now, updatedAt: now, lastActiveAt: null, revision: 0 });
+      } else if (!existing.capabilities.length) {
+        existing.capabilities = baseCapabilities(role); existing.revision++; existing.updatedAt = Date.now();
       }
     }
   }, context);

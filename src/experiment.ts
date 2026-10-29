@@ -1,7 +1,7 @@
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { createRegistry, defineExtension, GenerationTask, Harness, hook, MemoryStorage, type ConversationId } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, GenerationTask, Harness, hook, MemoryStorage, type Conversation, type ConversationId } from "@earendil-works/pi-durable";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,10 +39,11 @@ export function parseExperimentArgs(args: string[]): { goal: string; tasks: stri
   return { goal, tasks };
 }
 
-async function runExperiment(goal: string, tasks: string[], dynamic: boolean): Promise<OrganizationMetrics> {
-  const credentials = await FileCredentialStore.open(); const models = createModels({ credentials }); models.setProvider(openaiProvider());
+export async function runExperiment(goal: string, tasks: string[], dynamic: boolean, testRun?: (harness: Harness, agent: Conversation, prompt: string) => Promise<void>): Promise<OrganizationMetrics> {
+  const models = testRun ? createModels() : createModels({ credentials: await FileCredentialStore.open() });
+  if (!testRun) models.setProvider(openaiProvider());
   const modelId = process.env.OPENAI_MODEL ?? "gpt-6-sol";
-  if (!(await models.getAuth("openai")) || !models.getModel("openai", modelId)) throw new Error("OpenAI credentials or model unavailable");
+  if (!testRun && (!(await models.getAuth("openai")) || !models.getModel("openai", modelId))) throw new Error("OpenAI credentials or model unavailable");
   const registry = createRegistry();
   for (const extension of [AgentPermissionExtension, MemoryExtension, KnowledgeExtension, TaskExtension, DomainExtension, GoalExtension, OrganizationExtension]) registry.install(extension);
   let calls = 0, requestContextBytes = 0;
@@ -61,7 +62,7 @@ async function runExperiment(goal: string, tasks: string[], dynamic: boolean): P
       await harness.commit(async tx => { await tx.doc(AgentContext, agent.id); }, context);
       await agent.configure({ model: { provider: "openai", modelId }, thinkingLevel: "high", instructions: `あなたの役割は ${role} です。最上位目的: ${goal}。この目的は変更できません。共有タスクを取得してから処理してください。原資料のない情報を追加せず、検証では根拠を確認してください。` }, context);
     }
-    await runScheduler(harness, agents, context, { organizationLimits: { maxActiveAgents: dynamic ? 6 : 3 } });
+    await runScheduler(harness, agents, context, { organizationLimits: { maxActiveAgents: dynamic ? 6 : 3 }, ...(testRun ? { run: (agent, prompt) => testRun(harness, agent, prompt) } : {}) });
     const board = await harness.snapshot(TaskBoard, context); const directory = await harness.snapshot(AgentDirectory, context); const org = await harness.snapshot(OrganizationStore, context);
     const selected = (board?.tasks ?? []).filter(t => t.id.startsWith("experiment:"));
     const spawns = (org?.spawnProposals ?? []).filter(p => p.status === "applied"); const lifecycle = (org?.lifecycleProposals ?? []).filter(p => p.status === "applied"); const handoffs = (org?.handoffs ?? []).filter(p => p.status === "applied");
