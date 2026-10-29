@@ -12,6 +12,8 @@ import { OrganizationExtension } from "./tools/organization.ts";
 import { TaskExtension } from "./tools/tasks.ts";
 import { runScheduler } from "./scheduler.ts";
 import { AgentContext } from "./context/state.ts";
+import { ORGANIZATION_LIMITS, OrganizationStore } from "./organization.ts";
+import { initializeGlobalGoal } from "./goals.ts";
 
 test("dynamic permissions are bound to the registered conversation and deny unknown capabilities", () => {
   const agent: AgentRecord = { id: "dynamic", conversationId: "42", name: "researcher", role: "researcher", capabilities: ["research"], status: "active", domainIds: [], goalIds: [], parentAgentId: null, createdAt: 0, updatedAt: 0, lastActiveAt: null, revision: 0 };
@@ -146,4 +148,47 @@ test("new conversation, agent configuration, and context commit together", async
     expect((await (await harness.conversation(id, context))!.agent(context)).instructions).toBe("fixed goal");
     expect((await harness.snapshot(AgentContext, id, context))!.workingMemory).toBe("initial context");
   } finally { await harness.close(context); }
+});
+
+test("approved spawn is atomic, idempotent and discoverable by scheduler", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "delm-spawn-")); const path = join(dir, "test.sqlite");
+  let harness = await Harness.open(await openNodeSqliteStorage(path), { models: createModels(), registry: createRegistry() }, context);
+  try {
+    const agents = await restoreAgents(harness, context);
+    await initializeGlobalGoal(harness, "fixed goal", context);
+    await harness.commit(async tx => {
+      addTask(await tx.doc(TaskBoard), newTask({ id: "specialized", type: "subgoal", role: "author", description: "specialized work", goalId: "goal:global", requiredSpecialty: "specialist" }, 0));
+      (await tx.doc(OrganizationStore)).run = { id: "test-run", round: 0, spawns: 0, roundSpawns: 0, roundChanges: 0, limits: { ...ORGANIZATION_LIMITS } };
+    }, context);
+    const call = async (name: string, args: Record<string, unknown>, agent = agents.author, callId = name) => {
+      const tool = OrganizationExtension.tools!.find(t => t.name === name)!;
+      const api = { conversationId: agent.id, callId, now: () => 1000, commit: harness.commit.bind(harness), snapshot: harness.snapshot.bind(harness) } as unknown as ToolExecutionApi;
+      const result = await tool.execute(args, api, context); const item = result.output?.[0]; return item?.type === "text" ? JSON.parse(item.text) : null;
+    };
+    const args = { name: "specialist", role: "specialist", capabilities: ["research", "task_management"], initialGoalIds: ["goal:global"], initialDomainIds: [], taskId: "specialized", taskRevision: 0, goalRevisions: { "goal:global": 0 }, domainRevisions: {}, reason: "specialist needed", reuseReason: "no specialist", benefits: "specialization", costs: "model calls", risks: "coordination" };
+    const proposal = await call("organization_propose", args);
+    await expect(call("agent_spawn", { id: proposal })).rejects.toThrow("Independent approval required");
+    await call("organization_review", { id: proposal, decision: "start", reason: "review" }, agents.source_reviewer);
+    await call("organization_review", { id: proposal, decision: "approve", reason: "review" }, agents.source_reviewer);
+    expect(await call("agent_spawn", { id: proposal })).toBe("applied");
+    expect(await call("agent_spawn", { id: proposal })).toBe("applied");
+    const directory = await harness.snapshot(AgentDirectory, context); const agent = directory!.agents!.find(a => a.id === `agent:${proposal}`)!;
+    expect(agent.status).toBe("active");
+    expect((await harness.snapshot(OrganizationStore, context))!.run!.spawns).toBe(1);
+    expect((await harness.snapshot(AgentContext, Number(agent.conversationId) as typeof agents.author.id, context))!.version).toBe(0);
+    await harness.commit(async tx => {
+      const board = await tx.doc(TaskBoard);
+      addTask(board, newTask({ id: "reuse", type: "subgoal", role: "author", description: "work", requiredSpecialty: "specialist" }, 0));
+      addTask(board, newTask({ id: "other", type: "subgoal", role: "author", description: "work", requiredSpecialty: "other" }, 0));
+    }, context);
+    await expect(call("organization_propose", { ...args, taskId: "reuse", initialGoalIds: [], goalRevisions: {} }, agents.author, "reuse")).rejects.toThrow("Existing agent can be reused");
+    await expect(call("organization_propose", { ...args, taskId: "other", role: "other", initialGoalIds: [], goalRevisions: {} }, agents.author, "limit")).rejects.toThrow("Organization budget exhausted");
+    await harness.close(context);
+    harness = await Harness.open(await openNodeSqliteStorage(path), { models: createModels(), registry: createRegistry() }, context);
+    const restored = await restoreAgents(harness, context);
+    expect((await harness.snapshot(AgentDirectory, context))!.agents!.find(a => a.id === agent.id)!.conversationId).toBe(agent.conversationId);
+    let selected = 0;
+    await runScheduler(harness, restored, context, { maxRounds: 1, run: async a => { selected = a.id; } });
+    expect(String(selected)).toBe(agent.conversationId);
+  } finally { await harness.close(context); await rm(dir, { recursive: true, force: true }); }
 });
