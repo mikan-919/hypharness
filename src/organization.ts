@@ -15,7 +15,8 @@ export type SpawnProposal = {
 };
 export type LifecycleProposal = {
   id: string; author: string; reviewer: string | null; status: "proposed" | "under_review" | "approved" | "rejected" | "applied";
-  kind: "retire" | "reuse"; agentId: string; agentRevision: number; reason: string; benefits: string; risks: string;
+  kind: "retire" | "reuse" | "reassign"; agentId: string; agentRevision: number; newRole?: string; reason: string; benefits: string; risks: string;
+  domainRevisions?: Record<string, number>; goalRevisions?: Record<string, number>;
   review: string; createdAt: number; updatedAt: number;
 };
 export type HandoffProposal = {

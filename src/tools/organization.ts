@@ -55,7 +55,7 @@ function checkCapacity(directory: Directory, run: import("../organization.ts").O
 function checkChangeBudget(run: import("../organization.ts").OrganizationRun | undefined) {
   if (!run || run.round >= run.limits.maxOrganizationRounds || run.roundChanges >= run.limits.maxOrganizationChangesPerRound) throw new Error("Organization budget exhausted");
 }
-function validateLifecycle(directory: Directory, board: Board, domains: DomainState, proposal: LifecycleProposal, now: number, handoffs: HandoffProposal[] = []) {
+function validateLifecycle(directory: Directory, board: Board, domains: DomainState, proposal: LifecycleProposal, now: number, handoffs: HandoffProposal[] = [], goals?: GoalState) {
   const agent = directory.agents?.find(a => a.id === proposal.agentId);
   if (!agent || agent.revision !== proposal.agentRevision) throw new Error("Agent revision conflict");
   if (Object.values(directory.ids).some(id => String(id) === agent.conversationId)) throw new Error("Base agents are protected");
@@ -65,7 +65,15 @@ function validateLifecycle(directory: Directory, board: Board, domains: DomainSt
     if (board.tasks.some(task => (task.state === "open" && task.assignedAgentId === agent.id) || (task.state === "claimed" && task.owner === agent.conversationId))) throw new Error("Agent has unfinished tasks");
     if (handoffs.some(p => p.fromAgentId === agent.id && ["proposed", "under_review", "approved"].includes(p.status))) throw new Error("Agent has an unfinished handoff");
     if (domains.domains.some(domain => domain.status === "active" && domain.stewardId === agent.conversationId)) throw new Error("Agent is a domain steward");
-  } else if (agent.status !== "dormant") throw new Error("Dormant agent required");
+  } else if (proposal.kind === "reuse") { if (agent.status !== "dormant") throw new Error("Dormant agent required"); }
+  else {
+    if (agent.status !== "active" || !proposal.newRole?.trim() || proposal.newRole === agent.role) throw new Error("Invalid role reassignment");
+    if (directory.agents?.some(other => other.id !== agent.id && ["active", "dormant"].includes(other.status) && other.role.trim().toLowerCase() === proposal.newRole!.trim().toLowerCase())) throw new Error("Existing agent can be reused for this role");
+    if (board.tasks.some(task => (task.state === "claimed" && task.owner === agent.conversationId) || (task.state === "open" && task.assignedAgentId === agent.id && task.requiredSpecialty && task.requiredSpecialty.trim().toLowerCase() !== proposal.newRole!.trim().toLowerCase()))) throw new Error("Agent has incompatible tasks");
+    if (!goals?.globalId || !proposal.goalRevisions || !proposal.domainRevisions) throw new Error("Goal and domain revisions required");
+    for (const [id, revision] of Object.entries(proposal.goalRevisions)) if (!goals.goals.some(goal => goal.id === id && goal.status === "active" && goal.revision === revision)) throw new Error("Goal revision conflict");
+    for (const [id, revision] of Object.entries(proposal.domainRevisions)) if (!domains.domains.some(domain => domain.id === id && domain.status === "active" && domain.revision === revision)) throw new Error("Domain revision conflict");
+  }
   return agent;
 }
 function validateHandoff(directory: Directory, board: Board, domains: DomainState, goals: GoalState, p: HandoffProposal) {
@@ -117,13 +125,15 @@ const spawnPropose = defineTool({ name: "organization_propose", description: "Pr
   if (!reviewer) throw new Error("Independent reviewer unavailable");
   state.spawnProposals.push(p); addTask(board, newTask({ id: `review:${proposalId}`, type: "organization_review", description: proposalId, role: reviewer }, api.now())); return proposalId;
 }, ctx)) });
-function lifecycleTool(kind: "retire" | "reuse") {
-  return defineTool({ name: `agent_${kind}`, description: `Propose ${kind} of a dynamic agent; independent review is required`, parameters: Type.Object({ agentId: id, agentRevision: Type.Integer({ minimum: 0 }), reason: text, benefits: text, risks: text }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
-    const directory = await tx.doc(AgentDirectory); const author = identity(directory, api.conversationId); const board = await tx.doc(TaskBoard); const domains = await tx.doc(DomainStore); const state = await tx.doc(OrganizationStore); state.lifecycleProposals ??= [];
+function lifecycleTool(kind: "retire" | "reuse" | "reassign") {
+  return defineTool({ name: `agent_${kind}`, description: `Propose ${kind} of a dynamic agent; independent review is required`, parameters: Type.Object({ agentId: id, agentRevision: Type.Integer({ minimum: 0 }), newRole: Type.Optional(id), reason: text, benefits: text, risks: text }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
+    const directory = await tx.doc(AgentDirectory); const author = identity(directory, api.conversationId); const board = await tx.doc(TaskBoard); const domains = await tx.doc(DomainStore); const goals = await tx.doc(GoalStore); const state = await tx.doc(OrganizationStore); state.lifecycleProposals ??= [];
     const proposalId = `${kind}:${api.conversationId}:${api.callId}`; const old = state.lifecycleProposals.find(p => p.id === proposalId);
-    if (old) { if (JSON.stringify([old.agentId, old.agentRevision, old.reason, old.benefits, old.risks]) !== JSON.stringify([a.agentId, a.agentRevision, a.reason, a.benefits, a.risks])) throw new Error("Proposal operation reused"); return proposalId; }
+    if (old) { if (JSON.stringify([old.agentId, old.agentRevision, old.newRole, old.reason, old.benefits, old.risks]) !== JSON.stringify([a.agentId, a.agentRevision, a.newRole, a.reason, a.benefits, a.risks])) throw new Error("Proposal operation reused"); return proposalId; }
+    if (kind !== "reassign" && a.newRole !== undefined) throw new Error("Role is only valid for reassignment");
     const p: LifecycleProposal = { id: proposalId, author: author.id, reviewer: null, status: "proposed", kind, ...a, review: "", createdAt: api.now(), updatedAt: api.now() };
-    validateLifecycle(directory, board, domains, p, api.now(), state.handoffs); checkChangeBudget(state.run); if (kind === "reuse") checkCapacity(directory, state.run!);
+    if (kind === "reassign") { const target = directory.agents?.find(agent => agent.id === p.agentId); if (!target || !goals.globalId) throw new Error("Agent and global goal required"); p.goalRevisions = Object.fromEntries([...new Set([goals.globalId, ...target.goalIds])].map(id => { const goal = goals.goals.find(g => g.id === id && g.status === "active"); if (!goal) throw new Error("Active goal missing"); return [id, goal.revision]; })); p.domainRevisions = Object.fromEntries(target.domainIds.map(id => { const domain = domains.domains.find(d => d.id === id && d.status === "active"); if (!domain) throw new Error("Active domain missing"); return [id, domain.revision]; })); }
+    validateLifecycle(directory, board, domains, p, api.now(), state.handoffs, goals); checkChangeBudget(state.run); if (kind === "reuse") checkCapacity(directory, state.run!);
     const reviewer = (["author", "source_reviewer", "gist_reviewer"] as Role[]).find(role => directory.ids[role] !== undefined && directory.ids[role] !== api.conversationId && directory.agents?.some(agent => agent.conversationId === String(directory.ids[role]) && agent.status === "active"));
     if (!reviewer) throw new Error("Independent reviewer unavailable");
     state.lifecycleProposals.push(p); addTask(board, newTask({ id: `review:${proposalId}`, type: "organization_review", description: proposalId, role: reviewer }, api.now())); return proposalId;
@@ -131,6 +141,7 @@ function lifecycleTool(kind: "retire" | "reuse") {
 }
 const retire = lifecycleTool("retire");
 const reuse = lifecycleTool("reuse");
+const reassign = lifecycleTool("reassign");
 function handoffTool(kind: "handoff" | "consolidate") { return defineTool({ name: `agent_${kind}`, description: "Propose a handoff of your open tasks and responsibilities; release claimed tasks first", parameters: Type.Object({ toAgentId: id, fromRevision: Type.Integer({ minimum: 0 }), toRevision: Type.Integer({ minimum: 0 }), taskIds: Type.Array(id, { maxItems: 32 }), domainIds: Type.Array(id, { maxItems: 16 }), goalIds: Type.Array(id, { maxItems: 16 }), knowledgeIds: Type.Array(id, { maxItems: 32 }), taskRevisions: Type.Record(id, Type.Integer({ minimum: 0 })), domainRevisions: Type.Record(id, Type.Integer({ minimum: 0 })), goalRevisions: Type.Record(id, Type.Integer({ minimum: 0 })), summary: text, reason: text, benefits: text, risks: text }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
   const directory = await tx.doc(AgentDirectory); const author = identityAny(directory, api.conversationId); const board = await tx.doc(TaskBoard); const domains = await tx.doc(DomainStore); const goals = await tx.doc(GoalStore); const knowledge = await tx.doc(KnowledgeStore); const state = await tx.doc(OrganizationStore); state.handoffs ??= [];
   const proposalId = `${kind}:${api.conversationId}:${api.callId}`; const old = state.handoffs.find(p => p.id === proposalId);
@@ -149,7 +160,7 @@ const review = defineTool({ name: "organization_review", description: "Independe
   const directory = await tx.doc(AgentDirectory); const actor = identity(directory, api.conversationId); const state = await tx.doc(OrganizationStore); const spawn = state.spawnProposals?.find(p => p.id === a.id); const lifecycle = state.lifecycleProposals?.find(p => p.id === a.id); const transfer = state.handoffs?.find(p => p.id === a.id); const p = spawn ?? lifecycle ?? transfer ?? state.proposals.find(p => p.id === a.id); if (!p) throw new Error("Proposal missing");
   if (actor.id === p.author || (p.reviewer && p.reviewer !== actor.id)) throw new Error("Independent reviewer required");
   if (a.decision === "start" && p.status === "proposed") { p.reviewer = actor.id; p.status = "under_review"; }
-  else if (a.decision !== "start" && p.status === "under_review") { if (a.decision === "approve") { if (spawn) { validateSpawn(directory, await tx.doc(TaskBoard), await tx.doc(DomainStore), await tx.doc(GoalStore), spawn); checkSpawnBudget(directory, state.run); } else if (lifecycle) { validateLifecycle(directory, await tx.doc(TaskBoard), await tx.doc(DomainStore), lifecycle, api.now(), state.handoffs); checkChangeBudget(state.run); if (lifecycle.kind === "reuse") checkCapacity(directory, state.run!); } else if (transfer) { validateHandoff(directory, await tx.doc(TaskBoard), await tx.doc(DomainStore), await tx.doc(GoalStore), transfer); checkChangeBudget(state.run); } else validate(directory, await tx.doc(TaskBoard), p as DelegationProposal); } p.status = a.decision === "approve" ? "approved" : "rejected"; p.review = a.reason; }
+  else if (a.decision !== "start" && p.status === "under_review") { if (a.decision === "approve") { if (spawn) { validateSpawn(directory, await tx.doc(TaskBoard), await tx.doc(DomainStore), await tx.doc(GoalStore), spawn); checkSpawnBudget(directory, state.run); } else if (lifecycle) { validateLifecycle(directory, await tx.doc(TaskBoard), await tx.doc(DomainStore), lifecycle, api.now(), state.handoffs, await tx.doc(GoalStore)); checkChangeBudget(state.run); if (lifecycle.kind === "reuse") checkCapacity(directory, state.run!); } else if (transfer) { validateHandoff(directory, await tx.doc(TaskBoard), await tx.doc(DomainStore), await tx.doc(GoalStore), transfer); checkChangeBudget(state.run); } else validate(directory, await tx.doc(TaskBoard), p as DelegationProposal); } p.status = a.decision === "approve" ? "approved" : "rejected"; p.review = a.reason; }
   else if ((a.decision === "start" && p.status === "under_review") || (a.decision === "approve" && (p.status === "approved" || p.status === "applied")) || (a.decision === "reject" && p.status === "rejected")) return p.status;
   else throw new Error("Invalid review transition");
   if (transfer && p.status === "rejected") { transfer.handoffStatus = "failed"; transfer.completedAt = api.now(); }
@@ -177,15 +188,23 @@ const apply = defineTool({ name: "organization_apply", description: "Apply an in
     state.run!.roundChanges++; transfer.status = "applied"; transfer.handoffStatus = "committed"; transfer.completedAt = now; transfer.updatedAt = now; return transfer.status;
   }
   if (lifecycle) {
-    const agent = validateLifecycle(directory, board, await tx.doc(DomainStore), lifecycle, api.now(), state.handoffs); checkChangeBudget(state.run);
+    const domains = await tx.doc(DomainStore); const goals = await tx.doc(GoalStore);
+    const agent = validateLifecycle(directory, board, domains, lifecycle, api.now(), state.handoffs, goals); checkChangeBudget(state.run);
     if (lifecycle.kind === "reuse") checkCapacity(directory, state.run!);
-    if (lifecycle.kind === "retire") {
+    if (lifecycle.kind === "retire" || lifecycle.kind === "reassign") {
       const id = Number(agent.conversationId);
       if (!Number.isSafeInteger(id) || id < 0 || String(id) !== agent.conversationId) throw new Error("Invalid conversation ID");
       for (const status of ["pending", "running", "waiting", "sleeping", "completing"] as const) if ((await tx.scanTasks({ conversationId: id as ConversationId, status }, 1)).items.length) throw new Error("Agent has running durable work");
     }
     if (lifecycle.kind === "retire") { transitionAgent(agent, agent.revision, "draining", api.now()); transitionAgent(agent, agent.revision, "dormant", api.now()); }
-    else { transitionAgent(agent, agent.revision, "recovering", api.now()); transitionAgent(agent, agent.revision, "active", api.now()); }
+    else if (lifecycle.kind === "reuse") { transitionAgent(agent, agent.revision, "recovering", api.now()); transitionAgent(agent, agent.revision, "active", api.now()); }
+    else {
+      const global = goals.goals.find(goal => goal.id === goals.globalId)!;
+      const summary = agent.domainIds.map(id => { const domain = domains.domains.find(d => d.id === id)!; return `${domain.name}: ${domain.description.slice(0, 300)}`; }).join("; ");
+      const subgoals = agent.goalIds.map(id => goals.goals.find(g => g.id === id)!.description.slice(0, 300)).join("; ");
+      await configure(tx, Number(agent.conversationId) as ConversationId, { instructions: `最上位目的: ${global.description}\n役割: ${lifecycle.newRole}\n領域: ${summary}\n下位目標: ${subgoals}\n共有記憶と知識を参照し、タスクを取得してから作業する。最上位目的を変更しない。` });
+      agent.role = lifecycle.newRole!; agent.revision++; agent.updatedAt = api.now();
+    }
     state.run!.roundChanges++; lifecycle.status = "applied"; lifecycle.updatedAt = api.now(); return lifecycle.status;
   }
   if (spawn) {
@@ -207,4 +226,4 @@ const apply = defineTool({ name: "organization_apply", description: "Apply an in
   task.assignedAgentId = delegation.targetAgentId; touch(task, api.now()); if (state.run) state.run.roundChanges++; delegation.status = "applied"; delegation.updatedAt = api.now(); return delegation.status;
 }, ctx)) });
 const spawn = defineTool({ name: "agent_spawn", description: "Apply an independently approved organization proposal", parameters: Type.Object({ id }), replay: "safe", execute: apply.execute });
-export const OrganizationExtension = defineExtension({ name: "delm-organization", tools: [list, inspect, analyze, propose, spawnPropose, retire, reuse, handoff, consolidate, status, review, apply, spawn] });
+export const OrganizationExtension = defineExtension({ name: "delm-organization", tools: [list, inspect, analyze, propose, spawnPropose, retire, reuse, reassign, handoff, consolidate, status, review, apply, spawn] });
