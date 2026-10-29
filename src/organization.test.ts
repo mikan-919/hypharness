@@ -14,6 +14,7 @@ import { runScheduler } from "./scheduler.ts";
 import { AgentContext } from "./context/state.ts";
 import { ORGANIZATION_LIMITS, OrganizationStore } from "./organization.ts";
 import { initializeGlobalGoal } from "./goals.ts";
+import { DomainStore, reconcileDomains } from "./domains.ts";
 
 test("dynamic permissions are bound to the registered conversation and deny unknown capabilities", () => {
   const agent: AgentRecord = { id: "dynamic", conversationId: "42", name: "researcher", role: "researcher", capabilities: ["research"], status: "active", domainIds: [], goalIds: [], parentAgentId: null, createdAt: 0, updatedAt: 0, lastActiveAt: null, revision: 0 };
@@ -210,5 +211,34 @@ test("approved spawn is atomic, idempotent and discoverable by scheduler", async
     let selected = 0;
     await runScheduler(harness, restored, context, { maxRounds: 1, run: async a => { selected = a.id; } });
     expect(String(selected)).toBe(agent.conversationId);
+  } finally { await harness.close(context); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("handoff moves open tasks and domain stewardship without moving context", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "delm-handoff-")); const path = join(dir, "test.sqlite");
+  let harness = await Harness.open(await openNodeSqliteStorage(path), { models: createModels(), registry: createRegistry() }, context);
+  try {
+    const agents = await restoreAgents(harness, context); await reconcileDomains(harness, context);
+    await harness.commit(async tx => {
+      addTask(await tx.doc(TaskBoard), newTask({ id: "handoff-work", type: "subgoal", role: "author", description: "work" }, 0));
+      (await tx.doc(OrganizationStore)).run = { id: "test", round: 0, spawns: 0, roundSpawns: 0, roundChanges: 0, limits: { ...ORGANIZATION_LIMITS } };
+      (await tx.doc(AgentContext, agents.author.id)).workingMemory = "private";
+    }, context);
+    const directory = (await harness.snapshot(AgentDirectory, context))!; const from = directory.agents!.find(a => a.role === "author")!; const to = directory.agents!.find(a => a.role === "source_reviewer")!;
+    const call = async (name: string, args: Record<string, unknown>, agent = agents.author) => { const tool = [...OrganizationExtension.tools!, ...TaskExtension.tools!].find(t => t.name === name)!; const api = { conversationId: agent.id, callId: name, now: () => 1000, commit: harness.commit.bind(harness), snapshot: harness.snapshot.bind(harness) } as unknown as ToolExecutionApi; const result = await tool.execute(args, api, context); const item = result.output?.[0]; return item?.type === "text" ? JSON.parse(item.text) : null; };
+    const args = { toAgentId: to.id, fromRevision: from.revision, toRevision: to.revision, taskIds: ["handoff-work"], domainIds: ["domain:default"], goalIds: [], knowledgeIds: [], taskRevisions: { "handoff-work": 0 }, domainRevisions: { "domain:default": 0 }, goalRevisions: {}, summary: "work in progress", reason: "handoff", benefits: "continuity", risks: "coordination" };
+    const claimed = await call("task_claim", { id: "handoff-work", revision: 0, leaseMs: 1000, operationId: "claim" });
+    await expect(call("agent_handoff", args)).rejects.toThrow("Handoff task unavailable");
+    await call("task_release", { id: "handoff-work", token: claimed.token, revision: claimed.revision, operationId: "release" });
+    const proposal = await call("agent_handoff", { ...args, taskRevisions: { "handoff-work": 2 } });
+    await harness.close(context); harness = await Harness.open(await openNodeSqliteStorage(path), { models: createModels(), registry: createRegistry() }, context); await restoreAgents(harness, context);
+    await call("organization_review", { id: proposal, decision: "start", reason: "review" }, agents.source_reviewer);
+    await call("organization_review", { id: proposal, decision: "approve", reason: "review" }, agents.source_reviewer);
+    await call("organization_apply", { id: proposal }); await call("organization_apply", { id: proposal });
+    expect((await harness.snapshot(TaskBoard, context))!.tasks.find(t => t.id === "handoff-work")!.assignedAgentId).toBe(to.id);
+    expect((await harness.snapshot(DomainStore, context))!.domains.find(d => d.id === "domain:default")!.stewardId).toBe(to.conversationId);
+    expect((await harness.snapshot(AgentContext, agents.author.id, context))!.workingMemory).toBe("private");
+    expect(await harness.snapshot(AgentContext, agents.source_reviewer.id, context)).toBeUndefined();
+    expect((await harness.snapshot(OrganizationStore, context))!.handoffs!.find(p => p.id === proposal)!.handoffStatus).toBe("committed");
   } finally { await harness.close(context); await rm(dir, { recursive: true, force: true }); }
 });
