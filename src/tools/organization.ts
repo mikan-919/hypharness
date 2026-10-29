@@ -3,6 +3,8 @@ import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { AgentDirectory, canClaimTask, type Role } from "../agents.ts";
 import { OrganizationStore, type DelegationProposal } from "../organization.ts";
 import { TaskBoard, addTask, newTask, touch, type Board } from "../tasks.ts";
+import { DomainStore } from "../domains.ts";
+import { GoalStore } from "../goals.ts";
 
 const id = Type.String({ minLength: 1, maxLength: 200 });
 const text = Type.String({ minLength: 1, maxLength: 4000 });
@@ -25,6 +27,13 @@ function validate(directory: Directory, board: Board, p: DelegationProposal) {
 }
 const list = defineTool({ name: "agent_list", description: "List registered agents", parameters: Type.Object({}), execute: async (_a, api, ctx) => output((await api.snapshot(AgentDirectory, ctx))?.agents ?? []) });
 const inspect = defineTool({ name: "agent_inspect", description: "Inspect a registered agent", parameters: Type.Object({ id }), execute: async (a, api, ctx) => { const agent = (await api.snapshot(AgentDirectory, ctx))?.agents?.find(x => x.id === a.id); if (!agent) throw new Error("Agent missing"); return output(agent); } });
+const analyze = defineTool({ name: "organization_analyze", description: "Inspect measured organization workload without guessing model usage", parameters: Type.Object({}), execute: async (_a, api, ctx) => {
+  const directory = await api.snapshot(AgentDirectory, ctx); identity(directory ?? { ids: {} }, api.conversationId);
+  const board = await api.snapshot(TaskBoard, ctx); const domains = await api.snapshot(DomainStore, ctx); const goals = await api.snapshot(GoalStore, ctx);
+  const agents = (directory?.agents ?? []).map(agent => ({ id: agent.id, status: agent.status, role: agent.role, capabilities: agent.capabilities, domainIds: (domains?.domains ?? []).filter(d => d.status === "active" && d.stewardId === agent.conversationId).map(d => d.id), goalIds: agent.goalIds, openTasks: (board?.tasks ?? []).filter(t => t.state === "open" && canClaimTask(directory!, t, Number(agent.conversationId))).length, claimedTasks: (board?.tasks ?? []).filter(t => t.state === "claimed" && t.owner === agent.conversationId).length }));
+  const dormantAssignments = (board?.tasks ?? []).filter(t => t.state === "open" && t.assignedAgentId && agents.some(agent => agent.id === t.assignedAgentId && agent.status === "dormant")).map(t => t.id);
+  return output({ decision: dormantAssignments.length ? "consider_resume" : "keep", reason: dormantAssignments.length ? "Open tasks are assigned to dormant agents; check reuse before creating an agent." : "No dormant assignments found; other change criteria are not evaluated.", activeAgents: agents.filter(a => a.status === "active").length, dormantAgents: agents.filter(a => a.status === "dormant").length, agents, openTasks: (board?.tasks ?? []).filter(t => t.state === "open").length, dormantAssignments, activeSubgoals: (goals?.goals ?? []).filter(g => g.id !== goals?.globalId && g.status === "active").length, modelCalls: null, inputTokens: null, outputTokens: null, cachedInputTokens: null, inferenceCost: null });
+} });
 const propose = defineTool({ name: "agent_delegate", description: "Propose delegation of an unclaimed subgoal or hypothesis; independent review is required", parameters: Type.Object({ taskId: id, taskRevision: Type.Integer({ minimum: 0 }), targetAgentId: id, targetRevision: Type.Integer({ minimum: 0 }), reason: text, benefits: text, risks: text }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
   const directory = await tx.doc(AgentDirectory); const author = identity(directory, api.conversationId);
   const board = await tx.doc(TaskBoard); const state = await tx.doc(OrganizationStore); const proposalId = `organization:${api.conversationId}:${api.callId}`;
@@ -53,4 +62,4 @@ const apply = defineTool({ name: "organization_apply", description: "Apply an in
   const board = await tx.doc(TaskBoard); validate(directory, board, p); const task = board.tasks.find(t => t.id === p.taskId)!;
   task.assignedAgentId = p.targetAgentId; touch(task, api.now()); p.status = "applied"; p.updatedAt = api.now(); return p.status;
 }, ctx)) });
-export const OrganizationExtension = defineExtension({ name: "delm-organization", tools: [list, inspect, propose, status, review, apply] });
+export const OrganizationExtension = defineExtension({ name: "delm-organization", tools: [list, inspect, analyze, propose, status, review, apply] });

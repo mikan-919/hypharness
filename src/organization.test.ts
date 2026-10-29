@@ -6,6 +6,7 @@ import { AgentDirectory, restoreAgents } from "./agents.ts";
 import { TaskBoard, addTask, newTask } from "./tasks.ts";
 import { OrganizationExtension } from "./tools/organization.ts";
 import { TaskExtension } from "./tools/tasks.ts";
+import { runScheduler } from "./scheduler.ts";
 
 test("delegation requires independent approval, preserves claims, and assigns a new token", async () => {
   const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, context);
@@ -34,10 +35,34 @@ test("delegation requires independent approval, preserves claims, and assigns a 
     const next = await call("task_claim", { id: "work", revision: 3, leaseMs: 1000, operationId: "new" }, agents.source_reviewer);
     expect(next.token).not.toBe(first.token);
     expect(next.owner).toBe(String(agents.source_reviewer.id));
+    const analysis = await call("organization_analyze", {});
+    expect(analysis.activeAgents).toBe(3);
+    expect(analysis.agents.find((a: { id: string }) => a.id === target.id).claimedTasks).toBe(1);
+    expect(analysis.inputTokens).toBeNull();
     await harness.commit(async tx => { addTask(await tx.doc(TaskBoard), newTask({ id: "stale", type: "subgoal", role: "author", description: "work" }, 0)); }, context);
     const stale = await call("agent_delegate", { ...draft, taskId: "stale", taskRevision: 0 }, agents.author, "stale-proposal");
     await call("organization_review", { id: stale, decision: "start", reason: "review" }, agents.source_reviewer);
     await call("task_claim", { id: "stale", revision: 0, leaseMs: 1000, operationId: "stale-claim" });
     await expect(call("organization_review", { id: stale, decision: "approve", reason: "review" }, agents.source_reviewer)).rejects.toThrow("Task unavailable or revision conflict");
+  } finally { await harness.close(context); }
+});
+
+test("scheduler selects the assigned agent and excludes agents that are draining", async () => {
+  const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, context);
+  try {
+    const agents = await restoreAgents(harness, context);
+    await harness.commit(async tx => {
+      const directory = await tx.doc(AgentDirectory);
+      const target = directory.agents!.find(a => a.role === "source_reviewer")!;
+      const task = newTask({ id: "work", type: "subgoal", role: "author", description: "work" }, 0);
+      task.assignedAgentId = target.id;
+      addTask(await tx.doc(TaskBoard), task);
+    }, context);
+    let selected = 0;
+    const result = await runScheduler(harness, agents, context, { maxRounds: 1, run: async agent => { selected = agent.id; } });
+    expect(result.status).toBe("round_limit");
+    expect(selected).toBe(agents.source_reviewer.id);
+    await harness.commit(async tx => { (await tx.doc(AgentDirectory)).agents!.find(a => a.role === "source_reviewer")!.status = "draining"; }, context);
+    expect((await runScheduler(harness, agents, context, { run: async () => { throw new Error("draining agent was scheduled"); } })).status).toBe("waiting");
   } finally { await harness.close(context); }
 });
