@@ -2,6 +2,8 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { AgentDirectory, type Role } from "../agents.ts";
 import { TaskBoard, addTask, checkCycles, newTask, operation, owned, ready, touch } from "../tasks.ts";
+import { DomainStore } from "../domains.ts";
+import { GoalStore } from "../goals.ts";
 
 const roleSchema = Type.Union([Type.Literal("author"), Type.Literal("source_reviewer"), Type.Literal("gist_reviewer")]);
 const text = Type.String({ minLength: 1, maxLength: 12000 });
@@ -38,6 +40,10 @@ const release = defineTool({ name: "task_release", description: "Release a curre
 }, context)) });
 const finish = defineTool({ name: "task_finish", description: "Finish a current task", parameters: Type.Object({ ...claim, result: text, failed: Type.Boolean() }), replay: "safe", execute: async (args, api, context) => output(await api.commit(async tx => {
   const board = await tx.doc(TaskBoard); const now = api.now();
+  const current = board.tasks.find(t => t.id === args.id);
+  if (current && !args.failed && current.type === "domain_review") { const proposals = await tx.doc(DomainStore); const proposal = proposals.proposals.find(p => p.id === current.description); if (!proposal || (proposal.status !== "applied" && proposal.status !== "rejected")) throw new Error("Domain review is not resolved"); }
+  if (current && !args.failed && current.type === "goal_review") { const proposals = await tx.doc(GoalStore); const proposal = proposals.proposals.find(p => p.id === current.description); if (!proposal || (proposal.status !== "applied" && proposal.status !== "rejected")) throw new Error("Goal review is not resolved"); }
+  if (current && !args.failed && current.type === "discovery_feedback") { const domains = await tx.doc(DomainStore); const discovery = domains.discoveries.find(d => d.id === current.description); if (!discovery || discovery.outcome === "pending") throw new Error("Discovery outcome is not recorded"); }
   return operation(board, `${api.conversationId}:${args.operationId}`, JSON.stringify(["finish", args]), () => { const task = board.tasks.find(t => t.id === args.id); if (!task) throw new Error("Task missing"); owned(task, String(api.conversationId), args.token, args.revision, now); if (!args.failed && (task.type.startsWith("review_") || task.type === "propose")) throw new Error("Finish knowledge tasks using the knowledge tools"); task.state = args.failed ? "failed" : "completed"; task.result = args.result; task.token = null; task.leaseUntil = null; touch(task, now); return JSON.stringify(task); });
 }, context)) });
 const split = defineTool({ name: "task_split", description: "Replace a claimed task with child tasks", parameters: Type.Object({ ...claim, children: Type.Array(Type.Object({ id: text, type: text, description: text, role: roleSchema, dependencies: Type.Array(text) }), { minItems: 1, maxItems: 20 }) }), replay: "safe", execute: async (args, api, context) => output(await api.commit(async tx => {

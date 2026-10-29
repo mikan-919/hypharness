@@ -7,6 +7,7 @@ export type BoardTask = {
   owner: string | null; token: string | null; leaseUntil: number | null; revision: number;
   parent: string | null; dependencies: string[]; knowledgeId: string | null;
   result: string | null; createdAt: number; updatedAt: number;
+  goalId?: string;
 };
 export type Board = { tasks: BoardTask[]; operations: Record<string, { fingerprint: string; result: string }> };
 export const TaskBoard = defineDoc<Board>({
@@ -14,7 +15,7 @@ export const TaskBoard = defineDoc<Board>({
   initial: () => ({ tasks: [], operations: {} }), checkpointWhen: () => false,
 });
 
-export function newTask(input: { id: string; type: string; description: string; role: Role; parent?: string | null; dependencies?: string[]; knowledgeId?: string | null }, now: number): BoardTask {
+export function newTask(input: { id: string; type: string; description: string; role: Role; parent?: string | null; dependencies?: string[]; knowledgeId?: string | null; goalId?: string }, now: number): BoardTask {
   return { ...input, state: "open", owner: null, token: null, leaseUntil: null, revision: 0,
     parent: input.parent ?? null, dependencies: input.dependencies ?? [], knowledgeId: input.knowledgeId ?? null,
     result: null, createdAt: now, updatedAt: now };

@@ -13,6 +13,10 @@ import { runScheduler } from "./scheduler.ts";
 import { AgentContext, DEFAULT_BUDGET } from "./context/state.ts";
 import { createContextExtension } from "./context/extension.ts";
 import { syncMirror } from "./context/mirror.ts";
+import { DomainExtension } from "./tools/domains.ts";
+import { GoalExtension } from "./tools/goals.ts";
+import { DomainStore, DEFAULT_DOMAIN, reconcileDomains } from "./domains.ts";
+import { GoalStore, initializeGlobalGoal } from "./goals.ts";
 
 const credentials = await FileCredentialStore.open();
 const models = createModels({ credentials });
@@ -26,6 +30,8 @@ const registry = createRegistry();
 registry.install(MemoryExtension);
 registry.install(KnowledgeExtension);
 registry.install(TaskExtension);
+registry.install(DomainExtension);
+registry.install(GoalExtension);
 let requestCount = 0;
 registry.install(defineExtension({ name: "delm-request-limit", hooks: [hook(GenerationTask, {
   beforeRequest: () => {
@@ -37,13 +43,30 @@ const harness = await Harness.open(storage, { models, registry, settings: { stre
 registry.install(createContextExtension(harness));
 try {
   const agents = await restoreAgents(harness, context);
+  await reconcileDomains(harness, context);
+  const args = process.argv.slice(2);
+  const goalIndex = args.indexOf("--goal");
+  if (goalIndex !== -1) {
+    const goal = args[goalIndex + 1];
+    if (!goal) throw new Error("--goal requires a value");
+    await initializeGlobalGoal(harness, goal, context);
+    args.splice(goalIndex, 2);
+  }
+  const goals = await harness.snapshot(GoalStore, context);
+  const globalGoal = goals?.goals.find(g => g.id === goals.globalId);
+  if (globalGoal) await harness.commit(async tx => {
+    const domains = await tx.doc(DomainStore); const domain = domains.domains.find(d => d.id === DEFAULT_DOMAIN && d.status === "active") ?? domains.domains.find(d => d.status === "active");
+    if (domain && !domain.goalIds.includes(globalGoal.id)) { domain.goalIds.push(globalGoal.id); domain.revision++; domain.updatedAt = Date.now(); }
+    const board = await tx.doc(TaskBoard);
+    if (!board.tasks.some(t => t.id === "goal:initial-plan")) addTask(board, newTask({ id: "goal:initial-plan", type: "goal_plan", description: globalGoal.description, role: "author", goalId: globalGoal.id }, Date.now()));
+  }, context);
   for (const [role, agent] of Object.entries(agents)) {
     const existing = await harness.snapshot(AgentContext, agent.id, context);
     if (!existing) await harness.commit(async tx => { (await tx.doc(AgentContext, agent.id)).budget.maxTokens = maxTokens; }, context);
     await syncMirror(harness, agent.id, context);
-    await agent.configure({ model: { provider: "openai", modelId }, thinkingLevel: "high", instructions: `あなたの役割は ${role} です。共有タスクを取得してから処理してください。原資料のない情報を追加せず、検証では根拠を確認してください。文脈は context_read、context_edit、context_history、context_restore、context_checkpoint で管理してください。` }, context);
+    await agent.configure({ model: { provider: "openai", modelId }, thinkingLevel: "high", instructions: `あなたの役割は ${role} です。最上位目的: ${globalGoal?.description ?? "未設定"}。この目的は変更できません。共有タスクを取得してから処理してください。原資料のない情報を追加せず、検証では根拠を確認してください。文脈は context_read、context_edit、context_history、context_restore、context_checkpoint で管理してください。領域と下位目標の変更は独立した検証を経てください。` }, context);
   }
-  const raw = process.argv.slice(2).join(" ").trim();
+  const raw = args.join(" ").trim();
   if (raw) await harness.commit(async tx => {
     const board = await tx.doc(TaskBoard);
     const id = `author:${crypto.randomUUID()}`;
