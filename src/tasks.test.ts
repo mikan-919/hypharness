@@ -6,7 +6,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { restoreAgents } from "./agents.ts";
+import { AgentDirectory, restoreAgents, transitionAgent } from "./agents.ts";
 import { KnowledgeStore } from "./knowledge.ts";
 import { TaskBoard, addTask, newTask } from "./tasks.ts";
 import { TaskExtension } from "./tools/tasks.ts";
@@ -22,8 +22,21 @@ test("directory reuses conversations and scheduler stops with no tasks", async (
   try {
     const restored = await restoreAgents(harness, context);
     expect(Object.values(restored).map(a => a.id)).toEqual(Object.values(agents).map(a => a.id));
+    const directory = await harness.snapshot(AgentDirectory, context);
+    expect(directory?.agents?.map(a => [a.id, a.conversationId])).toEqual(Object.entries(agents).map(([role, agent]) => [`agent:base:${role}`, String(agent.id)]));
     expect(await runScheduler(harness, agents, context)).toEqual({ status: "idle", rounds: 0 });
   } finally { await harness.close(context); }
+});
+
+test("agent status transitions reject stale revisions and invalid transitions", () => {
+  const agent = { id: "a", conversationId: "1", name: "a", role: "worker", capabilities: [], status: "active" as const, domainIds: [], goalIds: [], parentAgentId: null, createdAt: 0, updatedAt: 0, lastActiveAt: null, revision: 0 };
+  expect(() => transitionAgent(agent, 0, "dormant", 1)).toThrow("Invalid agent status transition");
+  transitionAgent(agent, 0, "draining", 1);
+  expect(() => transitionAgent(agent, 0, "dormant", 2)).toThrow("Agent revision conflict");
+  transitionAgent(agent, 1, "dormant", 2);
+  transitionAgent(agent, 2, "recovering", 3);
+  transitionAgent(agent, 3, "active", 4);
+  expect(agent.revision).toBe(4);
 });
 
 test("claim competition, ownership, lease expiry, idempotence, split and dependencies", async () => {
@@ -110,13 +123,17 @@ test("SQLite restores directory and task board after reopening", async () => {
   try {
     let harness = await Harness.open(await openNodeSqliteStorage(path), options, context);
     const agents = await restoreAgents(harness, context);
-    await harness.commit(async tx => { addTask(await tx.doc(TaskBoard), newTask({ id: "persist", type: "work", description: "work", role: "author" }, 1)); }, context);
+    await harness.commit(async tx => {
+      addTask(await tx.doc(TaskBoard), newTask({ id: "persist", type: "work", description: "work", role: "author" }, 1));
+      delete (await tx.doc(AgentDirectory)).agents; // Simulate an existing version-1 directory.
+    }, context);
     await harness.close(context);
     harness = await Harness.open(await openNodeSqliteStorage(path), options, context);
     try {
       const restored = await restoreAgents(harness, context);
       expect(restored.source_reviewer.id).toBe(agents.source_reviewer.id);
       expect((await harness.snapshot(TaskBoard, context))?.tasks[0]?.id).toBe("persist");
+      expect((await harness.snapshot(AgentDirectory, context))?.agents?.map(a => a.conversationId)).toEqual(Object.values(agents).map(a => String(a.id)));
     } finally { await harness.close(context); }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
