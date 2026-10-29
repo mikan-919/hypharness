@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
-import { AgentDoc, configure, defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { AgentDirectory, canClaimTask, type Role } from "../agents.ts";
-import { OrganizationStore, type DelegationProposal, type SpawnProposal } from "../organization.ts";
+import { AgentDoc, configure, defineExtension, defineTool, type ConversationId } from "@earendil-works/pi-durable";
+import { AgentDirectory, canClaimTask, transitionAgent, type Role } from "../agents.ts";
+import { OrganizationStore, type DelegationProposal, type LifecycleProposal, type SpawnProposal } from "../organization.ts";
 import { TaskBoard, addTask, newTask, touch, type Board } from "../tasks.ts";
 import { DomainStore, type DomainState } from "../domains.ts";
 import { GoalStore, type GoalState } from "../goals.ts";
@@ -43,7 +43,23 @@ function validateSpawn(directory: Directory, board: Board, domains: DomainState,
 }
 function checkSpawnBudget(directory: Directory, run: import("../organization.ts").OrganizationRun | undefined) {
   if (!run || run.round >= run.limits.maxOrganizationRounds || run.spawns >= run.limits.maxSpawnsPerRun || run.roundSpawns >= run.limits.maxSpawnsPerRound || run.roundChanges >= run.limits.maxOrganizationChangesPerRound) throw new Error("Organization budget exhausted");
-  if ((directory.agents ?? []).filter(agent => ["active", "initializing", "recovering"].includes(agent.status)).length >= run.limits.maxActiveAgents) throw new Error("Active agent limit reached");
+  checkCapacity(directory, run);
+}
+function checkCapacity(directory: Directory, run: import("../organization.ts").OrganizationRun) { if ((directory.agents ?? []).filter(agent => ["active", "initializing", "recovering"].includes(agent.status)).length >= run.limits.maxActiveAgents) throw new Error("Active agent limit reached"); }
+function checkChangeBudget(run: import("../organization.ts").OrganizationRun | undefined) {
+  if (!run || run.round >= run.limits.maxOrganizationRounds || run.roundChanges >= run.limits.maxOrganizationChangesPerRound) throw new Error("Organization budget exhausted");
+}
+function validateLifecycle(directory: Directory, board: Board, domains: DomainState, proposal: LifecycleProposal, now: number) {
+  const agent = directory.agents?.find(a => a.id === proposal.agentId);
+  if (!agent || agent.revision !== proposal.agentRevision) throw new Error("Agent revision conflict");
+  if (Object.values(directory.ids).some(id => String(id) === agent.conversationId)) throw new Error("Base agents are protected");
+  if (now < agent.updatedAt + 60000) throw new Error("Agent is in cooldown");
+  if (proposal.kind === "retire") {
+    if (agent.status !== "active") throw new Error("Active agent required");
+    if (board.tasks.some(task => (task.state === "open" && task.assignedAgentId === agent.id) || (task.state === "claimed" && task.owner === agent.conversationId))) throw new Error("Agent has unfinished tasks");
+    if (domains.domains.some(domain => domain.status === "active" && domain.stewardId === agent.conversationId)) throw new Error("Agent is a domain steward");
+  } else if (agent.status !== "dormant") throw new Error("Dormant agent required");
+  return agent;
 }
 const list = defineTool({ name: "agent_list", description: "List registered agents", parameters: Type.Object({}), execute: async (_a, api, ctx) => output((await api.snapshot(AgentDirectory, ctx))?.agents ?? []) });
 const inspect = defineTool({ name: "agent_inspect", description: "Inspect a registered agent", parameters: Type.Object({ id }), execute: async (a, api, ctx) => { const agent = (await api.snapshot(AgentDirectory, ctx))?.agents?.find(x => x.id === a.id); if (!agent) throw new Error("Agent missing"); return output(agent); } });
@@ -76,21 +92,47 @@ const spawnPropose = defineTool({ name: "organization_propose", description: "Pr
   if (!reviewer) throw new Error("Independent reviewer unavailable");
   state.spawnProposals.push(p); addTask(board, newTask({ id: `review:${proposalId}`, type: "organization_review", description: proposalId, role: reviewer }, api.now())); return proposalId;
 }, ctx)) });
-const status = defineTool({ name: "organization_status", description: "Inspect an organization proposal", parameters: Type.Object({ id }), execute: async (a, api, ctx) => { const state = await api.snapshot(OrganizationStore, ctx); const p = state?.proposals.find(p => p.id === a.id) ?? state?.spawnProposals?.find(p => p.id === a.id); if (!p) throw new Error("Proposal missing"); return output(p); } });
+function lifecycleTool(kind: "retire" | "reuse") {
+  return defineTool({ name: `agent_${kind}`, description: `Propose ${kind} of a dynamic agent; independent review is required`, parameters: Type.Object({ agentId: id, agentRevision: Type.Integer({ minimum: 0 }), reason: text, benefits: text, risks: text }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
+    const directory = await tx.doc(AgentDirectory); const author = identity(directory, api.conversationId); const board = await tx.doc(TaskBoard); const domains = await tx.doc(DomainStore); const state = await tx.doc(OrganizationStore); state.lifecycleProposals ??= [];
+    const proposalId = `${kind}:${api.conversationId}:${api.callId}`; const old = state.lifecycleProposals.find(p => p.id === proposalId);
+    if (old) { if (JSON.stringify([old.agentId, old.agentRevision, old.reason, old.benefits, old.risks]) !== JSON.stringify([a.agentId, a.agentRevision, a.reason, a.benefits, a.risks])) throw new Error("Proposal operation reused"); return proposalId; }
+    const p: LifecycleProposal = { id: proposalId, author: author.id, reviewer: null, status: "proposed", kind, ...a, review: "", createdAt: api.now(), updatedAt: api.now() };
+    validateLifecycle(directory, board, domains, p, api.now()); checkChangeBudget(state.run); if (kind === "reuse") checkCapacity(directory, state.run!);
+    const reviewer = (["author", "source_reviewer", "gist_reviewer"] as Role[]).find(role => directory.ids[role] !== undefined && directory.ids[role] !== api.conversationId && directory.agents?.some(agent => agent.conversationId === String(directory.ids[role]) && agent.status === "active"));
+    if (!reviewer) throw new Error("Independent reviewer unavailable");
+    state.lifecycleProposals.push(p); addTask(board, newTask({ id: `review:${proposalId}`, type: "organization_review", description: proposalId, role: reviewer }, api.now())); return proposalId;
+  }, ctx)) });
+}
+const retire = lifecycleTool("retire");
+const reuse = lifecycleTool("reuse");
+const status = defineTool({ name: "organization_status", description: "Inspect an organization proposal", parameters: Type.Object({ id }), execute: async (a, api, ctx) => { const state = await api.snapshot(OrganizationStore, ctx); const p = state?.proposals.find(p => p.id === a.id) ?? state?.spawnProposals?.find(p => p.id === a.id) ?? state?.lifecycleProposals?.find(p => p.id === a.id); if (!p) throw new Error("Proposal missing"); return output(p); } });
 const review = defineTool({ name: "organization_review", description: "Independently review a delegation proposal", parameters: Type.Object({ id, decision: Type.Union([Type.Literal("start"), Type.Literal("approve"), Type.Literal("reject")]), reason: text }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
-  const directory = await tx.doc(AgentDirectory); const actor = identity(directory, api.conversationId); const state = await tx.doc(OrganizationStore); const spawn = state.spawnProposals?.find(p => p.id === a.id); const p = spawn ?? state.proposals.find(p => p.id === a.id); if (!p) throw new Error("Proposal missing");
+  const directory = await tx.doc(AgentDirectory); const actor = identity(directory, api.conversationId); const state = await tx.doc(OrganizationStore); const spawn = state.spawnProposals?.find(p => p.id === a.id); const lifecycle = state.lifecycleProposals?.find(p => p.id === a.id); const p = spawn ?? lifecycle ?? state.proposals.find(p => p.id === a.id); if (!p) throw new Error("Proposal missing");
   if (actor.id === p.author || (p.reviewer && p.reviewer !== actor.id)) throw new Error("Independent reviewer required");
   if (a.decision === "start" && p.status === "proposed") { p.reviewer = actor.id; p.status = "under_review"; }
-  else if (a.decision !== "start" && p.status === "under_review") { if (a.decision === "approve") { if (spawn) { validateSpawn(directory, await tx.doc(TaskBoard), await tx.doc(DomainStore), await tx.doc(GoalStore), spawn); checkSpawnBudget(directory, state.run); } else validate(directory, await tx.doc(TaskBoard), p as DelegationProposal); } p.status = a.decision === "approve" ? "approved" : "rejected"; p.review = a.reason; }
+  else if (a.decision !== "start" && p.status === "under_review") { if (a.decision === "approve") { if (spawn) { validateSpawn(directory, await tx.doc(TaskBoard), await tx.doc(DomainStore), await tx.doc(GoalStore), spawn); checkSpawnBudget(directory, state.run); } else if (lifecycle) { validateLifecycle(directory, await tx.doc(TaskBoard), await tx.doc(DomainStore), lifecycle, api.now()); checkChangeBudget(state.run); if (lifecycle.kind === "reuse") checkCapacity(directory, state.run!); } else validate(directory, await tx.doc(TaskBoard), p as DelegationProposal); } p.status = a.decision === "approve" ? "approved" : "rejected"; p.review = a.reason; }
   else if ((a.decision === "start" && p.status === "under_review") || (a.decision === "approve" && (p.status === "approved" || p.status === "applied")) || (a.decision === "reject" && p.status === "rejected")) return p.status;
   else throw new Error("Invalid review transition");
   p.updatedAt = api.now(); return p.status;
 }, ctx)) });
 const apply = defineTool({ name: "organization_apply", description: "Apply an independently approved delegation", parameters: Type.Object({ id }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
-  const directory = await tx.doc(AgentDirectory); identity(directory, api.conversationId); const state = await tx.doc(OrganizationStore); const spawn = state.spawnProposals?.find(p => p.id === a.id); const p = spawn ?? state.proposals.find(p => p.id === a.id); if (!p) throw new Error("Proposal missing");
+  const directory = await tx.doc(AgentDirectory); identity(directory, api.conversationId); const state = await tx.doc(OrganizationStore); const spawn = state.spawnProposals?.find(p => p.id === a.id); const lifecycle = state.lifecycleProposals?.find(p => p.id === a.id); const p = spawn ?? lifecycle ?? state.proposals.find(p => p.id === a.id); if (!p) throw new Error("Proposal missing");
   if (p.status === "applied") return p.status;
   if (p.status !== "approved" || !p.reviewer || p.reviewer === p.author) throw new Error("Independent approval required");
   const board = await tx.doc(TaskBoard);
+  if (lifecycle) {
+    const agent = validateLifecycle(directory, board, await tx.doc(DomainStore), lifecycle, api.now()); checkChangeBudget(state.run);
+    if (lifecycle.kind === "reuse") checkCapacity(directory, state.run!);
+    if (lifecycle.kind === "retire") {
+      const id = Number(agent.conversationId);
+      if (!Number.isSafeInteger(id) || id < 0 || String(id) !== agent.conversationId) throw new Error("Invalid conversation ID");
+      for (const status of ["pending", "running", "waiting", "sleeping", "completing"] as const) if ((await tx.scanTasks({ conversationId: id as ConversationId, status }, 1)).items.length) throw new Error("Agent has running durable work");
+    }
+    if (lifecycle.kind === "retire") { transitionAgent(agent, agent.revision, "draining", api.now()); transitionAgent(agent, agent.revision, "dormant", api.now()); }
+    else { transitionAgent(agent, agent.revision, "recovering", api.now()); transitionAgent(agent, agent.revision, "active", api.now()); }
+    state.run!.roundChanges++; lifecycle.status = "applied"; lifecycle.updatedAt = api.now(); return lifecycle.status;
+  }
   if (spawn) {
     const domains = await tx.doc(DomainStore); const goals = await tx.doc(GoalStore); const source = await tx.doc(AgentDoc, api.conversationId); const sourceContext = await tx.doc(AgentContext, api.conversationId);
     validateSpawn(directory, board, domains, goals, spawn); checkSpawnBudget(directory, state.run);
@@ -110,4 +152,4 @@ const apply = defineTool({ name: "organization_apply", description: "Apply an in
   task.assignedAgentId = delegation.targetAgentId; touch(task, api.now()); if (state.run) state.run.roundChanges++; delegation.status = "applied"; delegation.updatedAt = api.now(); return delegation.status;
 }, ctx)) });
 const spawn = defineTool({ name: "agent_spawn", description: "Apply an independently approved organization proposal", parameters: Type.Object({ id }), replay: "safe", execute: apply.execute });
-export const OrganizationExtension = defineExtension({ name: "delm-organization", tools: [list, inspect, analyze, propose, spawnPropose, status, review, apply, spawn] });
+export const OrganizationExtension = defineExtension({ name: "delm-organization", tools: [list, inspect, analyze, propose, spawnPropose, retire, reuse, status, review, apply, spawn] });

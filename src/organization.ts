@@ -13,9 +13,14 @@ export type SpawnProposal = {
   reason: string; reuseReason: string; benefits: string; costs: string; risks: string; review: string;
   createdAt: number; updatedAt: number; agentId: string | null;
 };
+export type LifecycleProposal = {
+  id: string; author: string; reviewer: string | null; status: "proposed" | "under_review" | "approved" | "rejected" | "applied";
+  kind: "retire" | "reuse"; agentId: string; agentRevision: number; reason: string; benefits: string; risks: string;
+  review: string; createdAt: number; updatedAt: number;
+};
 export const ORGANIZATION_LIMITS = { maxActiveAgents: 6, maxConcurrentAgents: 3, maxSpawnsPerRun: 3, maxSpawnsPerRound: 1, maxOrganizationChangesPerRound: 2, maxOrganizationRounds: 10 };
 export type OrganizationRun = { id: string; round: number; spawns: number; roundSpawns: number; roundChanges: number; limits: typeof ORGANIZATION_LIMITS };
-export const OrganizationStore = defineDoc<{ proposals: DelegationProposal[]; spawnProposals?: SpawnProposal[]; run?: OrganizationRun }>({
+export const OrganizationStore = defineDoc<{ proposals: DelegationProposal[]; spawnProposals?: SpawnProposal[]; lifecycleProposals?: LifecycleProposal[]; run?: OrganizationRun }>({
   kind: "delm.organization", version: 1, scope: "session",
   initial: () => ({ proposals: [] }), checkpointWhen: () => false,
 });
