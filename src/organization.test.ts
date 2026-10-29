@@ -15,6 +15,7 @@ import { AgentContext } from "./context/state.ts";
 import { ORGANIZATION_LIMITS, OrganizationStore } from "./organization.ts";
 import { initializeGlobalGoal } from "./goals.ts";
 import { DomainStore, reconcileDomains } from "./domains.ts";
+import { parseExperimentArgs } from "./experiment.ts";
 
 test("dynamic permissions are bound to the registered conversation and deny unknown capabilities", () => {
   const agent: AgentRecord = { id: "dynamic", conversationId: "42", name: "researcher", role: "researcher", capabilities: ["research"], status: "active", domainIds: [], goalIds: [], parentAgentId: null, createdAt: 0, updatedAt: 0, lastActiveAt: null, revision: 0 };
@@ -29,6 +30,12 @@ test("dynamic permissions are bound to the registered conversation and deny unkn
   expect(canClaimTask(directory, { role: "author", assignedAgentId: agent.id }, 42)).toBe(true);
   agent.status = "draining";
   expect(canClaimTask(directory, { role: "author", assignedAgentId: agent.id }, 42)).toBe(false);
+});
+
+test("comparison requires one goal and the same explicit task list", () => {
+  expect(parseExperimentArgs(["--goal", "g", "--task", "a", "--task", "b"])).toEqual({ goal: "g", tasks: ["a", "b"] });
+  expect(() => parseExperimentArgs(["--goal", "--task", "a"])).toThrow("Usage");
+  expect(() => parseExperimentArgs(["--goal", "g", "--goal", "g", "--task", "a"])).toThrow("Only one goal");
 });
 
 test("tool hook blocks unregistered and unauthorized conversations", async () => {

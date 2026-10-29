@@ -7,6 +7,7 @@
     "dev": "bun --watch src/index.ts",
     "start": "bun run src/index.ts",
     "check": "tsrs --noEmit",
+    "experiment": "bun run src/experiment.ts",
     "test": "bun test"
   },
   "devDependencies": {

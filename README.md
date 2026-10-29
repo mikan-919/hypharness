@@ -27,4 +27,6 @@ bunx tsrs --noEmit
 bun test
 ```
 
+To compare the fixed three-agent limit with dynamic organization on the same inputs, run `bun run experiment --goal 'Goal' --task 'First task' --task 'Second task'`. This makes model calls and runs each configuration in a separate in-memory session; it does not open `session.sqlite`. It reports completion counts, elapsed time, request counts, organization changes, and UTF-8 context sizes. Token and cache counts are `null`: the installed provider normalizes missing usage fields to zero, so this entry point cannot distinguish unavailable values from reported zeroes. Results can vary between runs because model responses and service latency vary.
+
 This project was created using `bun init` in bun v1.4.4. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
