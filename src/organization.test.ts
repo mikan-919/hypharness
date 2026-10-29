@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, Harness, MemoryStorage, type HookApi, type ToolHookCall, type ToolHooks, type ToolExecutionApi } from "@earendil-works/pi-durable";
+import { configure, createRegistry, Harness, MemoryStorage, type HookApi, type ToolHookCall, type ToolHooks, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,6 +11,7 @@ import { TaskBoard, addTask, newTask } from "./tasks.ts";
 import { OrganizationExtension } from "./tools/organization.ts";
 import { TaskExtension } from "./tools/tasks.ts";
 import { runScheduler } from "./scheduler.ts";
+import { AgentContext } from "./context/state.ts";
 
 test("dynamic permissions are bound to the registered conversation and deny unknown capabilities", () => {
   const agent: AgentRecord = { id: "dynamic", conversationId: "42", name: "researcher", role: "researcher", capabilities: ["research"], status: "active", domainIds: [], goalIds: [], parentAgentId: null, createdAt: 0, updatedAt: 0, lastActiveAt: null, revision: 0 };
@@ -129,5 +130,20 @@ test("restore refuses to replace an existing missing conversation", async () => 
     await expect(restoreAgents(harness, context)).rejects.toThrow("Registered conversation is missing or duplicated");
     expect((await harness.snapshot(AgentDirectory, context))!.ids.source_reviewer).toBe(999999);
     expect((await harness.commit(tx => tx.scanConversations({}, 100), context)).items.map(c => c.id)).toEqual(before.items.map(c => c.id));
+  } finally { await harness.close(context); }
+});
+
+test("new conversation, agent configuration, and context commit together", async () => {
+  const harness = await Harness.open(new MemoryStorage(), { models: createModels(), registry: createRegistry() }, context);
+  try {
+    await restoreAgents(harness, context);
+    const id = await harness.commit(async tx => {
+      const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
+      await configure(tx, conversation.id, { instructions: "fixed goal" });
+      (await tx.doc(AgentContext, conversation.id)).workingMemory = "initial context";
+      return conversation.id;
+    }, context);
+    expect((await (await harness.conversation(id, context))!.agent(context)).instructions).toBe("fixed goal");
+    expect((await harness.snapshot(AgentContext, id, context))!.workingMemory).toBe("initial context");
   } finally { await harness.close(context); }
 });
