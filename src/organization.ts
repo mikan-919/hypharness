@@ -1,5 +1,8 @@
 import { defineDoc } from "@earendil-works/pi-durable";
 
+export class OrganizationConflict extends Error {}
+export class OrganizationDeferred extends Error {}
+
 export type DelegationProposal = {
   id: string; author: string; reviewer: string | null; taskId: string; taskRevision: number;
   targetAgentId: string; targetRevision: number; reason: string; benefits: string; risks: string;
@@ -29,7 +32,7 @@ export type HandoffProposal = {
 };
 export const ORGANIZATION_LIMITS = { maxActiveAgents: 6, maxConcurrentAgents: 3, maxSpawnsPerRun: 3, maxSpawnsPerRound: 1, maxOrganizationChangesPerRound: 2, maxOrganizationRounds: 10 };
 export type OrganizationRun = { id: string; round: number; spawns: number; roundSpawns: number; roundChanges: number; limits: typeof ORGANIZATION_LIMITS };
-export const OrganizationStore = defineDoc<{ proposals: DelegationProposal[]; spawnProposals?: SpawnProposal[]; lifecycleProposals?: LifecycleProposal[]; handoffs?: HandoffProposal[]; run?: OrganizationRun }>({
+export const OrganizationStore = defineDoc<{ proposals: DelegationProposal[]; spawnProposals?: SpawnProposal[]; lifecycleProposals?: LifecycleProposal[]; handoffs?: HandoffProposal[]; analyses?: { id: string; author: string; decision: string; reason: string; taskIds: string[]; at: number }[]; run?: OrganizationRun }>({
   kind: "delm.organization", version: 1, scope: "session",
   initial: () => ({ proposals: [] }), checkpointWhen: () => false,
 });

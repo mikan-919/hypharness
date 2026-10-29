@@ -1,11 +1,12 @@
 import { Type } from "@earendil-works/pi-ai";
 import { AgentDoc, configure, defineExtension, defineTool, type ConversationId } from "@earendil-works/pi-durable";
 import { AgentDirectory, canClaimTask, transitionAgent, type Role } from "../agents.ts";
-import { OrganizationStore, type DelegationProposal, type HandoffProposal, type LifecycleProposal, type SpawnProposal } from "../organization.ts";
+import { OrganizationConflict, OrganizationDeferred, OrganizationStore, type DelegationProposal, type HandoffProposal, type LifecycleProposal, type SpawnProposal } from "../organization.ts";
 import { TaskBoard, addTask, newTask, touch, type Board } from "../tasks.ts";
 import { DomainStore, type DomainState } from "../domains.ts";
 import { GoalStore, type GoalState } from "../goals.ts";
 import { AgentContext } from "../context/state.ts";
+import { estimate } from "../context/state.ts";
 import { KnowledgeStore } from "../knowledge.ts";
 
 const id = Type.String({ minLength: 1, maxLength: 200 });
@@ -26,82 +27,90 @@ function validate(directory: Directory, board: Board, p: DelegationProposal) {
   const task = board.tasks.find(t => t.id === p.taskId);
   const target = directory.agents?.find(a => a.id === p.targetAgentId);
   const author = directory.agents?.find(a => a.id === p.author);
-  if (!task || task.state !== "open" || task.revision !== p.taskRevision) throw new Error("Task unavailable or revision conflict");
+  if (!task || task.state !== "open" || task.revision !== p.taskRevision) throw new OrganizationConflict("Task unavailable or revision conflict");
   // Knowledge and administrative reviews retain their existing independent roles.
-  if (!["subgoal", "hypothesis"].includes(task.type)) throw new Error("Task type cannot be delegated");
-  if (!author || author.status !== "active" || !canClaimTask(directory, task, Number(author.conversationId))) throw new Error("Proposer cannot assign task");
-  if (!target || target.status !== "active" || target.revision !== p.targetRevision || target.id === author.id || !Object.values(directory.ids).some(id => String(id) === target.conversationId)) throw new Error("Target unavailable or revision conflict");
+  if (!["subgoal", "hypothesis"].includes(task.type)) throw new OrganizationConflict("Task type cannot be delegated");
+  if (!author || author.status !== "active" || !canClaimTask(directory, task, Number(author.conversationId))) throw new OrganizationConflict("Proposer cannot assign task");
+  if (!target || target.status !== "active" || target.revision !== p.targetRevision || target.id === author.id || !Object.values(directory.ids).some(id => String(id) === target.conversationId)) throw new OrganizationConflict("Target unavailable or revision conflict");
 }
 function validateSpawn(directory: Directory, board: Board, domains: DomainState, goals: GoalState, p: SpawnProposal) {
   const author = directory.agents?.find(agent => agent.id === p.author);
   const task = board.tasks.find(task => task.id === p.taskId);
-  if (!author || author.status !== "active" || !task || task.state !== "open" || task.revision !== p.taskRevision || !canClaimTask(directory, task, Number(author.conversationId))) throw new Error("Task unavailable or revision conflict");
-  if (task.type !== "subgoal") throw new Error("Task type cannot be assigned to a new agent");
-  if (!task.requiredSpecialty || task.requiredSpecialty.trim().toLowerCase() !== p.role.trim().toLowerCase()) throw new Error("Task does not require the proposed specialty");
-  if (!p.name.trim() || !p.role.trim() || !p.reason.trim() || !p.reuseReason.trim() || !p.benefits.trim() || !p.costs.trim() || !p.risks.trim()) throw new Error("Spawn rationale is required");
-  if (!p.capabilities.includes("research") || !p.capabilities.includes("task_management") || p.capabilities.some(capability => !["research", "task_management"].includes(capability)) || new Set(p.capabilities).size !== p.capabilities.length) throw new Error("Invalid dynamic agent capabilities");
-  if (directory.agents?.some(agent => ["active", "dormant", "initializing", "recovering"].includes(agent.status) && agent.role.trim().toLowerCase() === p.role.trim().toLowerCase())) throw new Error("Existing agent can be reused for this role");
-  if (!goals.globalId || !goals.goals.some(goal => goal.id === goals.globalId && goal.status === "active")) throw new Error("Global goal required");
-  if (new Set(p.initialGoalIds).size !== p.initialGoalIds.length || new Set(p.initialDomainIds).size !== p.initialDomainIds.length) throw new Error("Duplicate assignments");
-  for (const id of p.initialGoalIds) { const goal = goals.goals.find(goal => goal.id === id && goal.status === "active"); if (!goal || goal.revision !== p.goalRevisions[id]) throw new Error("Goal revision conflict"); }
-  for (const id of p.initialDomainIds) { const domain = domains.domains.find(domain => domain.id === id && domain.status === "active"); if (!domain || domain.revision !== p.domainRevisions[id]) throw new Error("Domain revision conflict"); }
-  if (task.goalId && !p.initialGoalIds.includes(task.goalId)) throw new Error("Task goal must be assigned");
+  if (!author || author.status !== "active" || !task || task.state !== "open" || task.revision !== p.taskRevision || !canClaimTask(directory, task, Number(author.conversationId))) throw new OrganizationConflict("Task unavailable or revision conflict");
+  if (task.type !== "subgoal") throw new OrganizationConflict("Task type cannot be assigned to a new agent");
+  if (!task.requiredSpecialty || task.requiredSpecialty.trim().toLowerCase() !== p.role.trim().toLowerCase()) throw new OrganizationConflict("Task does not require the proposed specialty");
+  if (!p.name.trim() || !p.role.trim() || !p.reason.trim() || !p.reuseReason.trim() || !p.benefits.trim() || !p.costs.trim() || !p.risks.trim()) throw new OrganizationConflict("Spawn rationale is required");
+  if (!p.capabilities.includes("research") || !p.capabilities.includes("task_management") || p.capabilities.some(capability => !["research", "task_management"].includes(capability)) || new Set(p.capabilities).size !== p.capabilities.length) throw new OrganizationConflict("Invalid dynamic agent capabilities");
+  if (directory.agents?.some(agent => ["active", "dormant", "initializing", "recovering"].includes(agent.status) && agent.role.trim().toLowerCase() === p.role.trim().toLowerCase())) throw new OrganizationConflict("Existing agent can be reused for this role");
+  if (!goals.globalId || !goals.goals.some(goal => goal.id === goals.globalId && goal.status === "active")) throw new OrganizationConflict("Global goal required");
+  if (new Set(p.initialGoalIds).size !== p.initialGoalIds.length || new Set(p.initialDomainIds).size !== p.initialDomainIds.length) throw new OrganizationConflict("Duplicate assignments");
+  for (const id of p.initialGoalIds) { const goal = goals.goals.find(goal => goal.id === id && goal.status === "active"); if (!goal || goal.revision !== p.goalRevisions[id]) throw new OrganizationConflict("Goal revision conflict"); }
+  for (const id of p.initialDomainIds) { const domain = domains.domains.find(domain => domain.id === id && domain.status === "active"); if (!domain || domain.revision !== p.domainRevisions[id]) throw new OrganizationConflict("Domain revision conflict"); }
+  if (task.goalId && !p.initialGoalIds.includes(task.goalId)) throw new OrganizationConflict("Task goal must be assigned");
 }
 function checkSpawnBudget(directory: Directory, run: import("../organization.ts").OrganizationRun | undefined) {
-  if (!run || run.round >= run.limits.maxOrganizationRounds || run.spawns >= run.limits.maxSpawnsPerRun || run.roundSpawns >= run.limits.maxSpawnsPerRound || run.roundChanges >= run.limits.maxOrganizationChangesPerRound) throw new Error("Organization budget exhausted");
+  if (!run || run.round >= run.limits.maxOrganizationRounds || run.spawns >= run.limits.maxSpawnsPerRun || run.roundSpawns >= run.limits.maxSpawnsPerRound || run.roundChanges >= run.limits.maxOrganizationChangesPerRound) throw new OrganizationDeferred("Organization budget exhausted");
   checkCapacity(directory, run);
 }
-function checkCapacity(directory: Directory, run: import("../organization.ts").OrganizationRun) { if ((directory.agents ?? []).filter(agent => ["active", "initializing", "recovering"].includes(agent.status)).length >= run.limits.maxActiveAgents) throw new Error("Active agent limit reached"); }
+function checkCapacity(directory: Directory, run: import("../organization.ts").OrganizationRun) { if ((directory.agents ?? []).filter(agent => ["active", "initializing", "recovering"].includes(agent.status)).length >= run.limits.maxActiveAgents) throw new OrganizationDeferred("Active agent limit reached"); }
 function checkChangeBudget(run: import("../organization.ts").OrganizationRun | undefined) {
-  if (!run || run.round >= run.limits.maxOrganizationRounds || run.roundChanges >= run.limits.maxOrganizationChangesPerRound) throw new Error("Organization budget exhausted");
+  if (!run || run.round >= run.limits.maxOrganizationRounds || run.roundChanges >= run.limits.maxOrganizationChangesPerRound) throw new OrganizationDeferred("Organization budget exhausted");
 }
 function validateLifecycle(directory: Directory, board: Board, domains: DomainState, proposal: LifecycleProposal, now: number, handoffs: HandoffProposal[] = [], goals?: GoalState) {
   const agent = directory.agents?.find(a => a.id === proposal.agentId);
-  if (!agent || agent.revision !== proposal.agentRevision) throw new Error("Agent revision conflict");
-  if (Object.values(directory.ids).some(id => String(id) === agent.conversationId)) throw new Error("Base agents are protected");
-  if (now < agent.updatedAt + 60000) throw new Error("Agent is in cooldown");
+  if (!agent || agent.revision !== proposal.agentRevision) throw new OrganizationConflict("Agent revision conflict");
+  if (Object.values(directory.ids).some(id => String(id) === agent.conversationId)) throw new OrganizationConflict("Base agents are protected");
+  if (now < agent.updatedAt + 60000) throw new OrganizationDeferred("Agent is in cooldown");
   if (proposal.kind === "retire") {
-    if (agent.status !== "active") throw new Error("Active agent required");
-    if (board.tasks.some(task => (task.state === "open" && task.assignedAgentId === agent.id) || (task.state === "claimed" && task.owner === agent.conversationId))) throw new Error("Agent has unfinished tasks");
-    if (handoffs.some(p => p.fromAgentId === agent.id && ["proposed", "under_review", "approved"].includes(p.status))) throw new Error("Agent has an unfinished handoff");
-    if (domains.domains.some(domain => domain.status === "active" && domain.stewardId === agent.conversationId)) throw new Error("Agent is a domain steward");
-  } else if (proposal.kind === "reuse") { if (agent.status !== "dormant") throw new Error("Dormant agent required"); }
+    if (agent.status !== "active") throw new OrganizationConflict("Active agent required");
+    if (board.tasks.some(task => (task.state === "open" && task.assignedAgentId === agent.id) || (task.state === "claimed" && task.owner === agent.conversationId))) throw new OrganizationConflict("Agent has unfinished tasks");
+    if (handoffs.some(p => p.fromAgentId === agent.id && ["proposed", "under_review", "approved"].includes(p.status))) throw new OrganizationConflict("Agent has an unfinished handoff");
+    if (domains.domains.some(domain => domain.status === "active" && domain.stewardId === agent.conversationId)) throw new OrganizationConflict("Agent is a domain steward");
+  } else if (proposal.kind === "reuse") { if (agent.status !== "dormant") throw new OrganizationConflict("Dormant agent required"); }
   else {
-    if (agent.status !== "active" || !proposal.newRole?.trim() || proposal.newRole === agent.role) throw new Error("Invalid role reassignment");
-    if (directory.agents?.some(other => other.id !== agent.id && ["active", "dormant"].includes(other.status) && other.role.trim().toLowerCase() === proposal.newRole!.trim().toLowerCase())) throw new Error("Existing agent can be reused for this role");
-    if (board.tasks.some(task => (task.state === "claimed" && task.owner === agent.conversationId) || (task.state === "open" && task.assignedAgentId === agent.id && task.requiredSpecialty && task.requiredSpecialty.trim().toLowerCase() !== proposal.newRole!.trim().toLowerCase()))) throw new Error("Agent has incompatible tasks");
-    if (!goals?.globalId || !proposal.goalRevisions || !proposal.domainRevisions) throw new Error("Goal and domain revisions required");
-    for (const [id, revision] of Object.entries(proposal.goalRevisions)) if (!goals.goals.some(goal => goal.id === id && goal.status === "active" && goal.revision === revision)) throw new Error("Goal revision conflict");
-    for (const [id, revision] of Object.entries(proposal.domainRevisions)) if (!domains.domains.some(domain => domain.id === id && domain.status === "active" && domain.revision === revision)) throw new Error("Domain revision conflict");
+    if (agent.status !== "active" || !proposal.newRole?.trim() || proposal.newRole === agent.role) throw new OrganizationConflict("Invalid role reassignment");
+    if (directory.agents?.some(other => other.id !== agent.id && ["active", "dormant"].includes(other.status) && other.role.trim().toLowerCase() === proposal.newRole!.trim().toLowerCase())) throw new OrganizationConflict("Existing agent can be reused for this role");
+    if (board.tasks.some(task => (task.state === "claimed" && task.owner === agent.conversationId) || (task.state === "open" && task.assignedAgentId === agent.id && task.requiredSpecialty && task.requiredSpecialty.trim().toLowerCase() !== proposal.newRole!.trim().toLowerCase()))) throw new OrganizationConflict("Agent has incompatible tasks");
+    if (!goals?.globalId || !proposal.goalRevisions || !proposal.domainRevisions) throw new OrganizationConflict("Goal and domain revisions required");
+    for (const [id, revision] of Object.entries(proposal.goalRevisions)) if (!goals.goals.some(goal => goal.id === id && goal.status === "active" && goal.revision === revision)) throw new OrganizationConflict("Goal revision conflict");
+    for (const [id, revision] of Object.entries(proposal.domainRevisions)) if (!domains.domains.some(domain => domain.id === id && domain.status === "active" && domain.revision === revision)) throw new OrganizationConflict("Domain revision conflict");
   }
   return agent;
 }
 function validateHandoff(directory: Directory, board: Board, domains: DomainState, goals: GoalState, p: HandoffProposal) {
   const from = directory.agents?.find(agent => agent.id === p.fromAgentId); const to = directory.agents?.find(agent => agent.id === p.toAgentId);
-  if (!from || from.id !== p.author || from.status !== "active" || from.revision !== p.fromRevision || !to || to.id === from.id || to.status !== "active" || to.revision !== p.toRevision) throw new Error("Handoff agent unavailable or revision conflict");
+  if (!from || from.id !== p.author || from.status !== "active" || from.revision !== p.fromRevision || !to || to.id === from.id || to.status !== "active" || to.revision !== p.toRevision) throw new OrganizationConflict("Handoff agent unavailable or revision conflict");
   const targetBase = Object.values(directory.ids).some(id => String(id) === to.conversationId);
-  if (!targetBase && !to.capabilities.includes("task_management")) throw new Error("Handoff target cannot execute tasks");
-  for (const ids of [p.taskIds, p.domainIds, p.goalIds, p.knowledgeIds]) if (new Set(ids).size !== ids.length) throw new Error("Duplicate handoff IDs");
-  for (const id of p.taskIds) { const task = board.tasks.find(t => t.id === id); if (!task || task.state !== "open" || task.revision !== p.taskRevisions[id] || !canClaimTask(directory, task, Number(from.conversationId)) || !["subgoal", "hypothesis"].includes(task.type) || (!targetBase && task.type !== "subgoal")) throw new Error("Handoff task unavailable or revision conflict"); }
-  for (const id of p.domainIds) { const domain = domains.domains.find(d => d.id === id && d.status === "active"); if (!domain || domain.revision !== p.domainRevisions[id] || domain.stewardId !== from.conversationId || !targetBase) throw new Error("Handoff domain unavailable or revision conflict"); }
-  for (const id of p.goalIds) { const goal = goals.goals.find(g => g.id === id && g.status === "active"); if (!goal || goal.revision !== p.goalRevisions[id] || !from.goalIds.includes(id)) throw new Error("Handoff goal unavailable or revision conflict"); }
+  if (!targetBase && !to.capabilities.includes("task_management")) throw new OrganizationConflict("Handoff target cannot execute tasks");
+  for (const ids of [p.taskIds, p.domainIds, p.goalIds, p.knowledgeIds]) if (new Set(ids).size !== ids.length) throw new OrganizationConflict("Duplicate handoff IDs");
+  for (const id of p.taskIds) { const task = board.tasks.find(t => t.id === id); if (!task || task.state !== "open" || task.revision !== p.taskRevisions[id] || !canClaimTask(directory, task, Number(from.conversationId)) || !["subgoal", "hypothesis"].includes(task.type) || (!targetBase && task.type !== "subgoal")) throw new OrganizationConflict("Handoff task unavailable or revision conflict"); }
+  for (const id of p.domainIds) { const domain = domains.domains.find(d => d.id === id && d.status === "active"); if (!domain || domain.revision !== p.domainRevisions[id] || domain.stewardId !== from.conversationId || !targetBase) throw new OrganizationConflict("Handoff domain unavailable or revision conflict"); }
+  for (const id of p.goalIds) { const goal = goals.goals.find(g => g.id === id && g.status === "active"); if (!goal || goal.revision !== p.goalRevisions[id] || !from.goalIds.includes(id)) throw new OrganizationConflict("Handoff goal unavailable or revision conflict"); }
   if (p.kind === "consolidate") {
-    if (Object.values(directory.ids).some(id => String(id) === from.conversationId)) throw new Error("Base agents are protected");
-    if (!targetBase && !from.capabilities.some(capability => to.capabilities.includes(capability))) throw new Error("Agent roles do not overlap");
-    if (board.tasks.some(task => (task.state === "claimed" && task.owner === from.conversationId) || (task.state === "open" && task.assignedAgentId === from.id && !p.taskIds.includes(task.id)))) throw new Error("Consolidation has unfinished tasks");
-    if (domains.domains.some(domain => domain.status === "active" && domain.stewardId === from.conversationId && !p.domainIds.includes(domain.id))) throw new Error("Consolidation has untransferred domains");
-    if (from.goalIds.some(id => !p.goalIds.includes(id))) throw new Error("Consolidation has untransferred goals");
-  } else if (!p.taskIds.length && !p.domainIds.length && !p.goalIds.length) throw new Error("Empty handoff");
+    if (Object.values(directory.ids).some(id => String(id) === from.conversationId)) throw new OrganizationConflict("Base agents are protected");
+    if (!targetBase && !from.capabilities.some(capability => to.capabilities.includes(capability))) throw new OrganizationConflict("Agent roles do not overlap");
+    if (board.tasks.some(task => (task.state === "claimed" && task.owner === from.conversationId) || (task.state === "open" && task.assignedAgentId === from.id && !p.taskIds.includes(task.id)))) throw new OrganizationConflict("Consolidation has unfinished tasks");
+    if (domains.domains.some(domain => domain.status === "active" && domain.stewardId === from.conversationId && !p.domainIds.includes(domain.id))) throw new OrganizationConflict("Consolidation has untransferred domains");
+    if (from.goalIds.some(id => !p.goalIds.includes(id))) throw new OrganizationConflict("Consolidation has untransferred goals");
+  } else if (!p.taskIds.length && !p.domainIds.length && !p.goalIds.length) throw new OrganizationConflict("Empty handoff");
   return { from, to };
 }
 const list = defineTool({ name: "agent_list", description: "List registered agents", parameters: Type.Object({}), execute: async (_a, api, ctx) => output((await api.snapshot(AgentDirectory, ctx))?.agents ?? []) });
 const inspect = defineTool({ name: "agent_inspect", description: "Inspect a registered agent", parameters: Type.Object({ id }), execute: async (a, api, ctx) => { const agent = (await api.snapshot(AgentDirectory, ctx))?.agents?.find(x => x.id === a.id); if (!agent) throw new Error("Agent missing"); return output(agent); } });
 const analyze = defineTool({ name: "organization_analyze", description: "Inspect measured organization workload without guessing model usage", parameters: Type.Object({}), execute: async (_a, api, ctx) => {
-  const directory = await api.snapshot(AgentDirectory, ctx); identity(directory ?? { ids: {} }, api.conversationId);
+  const directory = await api.snapshot(AgentDirectory, ctx); const author = identity(directory ?? { ids: {} }, api.conversationId);
   const board = await api.snapshot(TaskBoard, ctx); const domains = await api.snapshot(DomainStore, ctx); const goals = await api.snapshot(GoalStore, ctx);
-  const agents = (directory?.agents ?? []).map(agent => ({ id: agent.id, status: agent.status, role: agent.role, capabilities: agent.capabilities, domainIds: (domains?.domains ?? []).filter(d => d.status === "active" && d.stewardId === agent.conversationId).map(d => d.id), goalIds: agent.goalIds, openTasks: (board?.tasks ?? []).filter(t => t.state === "open" && canClaimTask(directory!, t, Number(agent.conversationId))).length, claimedTasks: (board?.tasks ?? []).filter(t => t.state === "claimed" && t.owner === agent.conversationId).length }));
+  const agents = await Promise.all((directory?.agents ?? []).map(async agent => { const id = Number(agent.conversationId); if (!Number.isSafeInteger(id) || id < 0 || String(id) !== agent.conversationId) throw new Error("Invalid conversation ID"); const context = await api.snapshot(AgentContext, id as ConversationId, ctx); return { id: agent.id, status: agent.status, role: agent.role, capabilities: agent.capabilities, domainIds: (domains?.domains ?? []).filter(d => d.status === "active" && d.stewardId === agent.conversationId).map(d => d.id), goalIds: agent.goalIds, openTasks: (board?.tasks ?? []).filter(t => t.state === "open" && canClaimTask(directory!, t, id)).length, claimedTasks: (board?.tasks ?? []).filter(t => t.state === "claimed" && t.owner === agent.conversationId).length, contextBytes: context ? estimate(context.workingMemory) + estimate(context.checkpoint.summary) : null }; }));
   const dormantAssignments = (board?.tasks ?? []).filter(t => t.state === "open" && t.assignedAgentId && agents.some(agent => agent.id === t.assignedAgentId && agent.status === "dormant")).map(t => t.id);
-  return output({ decision: dormantAssignments.length ? "consider_resume" : "keep", reason: dormantAssignments.length ? "Open tasks are assigned to dormant agents; check reuse before creating an agent." : "No dormant assignments found; other change criteria are not evaluated.", activeAgents: agents.filter(a => a.status === "active").length, dormantAgents: agents.filter(a => a.status === "dormant").length, agents, openTasks: (board?.tasks ?? []).filter(t => t.state === "open").length, dormantAssignments, activeSubgoals: (goals?.goals ?? []).filter(g => g.id !== goals?.globalId && g.status === "active").length, modelCalls: null, inputTokens: null, outputTokens: null, cachedInputTokens: null, inferenceCost: null });
+  const specialized = (board?.tasks ?? []).filter(t => t.state === "open" && t.requiredSpecialty);
+  const dormantMatches = specialized.filter(t => agents.some(agent => agent.status === "dormant" && agent.role.trim().toLowerCase() === t.requiredSpecialty!.trim().toLowerCase()));
+  const activeMatches = specialized.filter(t => agents.some(agent => agent.status === "active" && agent.role.trim().toLowerCase() === t.requiredSpecialty!.trim().toLowerCase() && !canClaimTask(directory!, t, Number(directory!.agents!.find(a => a.id === agent.id)!.conversationId))));
+  const unmatched = specialized.filter(t => !agents.some(agent => ["active", "dormant"].includes(agent.status) && agent.role.trim().toLowerCase() === t.requiredSpecialty!.trim().toLowerCase()));
+  const decision = activeMatches.length ? "consider_reassign" : dormantAssignments.length || dormantMatches.length ? "consider_resume" : unmatched.length ? "consider_specialist" : "keep";
+  const reason = decision === "consider_reassign" ? "An open task matches an active specialist; evaluate reassignment." : decision === "consider_resume" ? "An open task matches a dormant agent; evaluate reuse." : decision === "consider_specialist" ? "An open task names a specialty with no matching active or dormant role; independently review the need and alternatives." : "No uncovered specialty or dormant assignment was found.";
+  const taskIds = [...new Set([...activeMatches.map(t => t.id), ...dormantAssignments, ...dormantMatches.map(t => t.id), ...unmatched.map(t => t.id)])];
+  await api.commit(async tx => { const state = await tx.doc(OrganizationStore); state.analyses ??= []; const id = `analysis:${api.conversationId}:${api.callId}`; if (!state.analyses.some(a => a.id === id)) { state.analyses.push({ id, author: author.id, decision, reason, taskIds, at: api.now() }); if (state.analyses.length > 100) state.analyses.splice(0, state.analyses.length - 100); } }, ctx);
+  return output({ decision, reason, taskIds, activeAgents: agents.filter(a => a.status === "active").length, dormantAgents: agents.filter(a => a.status === "dormant").length, agents, openTasks: (board?.tasks ?? []).filter(t => t.state === "open").length, failedTasks: (board?.tasks ?? []).filter(t => t.state === "failed").length, dormantAssignments, activeSubgoals: (goals?.goals ?? []).filter(g => g.id !== goals?.globalId && g.status === "active").length, pendingDiscoveries: (domains?.discoveries ?? []).filter(d => d.outcome === "pending").length, modelCalls: null, inputTokens: null, outputTokens: null, cachedInputTokens: null, inferenceCost: null, utilization: null, taskProcessingTime: null, taskRetries: null });
 } });
 const propose = defineTool({ name: "agent_delegate", description: "Propose delegation of an unclaimed subgoal or hypothesis; independent review is required", parameters: Type.Object({ taskId: id, taskRevision: Type.Integer({ minimum: 0 }), targetAgentId: id, targetRevision: Type.Integer({ minimum: 0 }), reason: text, benefits: text, risks: text }), replay: "safe", execute: async (a, api, ctx) => output(await api.commit(async tx => {
   const directory = await tx.doc(AgentDirectory); const author = identity(directory, api.conversationId);
@@ -174,9 +183,9 @@ const apply = defineTool({ name: "organization_apply", description: "Apply an in
   if (transfer) {
     const domains = await tx.doc(DomainStore); const goals = await tx.doc(GoalStore); const { from, to } = validateHandoff(directory, board, domains, goals, transfer); checkChangeBudget(state.run); const now = api.now();
     if (transfer.kind === "consolidate") {
-      if (now < from.updatedAt + 60000) throw new Error("Agent is in cooldown");
+      if (now < from.updatedAt + 60000) throw new OrganizationDeferred("Agent is in cooldown");
       const id = Number(from.conversationId); if (!Number.isSafeInteger(id) || id < 0 || String(id) !== from.conversationId) throw new Error("Invalid conversation ID");
-      for (const status of ["pending", "running", "waiting", "sleeping", "completing"] as const) if ((await tx.scanTasks({ conversationId: id as ConversationId, status }, 1)).items.length) throw new Error("Agent has running durable work");
+      for (const status of ["pending", "running", "waiting", "sleeping", "completing"] as const) if ((await tx.scanTasks({ conversationId: id as ConversationId, status }, 1)).items.length) throw new OrganizationDeferred("Agent has running durable work");
       if (state.handoffs?.some(p => p.id !== transfer.id && p.fromAgentId === from.id && ["proposed", "under_review", "approved"].includes(p.status))) throw new Error("Agent has an unfinished handoff");
     }
     for (const id of transfer.taskIds) { const task = board.tasks.find(t => t.id === id)!; task.assignedAgentId = to.id; touch(task, now); }
@@ -190,11 +199,12 @@ const apply = defineTool({ name: "organization_apply", description: "Apply an in
   if (lifecycle) {
     const domains = await tx.doc(DomainStore); const goals = await tx.doc(GoalStore);
     const agent = validateLifecycle(directory, board, domains, lifecycle, api.now(), state.handoffs, goals); checkChangeBudget(state.run);
+    const conversationNumber = Number(agent.conversationId); if (!Number.isSafeInteger(conversationNumber) || conversationNumber < 0 || String(conversationNumber) !== agent.conversationId || !(await tx.conversation(conversationNumber as ConversationId))) throw new OrganizationConflict("Agent conversation missing or invalid");
     if (lifecycle.kind === "reuse") checkCapacity(directory, state.run!);
     if (lifecycle.kind === "retire" || lifecycle.kind === "reassign") {
       const id = Number(agent.conversationId);
       if (!Number.isSafeInteger(id) || id < 0 || String(id) !== agent.conversationId) throw new Error("Invalid conversation ID");
-      for (const status of ["pending", "running", "waiting", "sleeping", "completing"] as const) if ((await tx.scanTasks({ conversationId: id as ConversationId, status }, 1)).items.length) throw new Error("Agent has running durable work");
+      for (const status of ["pending", "running", "waiting", "sleeping", "completing"] as const) if ((await tx.scanTasks({ conversationId: id as ConversationId, status }, 1)).items.length) throw new OrganizationDeferred("Agent has running durable work");
     }
     if (lifecycle.kind === "retire") { transitionAgent(agent, agent.revision, "draining", api.now()); transitionAgent(agent, agent.revision, "dormant", api.now()); }
     else if (lifecycle.kind === "reuse") { transitionAgent(agent, agent.revision, "recovering", api.now()); transitionAgent(agent, agent.revision, "active", api.now()); }
