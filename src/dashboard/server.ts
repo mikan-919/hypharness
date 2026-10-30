@@ -174,7 +174,7 @@ async function rsiGeneration(gen: number) {
   const preds = new Map((await jsonl(join(out, "predictions.jsonl"))).map(p => [p.id, p]));
   const samples = (await jsonl(join(out, "judgments.jsonl"))).map(j => {
     const p = preds.get(j.id);
-    const sizes = withDb(join(out, "dynamic", String(j.id).replaceAll(":", "-"), "state.sqlite"),
+    const sizes = withDb(join(out, String(j.arm), String(j.id).replaceAll(":", "-"), "state.sqlite"),
       d => d.query("select input + cache_read + cache_write n from usage").all().map(r => (r as { n: number }).n)) ?? [];
     return {
       id: j.id, category: j.category, label: j.label, score: j.score, outcome: p?.outcome, calls: p?.usage.calls ?? 0, ms: p?.ms ?? 0,

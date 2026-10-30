@@ -32,6 +32,8 @@ async function main() {
       calls: { type: "string", default: "40" },
       "harness-concurrency": { type: "string", default: "4" },
       delta: { type: "string", default: "0.05" },
+      // The harness arm that answers: dynamic reads the conversation from files, memory finds it in DeLM.
+      arm: { type: "string", default: "dynamic" },
     },
   });
   if (!candidateArg) throw new Error("usage: bun scripts/rsi-eval.ts <candidate-dir> [--baseline eval.json] [--out DIR]");
@@ -75,7 +77,7 @@ async function main() {
   // auth.json is read from cwd; the link stays outside the candidate's workspace.
   if (!existsSync(join(copy, "auth.json"))) symlinkSync(join(pinned, "auth.json"), join(copy, "auth.json"));
   const locomoOut = join(out, "locomo");
-  const code = await exec(["bun", "src/index.ts", "locomo", "--arms", "dynamic", "--per-category", opts["per-category"]!, "--seed", opts.seed!,
+  const code = await exec(["bun", "src/index.ts", "locomo", "--arms", opts.arm!, "--per-category", opts["per-category"]!, "--seed", opts.seed!,
     "--calls", opts.calls!, "--harness-concurrency", opts["harness-concurrency"]!, "--dir", join(pinned, ".hyph"), "--out", locomoOut]);
   // Provider failures stop the benchmark; the run resumes from the same --out, so this is not a verdict on the candidate.
   if (code !== 0) await finish({ ok: false, transient: true, commit, reason: `locomo exited ${code}` });
@@ -84,12 +86,12 @@ async function main() {
   const perSample: Record<string, number> = {};
   for (const line of (await Bun.file(join(locomoOut, "judgments.jsonl")).text()).split("\n").filter(Boolean)) {
     const j = JSON.parse(line);
-    if (j.arm === "dynamic") perSample[j.id] = j.score;
+    if (j.arm === opts.arm) perSample[j.id] = j.score;
   }
 
   // Prompt size per call as the provider reported it (fresh + cached input); stored message chars overcount reasoning data.
   const all: number[] = [], peaks: number[] = [];
-  const armDir = join(locomoOut, "dynamic");
+  const armDir = join(locomoOut, opts.arm!);
   for (const sample of existsSync(armDir) ? readdirSync(armDir) : []) {
     const path = join(armDir, sample, "state.sqlite");
     if (!existsSync(path)) continue;
@@ -102,7 +104,7 @@ async function main() {
   }
   const mean = (xs: number[]) => xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : 0;
   const result: Eval = {
-    ok: true, commit, sampleIds: report.sampleIds, score: report.results.dynamic.overallAvg, perSample,
+    ok: true, commit, sampleIds: report.sampleIds, score: report.results[opts.arm!].overallAvg, perSample,
     context: { calls: all.length, maxTokens: all.length ? Math.max(...all) : 0, meanTokens: mean(all), meanPeakTokens: mean(peaks) },
   };
 

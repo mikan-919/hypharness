@@ -509,7 +509,7 @@ type RsiInfo = {
   state: { incumbent?: { gen: number; commit: string }; settings: Row; generations: Generation[] } | null;
 };
 type RsiForm = {
-  purpose: string; constraints: string; mode: string; calls: string; evalCalls: string;
+  purpose: string; constraints: string; mode: string; arm: string; calls: string; evalCalls: string;
   perCategory: string; seed: string; delta: string; parallel?: string; generations?: string;
 };
 type RsiGen = { gen: number; usage: Row[]; agents: Row[]; samples: Row[] };
@@ -685,7 +685,7 @@ function GenerationChart({ title, description, rows, field, format }: { title: s
 // While the loop runs its settings cannot change; they are shown as they were given to it.
 function RsiSettingsView({ settings: s }: { settings: Partial<RsiForm> }) {
   const items: [string, string | undefined][] = [
-    ["改善役の組織", s.mode], ["改善の呼び出し上限", s.calls], ["解答の呼び出し上限", s.evalCalls], ["世代数", s.generations ?? "無制限"],
+    ["改善役の組織", s.mode], ["評価する方式", s.arm ?? "dynamic"], ["改善の呼び出し上限", s.calls], ["解答の呼び出し上限", s.evalCalls], ["世代数", s.generations ?? "無制限"],
     ["分類ごとの問題数", s.perCategory], ["種", s.seed], ["評価の並列数", s.parallel ?? "全問"], ["許容幅 δ", s.delta],
   ];
   return (
@@ -752,7 +752,7 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
             <form id="rsi-form" className="grid items-start gap-4 md:grid-cols-2" onSubmit={e => {
               e.preventDefault();
               // The questions and per-question budget are fixed by the first start; a resume keeps them.
-              const sample = started ? {} : { perCategory: toInt(form.perCategory), seed: toInt(form.seed), evalCalls: toInt(form.evalCalls) };
+              const sample = started ? {} : { perCategory: toInt(form.perCategory), seed: toInt(form.seed), evalCalls: toInt(form.evalCalls), arm: form.arm };
               act(() => post("/api/rsi/start", {
                 purpose: form.purpose, constraints: form.constraints, mode: form.mode, calls: toInt(form.calls), ...sample,
                 generations: toInt(form.generations ?? ""), parallel: toInt(form.parallel ?? ""), delta: form.delta.trim() ? Number(form.delta) : undefined,
@@ -772,6 +772,15 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
                       <SelectItem value="dynamic">dynamic</SelectItem>
                       <SelectItem value="fixed">fixed</SelectItem>
                       <SelectItem value="single">single</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field id="rsi-arm" label="評価する方式" hint={started ? "初回の開始で固定" : "dynamic は会話をファイルで、memory は DeLM の記憶で読む"}>
+                  <Select value={started ? settings.arm ?? "dynamic" : form.arm} onValueChange={v => setForm({ ...form, arm: v })} disabled={started}>
+                    <SelectTrigger id="rsi-arm"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="dynamic">dynamic</SelectItem>
+                      <SelectItem value="memory">memory</SelectItem>
                     </SelectContent>
                   </Select>
                 </Field>

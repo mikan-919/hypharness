@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
+import { Store } from "./db.ts";
+import { ingestConversation } from "./memory.ts";
 import { buildSamples, judgePrompt, labelToScore, parseJudge, predictHarness, runLocomo, selectSamples, SOURCE, type LocomoItem, type PlusItem } from "./locomo.ts";
 
 const conversation = {
@@ -121,4 +123,40 @@ test("harness arm reads the split conversation and answers through answer.txt", 
   const p = await predictHarness(llm, sample, "single", dir, 20);
   expect(p).toMatchObject({ arm: "single", prediction: "Oslo", outcome: "done" });
   expect(await Bun.file(join(dir, "workspace", "conversation", "index.txt")).text()).toStartWith("part-001.txt: DATE: 1:00 pm on 1 May, 2023");
+});
+
+test("memory arm finds the conversation as knowledge, one sentence per item and one domain per session", async () => {
+  const [sample] = buildSamples(locomo, plus);
+  const plusSample = buildSamples(locomo, plus).find(s => s.id === "plus:0")!;
+  const store = new Store(":memory:");
+  expect(ingestConversation(store, sample!.chunks.join("\n"))).toBe(5);
+  expect(store.all<{ id: string; gist: string }>("select id, gist from knowledge order by id").map(k => k.gist)).toEqual([
+    "[1:00 pm on 1 May, 2023] Ann: I adopted a cat.", "[1:00 pm on 1 May, 2023] Bob: Nice!", "[1:00 pm on 1 May, 2023] Bob: (and shared a photo of a cat.)",
+    "[9:30 am on 20 May, 2023] Bob: I moved to Oslo.", "[4:15 PM on 10 June, 2023] Ann: My cat is sick.",
+  ]);
+  expect(store.all("select id from domains").length).toBe(3);
+  // A stitched LoCoMo-Plus conversation has no dates but keeps the cue.
+  const plusStore = new Store(":memory:");
+  ingestConversation(plusStore, plusSample.chunks.join("\n"));
+  expect(plusStore.all<{ gist: string }>("select gist from knowledge").map(k => k.gist)).toContain("Ann: I'm allergic to peanuts.");
+
+  const brain = (ctx: { messages: Message[] }) => {
+    const used = ctx.messages.filter(m => m.role === "toolResult").map(m => m.toolName);
+    const first = ctx.messages.find(m => m.role === "user")!.content;
+    const opening = typeof first === "string" ? first : first.map(b => (b as { text?: string }).text ?? "").join("");
+    const call = (name: string, args: Parameters<typeof fauxToolCall>[1]) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
+    if (opening.includes("(verify")) return call("task_finish", { result: "answer.txt checked", verdict: "pass" });
+    if (!used.includes("knowledge_search")) return call("knowledge_search", { query: "moved" });
+    if (!used.includes("file_write")) return call("file_write", { path: "answer.txt", content: "Oslo" });
+    if (!used.includes("goal_complete")) return call("goal_complete", { id: "G0", deliverable: "answer.txt" });
+    return call("task_finish", { result: "submitted" });
+  };
+  const dir = mkdtempSync(join(tmpdir(), "locomo-memory-"));
+  const p = await predictHarness(llmWith(Array(30).fill(brain)), sample!, "memory", dir, 20);
+  expect(p).toMatchObject({ arm: "memory", prediction: "Oslo" });
+  expect(existsSync(join(dir, "workspace", "conversation"))).toBe(false);
+  const answering = new Store(join(dir, "state.sqlite"));
+  const search = answering.get<{ result: string }>("select result from ops where result like '%Oslo%'");
+  expect(search?.result).toContain("K-s2-1-1 [verified] [9:30 am on 20 May, 2023] Bob: I moved to Oslo.");
+  answering.db.close();
 });

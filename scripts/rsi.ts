@@ -1,4 +1,4 @@
-// Recursive self-improvement loop. Each generation, the incumbent harness runs a dynamic session whose workspace is a git
+// Recursive self-improvement loop. Each generation, the incumbent harness runs a session whose workspace is a git
 // worktree of its own source; scripts/rsi-eval.ts scores the resulting candidate against the incumbent; an accepted
 // candidate becomes the harness that runs the next generation. state.json records every generation for the dashboard.
 // Every step resumes after a stop: the session from its state.sqlite, the evaluation from its LoCoMo output.
@@ -21,6 +21,8 @@ const { values: opts } = parseArgs({
     calls: { type: "string" },
     "eval-calls": { type: "string" },
     "per-category": { type: "string" },
+    // Evaluated arm: dynamic (conversation in files) or memory (conversation in DeLM).
+    arm: { type: "string" },
     seed: { type: "string" },
     delta: { type: "string" },
     // Not carried over: questions solved at once in an evaluation (defaults to all of them) and the generation limit.
@@ -118,8 +120,8 @@ async function evaluate(state: State, g: Generation) {
   if (!existsSync(workspace)) await $`git -C ${repo} worktree add -f --detach ${workspace} HEAD`.quiet();
   g.commit ??= (await $`git -C ${workspace} rev-parse HEAD`.text()).trim();
   rmSync(join(out, "eval.json"), { force: true });
-  const { perCategory, seed, delta, evalCalls, parallel } = state.settings;
-  await run(["bun", join(repo, "scripts", "rsi-eval.ts"), workspace, "--out", out, "--per-category", perCategory, "--seed", seed, "--calls", evalCalls,
+  const { perCategory, seed, delta, evalCalls, parallel, arm } = state.settings;
+  await run(["bun", join(repo, "scripts", "rsi-eval.ts"), workspace, "--out", out, "--per-category", perCategory, "--seed", seed, "--calls", evalCalls, "--arm", arm,
     "--delta", delta, "--harness-concurrency", parallel ?? String(6 * Number(perCategory)), ...(state.incumbent ? ["--baseline", state.incumbent.eval] : [])], join(dir, "eval.log"));
   const evalPath = join(out, "eval.json");
   const e: Eval | undefined = existsSync(evalPath) ? JSON.parse(readFileSync(evalPath, "utf8")) : undefined;

@@ -80,7 +80,7 @@ const log = (line: string) => console.log(line);
 
 if (command === "locomo") {
   const arms = opts.arms!.split(",").map(a => a.trim()).filter(Boolean);
-  for (const a of arms) if (!["direct", "single", "fixed", "dynamic"].includes(a)) throw new Error(`Unknown arm ${a}; use direct, single, fixed, dynamic`);
+  for (const a of arms) if (!["direct", "single", "fixed", "dynamic", "memory"].includes(a)) throw new Error(`Unknown arm ${a}; use direct, single, fixed, dynamic, memory`);
   const categories = opts.categories?.split(",").map(c => c.trim()).filter(Boolean);
   for (const c of categories ?? []) if (!CATEGORIES.includes(c)) throw new Error(`Unknown category ${c}; use ${CATEGORIES.join(", ")}`);
   const perCategory = opts["per-category"] === "all" ? "all" : int(opts["per-category"], "per-category")!;

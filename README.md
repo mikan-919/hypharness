@@ -176,6 +176,8 @@ bun run src/index.ts locomo --arms direct,dynamic --per-category 2
 
 長期会話の記憶を問う [LoCoMo-Plus](https://github.com/xjtuleeyf/Locomo-Plus) の問題を、モデルへの1回の呼び出しとハーネスで解かせ、LLM で採点して比べます。問題の組み立てと採点は参照実装を移植しています。データの扱い、オプション、出力、比較の注意、測定例は [LoCoMo-Plus ベンチマーク](docs/locomo.md) にあります。
 
+`--arms` に `memory` を加えると、会話をファイルで渡す代わりに DeLM の記憶として渡す方式も測れます。会話を句読点で文ごとに分け、1文を1件の knowledge（検証済み）として記録し、セッションごとに domain を作ります。エージェント（dynamic）は会話のファイルを持たず、`knowledge_search` と `knowledge_get` で必要な文だけを引きます。取り込みは `src/memory.ts` にあり、モデルを呼びません。自己改善ループでは `--arm memory` でこの方式を評価対象にできます。
+
 ## 設定
 
 ### 実行のオプション

@@ -5,13 +5,13 @@ import { join, resolve } from "node:path";
 // the harness state lives in that directory, so a stopped run resumes from the same state.
 
 export type RsiRequest = {
-  purpose?: string; constraints?: string; mode?: string;
+  purpose?: string; constraints?: string; mode?: string; arm?: string;
   calls?: number; evalCalls?: number; generations?: number; perCategory?: number; parallel?: number; seed?: number; delta?: number;
 };
 
 export type RunRequest = {
   kind: "run" | "bench";
-  purpose?: string; constraints?: string; mode?: string;
+  purpose?: string; constraints?: string; mode?: string; arm?: string;
   calls?: number; agents?: number; concurrency?: number; rounds?: number;
   allowShell?: boolean; check?: string;
 };
@@ -92,6 +92,8 @@ export function startRsi(dir: string, r: RsiRequest) {
   // Left out, the loop keeps what the previous start used.
   if (r.mode !== undefined && !["single", "fixed", "dynamic"].includes(r.mode)) throw new Error("mode must be single, fixed, or dynamic");
   if (r.mode !== undefined) args.push("--mode", r.mode);
+  if (r.arm !== undefined && !["dynamic", "memory"].includes(r.arm)) throw new Error("arm must be dynamic or memory");
+  if (r.arm !== undefined) args.push("--arm", r.arm);
   for (const [flag, value] of [["--purpose", r.purpose], ["--constraints", r.constraints]] as const) {
     if (value === undefined) continue;
     if (typeof value !== "string" || (flag === "--purpose" && !value.trim())) throw new Error(`${flag.slice(2)} must be a non-empty string`);
