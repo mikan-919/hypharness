@@ -1,4 +1,5 @@
 // Default settings of the RSI loop (scripts/rsi.ts), shared with the dashboard so its form starts from the same values.
+import { HARNESS_ARMS } from "../src/locomo.ts";
 export const PURPOSE = `Improve the hypharness agent harness whose source is this workspace (a git checkout of the harness that is running you).
 Objective: when the harness answers a fixed LoCoMo-Plus subset, raise the judge score and lower the peak prompt tokens per question.
 rsi-traces/ holds evidence from the current harness: eval.json (score, per-sample scores, context sizes), locomo/judgments.jsonl and predictions.jsonl, locomo/<arm>/<sample>/contexts/*.md (each agent's working memory and live context), and history.md (earlier generations, their predicted and measured effects).
@@ -32,7 +33,7 @@ export function resolveSettings(prev: Partial<RsiSettings> | undefined, started:
   next.parallel = given.parallel as string | undefined;
   next.generations = given.generations as string | undefined;
   if (!["single", "fixed", "dynamic"].includes(next.mode!)) throw new Error("--mode must be single, fixed, or dynamic");
-  if (!["dynamic", "memory"].includes(next.arm!)) throw new Error("--arm must be dynamic or memory");
+  if (!(HARNESS_ARMS as readonly string[]).includes(next.arm!)) throw new Error(`--arm must be one of ${HARNESS_ARMS.join(", ")}`);
   if (!["on", "off"].includes(next.judges!)) throw new Error("--judges must be on or off");
   for (const key of ["calls", "evalCalls", "perCategory", "parallel", "generations"])
     if (next[key] !== undefined && !/^[1-9]\d*$/.test(next[key]!)) throw new Error(`--${flag(key)} must be a positive integer`);

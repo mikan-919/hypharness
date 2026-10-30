@@ -130,6 +130,14 @@ bun run dashboard --dir .hyph --port 4321
 
 コマンドラインから起動したセッションも同じ `--dir` の下にあれば表示されます。画面は shadcn/ui（コピーして使う React の UI 部品集）と Tailwind CSS で作られ、Bun の HTML インポートで配信されます。Tailwind の変換は `bunfig.toml` で読み込む `bun-plugin-tailwind` が行います。
 
+### フロントチャットで話す
+
+```bash
+bun run src/index.ts chat
+```
+
+ユーザーと話すモデル（フロントモデル）は、直近6件の発言だけをコンテキストに持ちます。それより前の発言は文ごとに分けて DeLM の knowledge に移し（1日1件の domain）、応答に必要なときだけ `knowledge_search` と `knowledge_get` で読みます。会話が長くなってもコンテキストは伸びません。発言と記憶は `.hyph/chat` に残り、ダッシュボードの「チャット」画面でも同じ会話を続けられます。各発言がコンテキスト内にあるか記憶へ移ったかと、直前の応答のモデル呼び出し回数とピーク入力トークンを表示します。記憶の整理（domain の統合・分割）はまだ行いません。
+
 ### 組織の形を比べる
 
 ```bash
@@ -178,7 +186,7 @@ bun run src/index.ts locomo --arms direct,dynamic --per-category 2
 
 長期会話の記憶を問う [LoCoMo-Plus](https://github.com/xjtuleeyf/Locomo-Plus) の問題を、モデルへの1回の呼び出しとハーネスで解かせ、LLM で採点して比べます。問題の組み立てと採点は参照実装を移植しています。データの扱い、オプション、出力、比較の注意、測定例は [LoCoMo-Plus ベンチマーク](docs/locomo.md) にあります。
 
-`--arms` に `memory` を加えると、会話をファイルで渡す代わりに DeLM の記憶として渡す方式も測れます。会話を句読点で文ごとに分け、1文を1件の knowledge（検証済み）として記録し、セッションごとに domain を作ります。エージェント（dynamic）は会話のファイルを持たず、`knowledge_search` と `knowledge_get` で必要な文だけを引きます。取り込みは `src/memory.ts` にあり、モデルを呼びません。自己改善ループでは `--arm memory` でこの方式を評価対象にできます。
+`--arms` に `dynamic-memory` のように組織名と `-memory` をつないだ方式を加えると、会話をファイルで渡す代わりに DeLM の記憶として渡す方式も測れます。会話を句読点で文ごとに分け、1文を1件の knowledge（検証済み）として記録し、セッションごとに domain を作ります。エージェントは会話のファイルを持たず、`knowledge_search` と `knowledge_get` で必要な文だけを引きます。取り込みは `src/memory.ts` にあり、モデルを呼びません。自己改善ループでは `--arm dynamic-memory` でこの方式を評価対象にできます。
 
 ## 設定
 

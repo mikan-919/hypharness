@@ -356,11 +356,13 @@ export async function predictDirect(llm: Llm, s: Sample): Promise<Prediction> {
   return { arm: "direct", id: s.id, category: s.category, prediction: textOf(reply) || "(empty)", outcome: "answered", ms: Math.round(performance.now() - started), usage: usageOf(reply) };
 }
 
-// Harness arms: single, fixed and dynamic read the conversation from files; memory is dynamic with the conversation held in DeLM.
-export type HarnessArm = Config["organization"] | "memory";
+// A harness arm is an organization, optionally with "-memory": the conversation is held in DeLM instead of files.
+export const HARNESS_ARMS = ["single", "fixed", "dynamic", "single-memory", "fixed-memory", "dynamic-memory"] as const;
+export type HarnessArm = (typeof HARNESS_ARMS)[number];
+const armParts = (arm: HarnessArm) => ({ mode: arm.split("-")[0] as Config["organization"], memory: arm.endsWith("-memory") });
 
 export function harnessPurpose(s: Sample, arm: HarnessArm = "dynamic") {
-  const files = arm === "memory" ? MEMORY_GUIDE
+  const files = armParts(arm).memory ? MEMORY_GUIDE
     : "The conversation is split into files under conversation/ in the workspace; conversation/index.txt lists them in order. Locate relevant parts with file_search and read what you need.";
   return s.category === "Cognitive"
     ? `${instruction(s.category)}${files} Its last message is:\n${s.trigger}\nWrite your reply to that last message, and nothing else, to answer.txt.`
@@ -369,9 +371,9 @@ export function harnessPurpose(s: Sample, arm: HarnessArm = "dynamic") {
 
 export async function predictHarness(llm: Llm, s: Sample, arm: HarnessArm, dir: string, calls: number): Promise<Prediction | undefined> {
   if (!s.input_prompt) return noInput(arm, s);
-  const workspace = join(dir, "workspace"), mode = arm === "memory" ? "dynamic" : arm;
+  const workspace = join(dir, "workspace"), { mode, memory } = armParts(arm);
   mkdirSync(workspace, { recursive: true });
-  if (arm !== "memory") {
+  if (!memory) {
     mkdirSync(join(workspace, "conversation"), { recursive: true });
     const names = s.chunks.map((_, i) => `part-${String(i + 1).padStart(3, "0")}.txt`);
     await Promise.all(s.chunks.map((c, i) => Bun.write(join(workspace, "conversation", names[i]!), c)));
@@ -382,8 +384,8 @@ export async function predictHarness(llm: Llm, s: Sample, arm: HarnessArm, dir: 
     const config: Config = mode === "single" ? { ...defaultConfig, organization: "single", maxAgents: 1, maxConcurrency: 1, maxModelCalls: calls }
       : mode === "fixed" ? { ...defaultConfig, organization: "fixed", maxAgents: 3, maxModelCalls: calls } : { ...defaultConfig, maxModelCalls: calls };
     const fresh = store.purpose === undefined;
-    store.init(harnessPurpose(s, arm), `Use only the conversation ${arm === "memory" ? "stored as knowledge" : "files"}; do not invent facts that are not in them.`, config);
-    if (fresh && arm === "memory") ingestConversation(store, s.chunks.join("\n"));
+    store.init(harnessPurpose(s, arm), `Use only the conversation ${memory ? "stored as knowledge" : "files"}; do not invent facts that are not in them.`, config);
+    if (fresh && memory) ingestConversation(store, s.chunks.join("\n"));
     const started = performance.now();
     const r = await runScheduler({ store, ...llm, workspace, contextDir: join(dir, "contexts") });
     if (r.status === "error") return undefined; // provider failure, not an answer
@@ -475,7 +477,7 @@ export async function runLocomo(llm: Llm, judgeLlm: Llm, opts: BenchOptions) {
     notes: [
       "Scores: correct=1, partial=0.5, wrong=0 per the reference judge. The paper does not state the judge model for its main results (its human-agreement study used gemini-2.5-flash; the repository example uses gpt-4o-mini), so scores from another judge model are not directly comparable.",
       "Temperatures 0.3 (prediction) and 0 (judge) are requested as in the reference; pi-ai omits temperature when signed in with ChatGPT.",
-      "Harness arms read the same conversation split into files under the tool read limit; they answer through answer.txt. The memory arm (dynamic) instead finds it as knowledge, one sentence per item and one domain per session.",
+      "Harness arms read the same conversation split into files under the tool read limit; they answer through answer.txt. Arms ending in -memory instead find it as knowledge, one sentence per item and one domain per session.",
     ],
     results: summarize(judgments.filter(j => samples.some(s => s.id === j.id)), predictions.filter(p => samples.some(s => s.id === p.id))),
   };

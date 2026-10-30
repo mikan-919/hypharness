@@ -1,9 +1,13 @@
 import { Database } from "bun:sqlite";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
 import type { Message } from "@earendil-works/pi-ai";
 import { render, safePath } from "../tools.ts";
+import { openModel } from "../auth.ts";
+import { history, openChat, reply, WINDOW } from "../chat.ts";
+import type { Store } from "../db.ts";
+import type { Llm } from "../locomo.ts";
 import { DEFAULTS } from "../../scripts/rsi-defaults.ts";
 import * as runs from "./runs.ts";
 import index from "./index.html";
@@ -97,6 +101,16 @@ const params = (req: Request) => new URL(req.url).searchParams;
 // This server can start processes with shell access, so it accepts requests only from its own page:
 // the Host header blocks DNS rebinding, and Origin plus a JSON body blocks cross-site form posts.
 const hosts = [`127.0.0.1:${port}`, `localhost:${port}`];
+// The front chat (src/chat.ts) keeps its log and memory in <dir>/chat; the model is opened on the first message.
+const chatDir = rel(join(root, "chat"));
+let chatStore: Store | undefined, chatLlm: Llm | undefined, chatQueue: Promise<unknown> = Promise.resolve();
+const chatOpen = () => chatStore ??= (mkdirSync(chatDir, { recursive: true }), openChat(join(chatDir, "state.sqlite")));
+function chatView() {
+  if (!chatStore && !existsSync(join(chatDir, "state.sqlite"))) return { dir: chatDir, window: WINDOW, messages: [], memory: { knowledge: 0, domains: 0 } };
+  const s = chatOpen();
+  return { dir: chatDir, window: WINDOW, messages: history(s), memory: s.get("select (select count(*) from knowledge) knowledge, (select count(*) from domains where status = 'active') domains") };
+}
+
 function guard(handler: (req: Request) => Response | Promise<Response>) {
   return async (req: Request) => {
     if (!hosts.includes(req.headers.get("host") ?? "")) return fail("Forbidden host", 403);
@@ -235,6 +249,17 @@ const server = Bun.serve({
         const pid = rsiPid() ?? (() => { throw new Error("The RSI loop is not running"); })();
         process.kill(pid, "SIGTERM");
         return Response.json({ pid });
+      }),
+    },
+    "/api/chat": {
+      GET: guard(() => Response.json(chatView())),
+      // Replies are made one at a time: each one moves older messages into memory before the next reads it.
+      POST: guard(async req => {
+        const { text } = await req.json() as { text?: unknown };
+        if (typeof text !== "string" || !text.trim() || text.length > 20_000) throw new Error("text must be 1-20000 characters");
+        const next = chatQueue.then(async () => reply(chatLlm ??= await openModel(), chatOpen(), text.trim()));
+        chatQueue = next.catch(() => {});
+        return Response.json({ ...(await next), ...chatView() });
       }),
     },
     "/api/output": guard(req => json(runs.output(params(req).get("dir") ?? ""))),

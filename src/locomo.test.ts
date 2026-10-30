@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { Store } from "./db.ts";
-import { ingestConversation } from "./memory.ts";
+import { ingestConversation, splitSentences } from "./memory.ts";
 import { buildSamples, judgePrompt, labelToScore, parseJudge, predictHarness, runLocomo, selectSamples, SOURCE, type LocomoItem, type PlusItem } from "./locomo.ts";
 
 const conversation = {
@@ -152,11 +152,16 @@ test("memory arm finds the conversation as knowledge, one sentence per item and 
     return call("task_finish", { result: "submitted" });
   };
   const dir = mkdtempSync(join(tmpdir(), "locomo-memory-"));
-  const p = await predictHarness(llmWith(Array(30).fill(brain)), sample!, "memory", dir, 20);
-  expect(p).toMatchObject({ arm: "memory", prediction: "Oslo" });
+  const p = await predictHarness(llmWith(Array(30).fill(brain)), sample!, "dynamic-memory", dir, 20);
+  expect(p).toMatchObject({ arm: "dynamic-memory", prediction: "Oslo" });
   expect(existsSync(join(dir, "workspace", "conversation"))).toBe(false);
   const answering = new Store(join(dir, "state.sqlite"));
   const search = answering.get<{ result: string }>("select result from ops where result like '%Oslo%'");
   expect(search?.result).toContain("K-s2-1-1 [verified] [9:30 am on 20 May, 2023] Bob: I moved to Oslo.");
   answering.db.close();
+});
+
+test("sentences split at Western punctuation followed by a space and after every Japanese full stop", () => {
+  expect(splitSentences("I moved. To Oslo! 3.5 km? ok")).toEqual(["I moved.", "To Oslo!", "3.5 km?", "ok"]);
+  expect(splitSentences("猫はモチです。3歳です！元気？")).toEqual(["猫はモチです。", "3歳です！", "元気？"]);
 });

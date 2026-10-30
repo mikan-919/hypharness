@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig, Store } from "../db.ts";
@@ -122,6 +122,18 @@ test("the RSI view totals each generation's evaluation from its per-question rec
     const gen = await (await fetch(`${base}/api/rsi/gen?n=0`)).json() as { samples: { id: string; score: number; calls: number }[] };
     expect(gen.samples.map(s => [s.id, s.score, s.calls])).toEqual([["q1", 1, 3]]);
     expect((await fetch(`${base}/api/rsi/gen?n=7`)).status).toBe(404);
+  } finally {
+    proc.kill();
+  }
+});
+
+test("the chat view is empty until the first message and refuses an empty one", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyph-chat-"));
+  const { proc, base, post } = await serve(dir);
+  try {
+    expect(await (await fetch(`${base}/api/chat`)).json()).toMatchObject({ window: 6, messages: [], memory: { knowledge: 0 } });
+    expect((await post("/api/chat", { text: " " })).status).toBe(400);
+    expect(existsSync(join(dir, ".hyph", "chat"))).toBe(false);
   } finally {
     proc.kill();
   }

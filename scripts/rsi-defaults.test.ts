@@ -14,7 +14,7 @@ test("the evaluation's questions and budget are fixed once generations exist", (
   expect(() => resolveSettings(prev, true, { "eval-calls": "30" })).toThrow("fixed at 20");
   expect(() => resolveSettings(prev, true, { seed: "2" })).toThrow("fixed at 1");
   expect(resolveSettings(prev, true, { seed: "1" }).seed).toBe("1");
-  expect(() => resolveSettings(prev, true, { arm: "memory" })).toThrow("fixed at dynamic");
+  expect(() => resolveSettings(prev, true, { arm: "dynamic-memory" })).toThrow("fixed at dynamic");
   expect(resolveSettings(prev, false, { "eval-calls": "30" }).evalCalls).toBe("30");
 });
 

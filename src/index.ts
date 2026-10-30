@@ -5,7 +5,8 @@ import { openModel } from "./auth.ts";
 import { defaultConfig, Store, type Config } from "./db.ts";
 import { report, runScheduler } from "./scheduler.ts";
 import type { Runtime } from "./agent.ts";
-import { CATEGORIES, runLocomo } from "./locomo.ts";
+import { CATEGORIES, HARNESS_ARMS, runLocomo } from "./locomo.ts";
+import { openChat, reply } from "./chat.ts";
 
 const { values: opts, positionals } = parseArgs({
   allowPositionals: true,
@@ -69,7 +70,7 @@ const log = (line: string) => console.log(line);
 
 if (command === "locomo") {
   const arms = opts.arms!.split(",").map(a => a.trim()).filter(Boolean);
-  for (const a of arms) if (!["direct", "single", "fixed", "dynamic", "memory"].includes(a)) throw new Error(`Unknown arm ${a}; use direct, single, fixed, dynamic, memory`);
+  for (const a of arms) if (!["direct", ...HARNESS_ARMS].includes(a)) throw new Error(`Unknown arm ${a}; use direct, ${HARNESS_ARMS.join(", ")}`);
   const categories = opts.categories?.split(",").map(c => c.trim()).filter(Boolean);
   for (const c of categories ?? []) if (!CATEGORIES.includes(c)) throw new Error(`Unknown category ${c}; use ${CATEGORIES.join(", ")}`);
   const perCategory = opts["per-category"] === "all" ? "all" : int(opts["per-category"], "per-category")!;
@@ -93,6 +94,20 @@ if (command === "locomo") {
   for (const g of store.all<Record<string, string>>("select * from goals order by created_at")) console.log(`${g.id} [${g.status}] owner=${g.owner}: ${g.description}`);
   for (const a of store.agents()) console.log(`agent ${a.id} [${a.status}]: ${a.role}`);
   console.log(JSON.stringify(report(store, "rounds", 0, 0), null, 2));
+} else if (command === "chat") {
+  // The same chat the dashboard shows: its log and memory live in <dir>/chat.
+  mkdirSync(join(opts.dir!, "chat"), { recursive: true });
+  const store = openChat(join(opts.dir!, "chat", "state.sqlite"));
+  const llm = await openModel();
+  console.log("Front chat. An empty line ends it.");
+  process.stdout.write("> ");
+  for await (const line of console) {
+    if (!line.trim()) break;
+    const r = await reply(llm, store, line.trim());
+    console.log(`${r.reply}\n  [${r.calls} calls, ${r.lookups} lookups, peak ${r.peakTokens} tokens, ${r.remembered} messages moved to memory]`);
+    process.stdout.write("> ");
+  }
+  store.db.close();
 } else if (command === "bench") {
   const purpose = rest.join(" ").trim();
   if (!purpose) throw new Error("bench requires a purpose");

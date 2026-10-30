@@ -805,12 +805,12 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
                     </SelectContent>
                   </Select>
                 </Field>
-                <Field id="rsi-arm" label="評価する方式" hint={started ? "初回の開始で固定" : "dynamic は会話をファイルで、memory は DeLM の記憶で読む"}>
+                <Field id="rsi-arm" label="評価する方式" hint={started ? "初回の開始で固定" : "dynamic は会話をファイルで、dynamic-memory は DeLM の記憶で読む"}>
                   <Select value={started ? settings.arm ?? "dynamic" : form.arm} onValueChange={v => setForm({ ...form, arm: v })} disabled={started}>
                     <SelectTrigger id="rsi-arm"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="dynamic">dynamic</SelectItem>
-                      <SelectItem value="memory">memory</SelectItem>
+                      <SelectItem value="dynamic-memory">dynamic-memory</SelectItem>
                     </SelectContent>
                   </Select>
                 </Field>
@@ -905,13 +905,85 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
   );
 }
 
+type ChatInfo = {
+  dir: string; window: number; memory: { knowledge: number; domains: number };
+  messages: { id: number; role: "user" | "assistant"; text: string; at: number; remembered: number }[];
+};
+type ChatReply = { calls: number; lookups: number; peakTokens: number; remembered: number };
+
+// The front chat: only the last few messages stay in the model's context; older ones move into DeLM as knowledge.
+function Chat({ onOpen }: { onOpen: (id: string) => void }) {
+  const [info, setInfo] = useState<ChatInfo>();
+  const [text, setText] = useState("");
+  const [pending, setPending] = useState<string>();
+  const [last, setLast] = useState<ChatReply>();
+  const [error, setError] = useState<string>();
+  const endRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { fetch("/api/chat").then(r => r.json()).then(setInfo).catch(e => setError(String(e))); }, []);
+  useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [info?.messages.length, pending]);
+  const send = async () => {
+    const t = text.trim();
+    if (!t || pending) return;
+    setPending(t); setText(""); setError(undefined);
+    try { const r = await post("/api/chat", { text: t }); setInfo(r); setLast(r); }
+    catch (e) { setError(String((e as Error).message)); setText(t); fetch("/api/chat").then(r => r.json()).then(setInfo).catch(() => {}); }
+    finally { setPending(undefined); }
+  };
+  if (!info) return <div className="text-muted-foreground">チャットを読み込み中…</div>;
+  const n = info.messages.length;
+  const place = (i: number, remembered: number) => remembered ? "記憶" : i >= n - info.window ? "コンテキスト内" : "記憶へ移す前";
+  return (
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
+      <Card>
+        <CardHeader>
+          <CardTitle>フロントチャット</CardTitle>
+          <CardDescription>応答するモデルは直近 {info.window} 件だけをコンテキストに持ちます。それより前の発言は文ごとに DeLM の記憶へ移し、必要なときに検索して読みます</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3">
+          <div className="grid h-[60vh] content-start gap-3 overflow-auto rounded-md border bg-muted/30 p-3">
+            {n === 0 && !pending && <div className="text-sm text-muted-foreground">まだ発言がありません</div>}
+            {info.messages.map((m, i) => (
+              <div key={m.id} className={`grid max-w-[85%] gap-1 ${m.role === "user" ? "justify-self-end" : "justify-self-start"}`}>
+                <div className={`rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${m.role === "user" ? "bg-primary text-primary-foreground" : "border bg-background"}`}>{m.text}</div>
+                <div className={`flex gap-2 text-xs text-muted-foreground ${m.role === "user" ? "justify-end" : ""}`}>
+                  <span>{time(m.at)}</span><Badge variant={m.remembered ? "outline" : "secondary"}>{place(i, m.remembered)}</Badge>
+                </div>
+              </div>
+            ))}
+            {pending && <>
+              <div className="max-w-[85%] justify-self-end rounded-lg bg-primary px-3 py-2 text-sm whitespace-pre-wrap text-primary-foreground">{pending}</div>
+              <div className="text-sm text-muted-foreground">応答を作成中…</div>
+            </>}
+            <div ref={endRef} />
+          </div>
+          <form className="grid gap-2" onSubmit={e => { e.preventDefault(); send(); }}>
+            <Textarea aria-label="メッセージ" rows={3} value={text} onChange={e => setText(e.target.value)} placeholder="メッセージ（Ctrl+Enter で送信）"
+              onKeyDown={e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } }} />
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-sm text-destructive">{error}</span>
+              <Button type="submit" disabled={!!pending || !text.trim()}>送信する</Button>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+      <div className="grid content-start gap-4">
+        <Kpi label="記憶の件数" value={num.format(info.memory.knowledge)} note={`domain ${info.memory.domains} 件（1日1件）`} />
+        <Kpi label="直前の応答" value={last ? `${last.calls} 回` : "-"} note={last ? `検索 ${last.lookups} 回・記憶へ移した発言 ${last.remembered} 件` : "モデル呼び出しの回数"} />
+        <Kpi label="直前のピーク入力" value={last ? num.format(last.peakTokens) : "-"} note="応答中の1回の呼び出しの最大入力トークン" />
+        {n > 0 && <Button variant="outline" onClick={() => onOpen(info.dir)}>記憶の中身を見る</Button>}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const list = usePoll<Session[]>("/api/sessions");
   const [session, setSession] = useState<string>();
   const [creating, setCreating] = useState(false);
-  const [rsi, setRsi] = useState(() => location.hash.startsWith("#rsi"));
+  const [view, setView] = useState<"session" | "rsi" | "chat">(() => location.hash.startsWith("#rsi") ? "rsi" : location.hash === "#chat" ? "chat" : "session");
+  const toggle = (v: "rsi" | "chat") => { const next = view === v ? "session" : v; setView(next); history.replaceState(null, "", next === "session" ? "#agents" : `#${next}`); };
   // The session view reads its tab from the hash, so leaving the RSI view must not hand it "rsi/<tab>".
-  const leaveRsi = (id: string) => { history.replaceState(null, "", "#agents"); setRsi(false); setSession(id); };
+  const leaveRsi = (id: string) => { history.replaceState(null, "", "#agents"); setView("session"); setSession(id); };
   // A just-started run may not have a state file yet; keep it selected, and move into a bench run's first session once it appears.
   useEffect(() => {
     if (!list?.length || (session && list.some(s => s.id === session))) return;
@@ -925,7 +997,8 @@ function App() {
         <h1 className="text-xl font-semibold">hypharness</h1>
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
         <Button variant={creating ? "secondary" : "default"} onClick={() => setCreating(!creating)}>新規実行</Button>
-        <Button variant={rsi ? "secondary" : "outline"} onClick={() => { setRsi(!rsi); history.replaceState(null, "", rsi ? "#agents" : "#rsi"); }}>自己改善</Button>
+        <Button variant={view === "chat" ? "secondary" : "outline"} onClick={() => toggle("chat")}>チャット</Button>
+        <Button variant={view === "rsi" ? "secondary" : "outline"} onClick={() => toggle("rsi")}>自己改善</Button>
         {list && list.length > 0 && (
           <Select value={session} onValueChange={leaveRsi}>
             <SelectTrigger className="w-full sm:w-[28rem]" aria-label="セッション"><SelectValue placeholder="セッション" /></SelectTrigger>
@@ -937,7 +1010,7 @@ function App() {
         </div>
       </header>
       {creating && <NewRun onClose={() => setCreating(false)} onStarted={dir => { setCreating(false); setSession(dir); }} />}
-      {rsi ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
+      {view === "chat" ? <Chat onOpen={leaveRsi} /> : view === "rsi" ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
         {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
         {session && <Dashboard session={session} />}
       </>}

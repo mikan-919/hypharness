@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { HARNESS_ARMS } from "../locomo.ts";
 
 // Harness runs started from the dashboard. Each run is a child process of `src/index.ts` with its own --dir;
 // the harness state lives in that directory, so a stopped run resumes from the same state.
@@ -92,7 +93,7 @@ export function startRsi(dir: string, r: RsiRequest) {
   // Left out, the loop keeps what the previous start used.
   if (r.mode !== undefined && !["single", "fixed", "dynamic"].includes(r.mode)) throw new Error("mode must be single, fixed, or dynamic");
   if (r.mode !== undefined) args.push("--mode", r.mode);
-  if (r.arm !== undefined && !["dynamic", "memory"].includes(r.arm)) throw new Error("arm must be dynamic or memory");
+  if (r.arm !== undefined && !(HARNESS_ARMS as readonly string[]).includes(r.arm)) throw new Error(`arm must be one of ${HARNESS_ARMS.join(", ")}`);
   if (r.arm !== undefined) args.push("--arm", r.arm);
   if (r.judges !== undefined) args.push("--judges", r.judges === true ? "on" : "off");
   for (const [flag, value] of [["--purpose", r.purpose], ["--constraints", r.constraints]] as const) {
