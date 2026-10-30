@@ -4,6 +4,8 @@ import { join, resolve } from "node:path";
 // Harness runs started from the dashboard. Each run is a child process of `src/index.ts` with its own --dir;
 // the harness state lives in that directory, so a stopped run resumes from the same state.
 
+export type RsiRequest = { calls?: number; generations?: number; perCategory?: number; seed?: number; delta?: number };
+
 export type RunRequest = {
   kind: "run" | "bench";
   purpose?: string; constraints?: string; mode?: string;
@@ -12,11 +14,12 @@ export type RunRequest = {
 };
 
 type Run = {
-  dir: string; kind: RunRequest["kind"]; args: string[]; startedAt: number; endedAt: number | null;
+  dir: string; kind: RunRequest["kind"] | "rsi"; args: string[]; startedAt: number; endedAt: number | null;
   exitCode: number | null; output: string[]; proc: ReturnType<typeof Bun.spawn>;
 };
 
 const entry = resolve(import.meta.dir, "..", "index.ts");
+const rsiEntry = resolve(import.meta.dir, "..", "..", "scripts", "rsi.ts");
 const runs = new Map<string, Run>();
 const MAX_LINES = 1000;
 
@@ -64,12 +67,34 @@ export function start(dir: string, request: RunRequest, resume: boolean) {
   if (runs.get(dir)?.endedAt === null) throw new Error(`${dir} is already running`);
   if (!resume && existsSync(join(dir, "state.sqlite"))) throw new Error(`${dir} already has a session; resume it instead`);
   if (resume && !existsSync(join(dir, "state.sqlite"))) throw new Error(`${dir} has no session to resume`);
-  const args = harnessArgs(request, dir, resume);
+  return spawn(dir, request.kind, entry, harnessArgs(request, dir, resume), "run.log");
+}
+
+// The loop writes its own rsi.log; the launcher log keeps what the process printed, including a crash.
+export function startRsi(dir: string, r: RsiRequest) {
+  if (runs.get(dir)?.endedAt === null) throw new Error(`${dir} is already running`);
+  const args = ["--dir", dir];
+  for (const [flag, value] of [["--calls", r.calls], ["--generations", r.generations], ["--per-category", r.perCategory]] as const) {
+    const v = positive(value, flag.slice(2));
+    if (v !== undefined) args.push(flag, v);
+  }
+  if (r.seed !== undefined && r.seed !== null) {
+    if (typeof r.seed !== "number" || !Number.isSafeInteger(r.seed)) throw new Error("seed must be an integer");
+    args.push("--seed", String(r.seed));
+  }
+  if (r.delta !== undefined && r.delta !== null) {
+    if (typeof r.delta !== "number" || !(r.delta >= 0 && r.delta <= 1)) throw new Error("delta must be between 0 and 1");
+    args.push("--delta", String(r.delta));
+  }
+  return spawn(dir, "rsi", rsiEntry, args, "launcher.log");
+}
+
+function spawn(dir: string, kind: Run["kind"], script: string, args: string[], logName: string) {
   mkdirSync(dir, { recursive: true });
-  const log = join(dir, "run.log");
-  appendFileSync(log, `\n=== ${new Date().toISOString()} bun ${["src/index.ts", ...args].join(" ")}\n`);
-  const proc = Bun.spawn(["bun", entry, ...args], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: process.env });
-  const run: Run = { dir, kind: request.kind, args, startedAt: Date.now(), endedAt: null, exitCode: null, output: [], proc };
+  const log = join(dir, logName);
+  appendFileSync(log, `\n=== ${new Date().toISOString()} bun ${[script, ...args].join(" ")}\n`);
+  const proc = Bun.spawn(["bun", script, ...args], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: process.env });
+  const run: Run = { dir, kind, args, startedAt: Date.now(), endedAt: null, exitCode: null, output: [], proc };
   runs.set(dir, run);
   const streams = [pump(run, proc.stdout as ReadableStream<Uint8Array>, log), pump(run, proc.stderr as ReadableStream<Uint8Array>, log)];
   proc.exited.then(async code => {

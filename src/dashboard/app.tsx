@@ -44,7 +44,7 @@ function usePoll<T>(url: string | null, ms = REFRESH_MS) {
 }
 
 const statusVariant: Record<string, "default" | "secondary" | "outline" | "destructive"> = {
-  done: "default", verified: "default", active: "default", claimed: "secondary", review: "secondary", running: "secondary",
+  done: "default", verified: "default", accepted: "default", active: "default", claimed: "secondary", review: "secondary", running: "secondary",
   open: "outline", hypothesis: "outline", dormant: "outline", failed: "destructive", rejected: "destructive", dropped: "destructive", expired: "destructive",
 };
 const Status = ({ value }: { value: string }) => <Badge variant={statusVariant[value] ?? "outline"}>{value}</Badge>;
@@ -497,10 +497,139 @@ function Dashboard({ session }: { session: string }) {
   );
 }
 
+type Generation = {
+  gen: number; base: number | null; phase: string; startedAt: number; endedAt?: number; commit?: string; status?: string; note?: string;
+  eval?: { ok: boolean; score?: number; reason?: string; context?: { calls: number; maxTokens: number; meanTokens: number; meanPeakTokens: number } };
+  accepted?: boolean; reason?: string; error?: string;
+};
+type RsiInfo = {
+  dir: string; pid: number | null; lines: string[]; launcher: string[];
+  state: { incumbent?: { gen: number; commit: string }; settings: Row; generations: Generation[] } | null;
+};
+
+function GenerationChart({ title, description, rows, field, format }: { title: string; description: string; rows: Generation[]; field: (g: Generation) => number | undefined; format: (v: number) => string }) {
+  const config: ChartConfig = { candidate: { label: "候補", color: "var(--chart-1)" }, incumbent: { label: "採用済み", color: "var(--chart-2)" } };
+  // The incumbent line steps only when a candidate is accepted, so its gap to the candidate shows what was rejected.
+  let current: number | undefined;
+  const data = rows.filter(g => g.eval?.ok).map(g => {
+    const v = field(g);
+    if (g.accepted) current = v;
+    return { gen: g.gen, candidate: v, incumbent: current };
+  });
+  return (
+    <Card>
+      <CardHeader><CardTitle>{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader>
+      <CardContent>
+        {data.length === 0 ? <div className="text-sm text-muted-foreground">評価を終えた世代がまだありません</div> : (
+          <ChartContainer config={config} className="aspect-auto h-56 w-full">
+            <LineChart data={data} margin={{ left: 8, right: 16, top: 8 }}>
+              <CartesianGrid vertical={false} strokeOpacity={0.5} />
+              <XAxis dataKey="gen" tickLine={false} axisLine={false} label={{ value: "世代", position: "insideBottomRight", offset: -4, fontSize: 11 }} />
+              <YAxis tickLine={false} axisLine={false} width={64} tickFormatter={format} domain={["auto", "auto"]} />
+              <ChartTooltip content={<ChartTooltipContent labelFormatter={(_, p) => `世代 ${p[0]?.payload.gen}`} />} />
+              <ChartLegend content={<ChartLegendContent />} />
+              <Line dataKey="candidate" type="linear" stroke="var(--color-candidate)" strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
+              <Line dataKey="incumbent" type="stepAfter" stroke="var(--color-incumbent)" strokeWidth={2} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
+            </LineChart>
+          </ChartContainer>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) => void }) {
+  const info = usePoll<RsiInfo>("/api/rsi", 3000);
+  const [form, setForm] = useState({ calls: "150", generations: "", perCategory: "3", seed: "1", delta: "0.05" });
+  const [error, setError] = useState<string>();
+  const logRef = useRef<HTMLPreElement>(null);
+  useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight); }, [info?.lines.length]);
+  const act = async (fn: () => Promise<unknown>) => { setError(undefined); try { await fn(); } catch (e) { setError(String((e as Error).message)); } };
+  if (!info) return <div className="text-muted-foreground">RSI の状態を読み込み中…</div>;
+  const gens = info.state?.generations ?? [];
+  const inc = info.state?.incumbent, incGen = gens.find(g => g.gen === inc?.gen);
+  const current = gens.at(-1);
+  const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
+  const sessionOf = (g: Generation) => `${info.dir}/gen-${g.gen}`;
+  const phase: Record<string, string> = { improve: "改善中", evaluate: "評価中", done: "完了" };
+
+  return (
+    <div className="grid gap-6">
+      <Card>
+        <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-4">
+          <div className="grid gap-1.5">
+            <CardTitle className="flex items-center gap-2">再帰的自己改善 <Badge variant={info.pid ? "secondary" : "outline"}>{info.pid ? `実行中（pid ${info.pid}）` : "停止中"}</Badge></CardTitle>
+            <CardDescription>
+              採用中のハーネスが自分のソースの worktree を改善し、LoCoMo-Plus のサブセットで点数と1問あたりのピーク入力トークンを測ります。採用された候補が次の世代を動かします。状態は {info.dir} にあります
+            </CardDescription>
+          </div>
+          {info.pid ? (
+            <Button variant="destructive" onClick={() => act(() => post("/api/rsi/stop", {}))}>停止する</Button>
+          ) : (
+            <form className="flex flex-wrap items-end gap-3" onSubmit={e => {
+              e.preventDefault();
+              act(() => post("/api/rsi/start", { calls: toInt(form.calls), generations: toInt(form.generations), perCategory: toInt(form.perCategory), seed: toInt(form.seed), delta: form.delta.trim() ? Number(form.delta) : undefined }));
+            }}>
+              <Field id="rsi-calls" label="改善の呼び出し上限" hint="1世代あたり"><Input id="rsi-calls" className="w-28" type="number" min={1} value={form.calls} onChange={set("calls")} /></Field>
+              <Field id="rsi-gens" label="世代数" hint="空欄で止めるまで"><Input id="rsi-gens" className="w-24" type="number" min={1} value={form.generations} onChange={set("generations")} placeholder="無制限" /></Field>
+              <Field id="rsi-per" label="分類ごとの問題数"><Input id="rsi-per" className="w-24" type="number" min={1} value={form.perCategory} onChange={set("perCategory")} /></Field>
+              <Field id="rsi-seed" label="種"><Input id="rsi-seed" className="w-20" type="number" value={form.seed} onChange={set("seed")} /></Field>
+              <Field id="rsi-delta" label="許容幅 δ"><Input id="rsi-delta" className="w-20" type="number" step="0.01" min={0} max={1} value={form.delta} onChange={set("delta")} /></Field>
+              <Button type="submit">{gens.length ? "再開する" : "開始する"}</Button>
+            </form>
+          )}
+        </CardHeader>
+        {error && <CardContent><div className="text-sm text-destructive">{error}</div></CardContent>}
+      </Card>
+
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
+        <Kpi label="現在の世代" value={current ? `${current.gen}` : "-"} note={current ? `${phase[current.phase] ?? current.phase}・${time(current.startedAt)} 開始` : undefined} />
+        <Kpi label="採用中" value={inc ? `世代 ${inc.gen}` : "-"} note={inc?.commit.slice(0, 10)} />
+        <Kpi label="採用中の点数" value={incGen?.eval?.score != null ? incGen.eval.score.toFixed(3) : "-"} note="0〜1（正解1・部分0.5）" />
+        <Kpi label="採用中のピーク平均" value={incGen?.eval?.context ? num.format(incGen.eval.context.meanPeakTokens) : "-"} note="1問ごとの最大入力トークンの平均" />
+        <Kpi label="採用 / 評価済み" value={`${gens.filter(g => g.gen > 0 && g.accepted).length} / ${gens.filter(g => g.gen > 0 && g.phase === "done").length}`} />
+        <Kpi label="直近のエラー" value={current?.error ? "あり" : "なし"} note={current?.error ? current.error.slice(0, 80) : undefined} />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <GenerationChart title="点数" description="各世代の候補と、その時点で採用中のハーネスの点数" rows={gens} field={g => g.eval?.score} format={v => v.toFixed(2)} />
+        <GenerationChart title="ピーク入力トークン" description="1問ごとの最大入力トークン（キャッシュ分を含む）の平均。低いほど良い" rows={gens} field={g => g.eval?.context?.meanPeakTokens} format={v => num.format(v)} />
+      </div>
+
+      <Card>
+        <CardHeader><CardTitle>世代</CardTitle><CardDescription>改善役のセッションはセッション一覧から開けます。メモは改善役が書いた変更内容と予測です</CardDescription></CardHeader>
+        <CardContent>
+          <DataTable rows={[...gens].reverse().map(g => ({ ...g, id: String(g.gen) }))} empty="まだ世代がありません" columns={[
+            { key: "gen", label: "世代" }, { key: "base", label: "元", render: r => r.base ?? "-" },
+            { key: "phase", label: "段階", render: r => <Status value={r.phase === "done" ? (r.gen === 0 ? "done" : r.accepted ? "accepted" : "rejected") : "running"} /> },
+            { key: "score", label: "点数", render: r => r.eval?.score?.toFixed(3) ?? "-", className: "text-right tabular-nums" },
+            { key: "peak", label: "ピーク平均", render: r => r.eval?.context ? num.format(r.eval.context.meanPeakTokens) : "-", className: "text-right tabular-nums" },
+            { key: "max", label: "最大", render: r => r.eval?.context ? num.format(r.eval.context.maxTokens) : "-", className: "text-right tabular-nums" },
+            { key: "reason", label: "判定・エラー", render: r => <Clip text={r.error ?? r.reason} width="max-w-xs" /> },
+            { key: "note", label: "メモ", render: r => <Clip text={r.note} width="max-w-sm" /> },
+            { key: "commit", label: "コミット", render: r => r.commit?.slice(0, 8) ?? "-" },
+            { key: "open", label: "", render: r => sessions.some(s => s.id === sessionOf(r as Generation))
+              ? <Button size="sm" variant="outline" onClick={() => onOpen(sessionOf(r as Generation))}>セッション</Button> : null },
+          ]} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle>ループのログ</CardTitle><CardDescription>{info.dir}/rsi.log の末尾。各世代の詳細は gen-N/run.log と gen-N/eval.log にあります</CardDescription></CardHeader>
+        <CardContent className="grid gap-2">
+          <pre ref={logRef} className="h-56 overflow-auto rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap">{info.lines.join("\n") || "(まだありません)"}</pre>
+          {!info.pid && info.launcher.length > 0 && <pre className="max-h-40 overflow-auto rounded-md border p-3 text-xs whitespace-pre-wrap">{info.launcher.join("\n")}</pre>}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function App() {
   const list = usePoll<Session[]>("/api/sessions");
   const [session, setSession] = useState<string>();
   const [creating, setCreating] = useState(false);
+  const [rsi, setRsi] = useState(() => location.hash === "#rsi");
   // A just-started run may not have a state file yet; keep it selected, and move into a bench run's first session once it appears.
   useEffect(() => {
     if (!list?.length || (session && list.some(s => s.id === session))) return;
@@ -514,8 +643,9 @@ function App() {
         <h1 className="text-xl font-semibold">hypharness</h1>
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
         <Button variant={creating ? "secondary" : "default"} onClick={() => setCreating(!creating)}>新規実行</Button>
+        <Button variant={rsi ? "secondary" : "outline"} onClick={() => { setRsi(!rsi); history.replaceState(null, "", rsi ? "#agents" : "#rsi"); }}>自己改善</Button>
         {list && list.length > 0 && (
-          <Select value={session} onValueChange={setSession}>
+          <Select value={session} onValueChange={id => { setRsi(false); setSession(id); }}>
             <SelectTrigger className="w-full sm:w-[28rem]" aria-label="セッション"><SelectValue placeholder="セッション" /></SelectTrigger>
             <SelectContent>
               {list.map(s => <SelectItem key={s.id} value={s.id}>{s.id} · {s.mode} · {s.rootStatus} · {s.modelCalls} 回</SelectItem>)}
@@ -525,8 +655,10 @@ function App() {
         </div>
       </header>
       {creating && <NewRun onClose={() => setCreating(false)} onStarted={dir => { setCreating(false); setSession(dir); }} />}
-      {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
-      {session && <Dashboard session={session} />}
+      {rsi ? <Rsi sessions={list ?? []} onOpen={id => { setRsi(false); setSession(id); }} /> : <>
+        {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
+        {session && <Dashboard session={session} />}
+      </>}
     </div>
   );
 }

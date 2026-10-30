@@ -80,3 +80,25 @@ test("output of earlier runs stays readable from the session's run.log", async (
     proc.kill();
   }
 });
+
+test("the RSI view reads the loop's state and log, and per-question evaluation sessions stay out of the session list", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyph-rsi-"));
+  for (const session of ["rsi/gen-1", "rsi/gen-1/eval/locomo/dynamic/q1"]) {
+    mkdirSync(join(dir, ".hyph", session), { recursive: true });
+    const store = new Store(join(dir, ".hyph", session, "state.sqlite"));
+    store.init(session, "", defaultConfig);
+    store.db.close();
+  }
+  await Bun.write(join(dir, ".hyph", "rsi", "state.json"), JSON.stringify({ settings: {}, generations: [{ gen: 0, base: null, phase: "done", accepted: true }] }));
+  await Bun.write(join(dir, ".hyph", "rsi", "rsi.log"), "loop started\n");
+  const { proc, base, post } = await serve(dir);
+  try {
+    expect(((await (await fetch(`${base}/api/sessions`)).json()) as { id: string }[]).map(s => s.id)).toEqual([".hyph/rsi/gen-1"]);
+    const rsi = await (await fetch(`${base}/api/rsi`)).json() as { dir: string; pid: number | null; lines: string[]; state: { generations: unknown[] } };
+    expect([rsi.dir, rsi.pid, rsi.lines, rsi.state.generations.length]).toEqual([".hyph/rsi", null, ["loop started"], 1]);
+    expect((await post("/api/rsi/start", { delta: 2 })).status).toBe(400);
+    expect((await post("/api/rsi/stop", {})).status).toBe(400);
+  } finally {
+    proc.kill();
+  }
+});

@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
 import type { Message } from "@earendil-works/pi-ai";
@@ -16,7 +16,8 @@ const rel = (path: string) => relative(".", path) || ".";
 
 async function sessions() {
   const found: string[] = [];
-  for await (const f of new Bun.Glob("**/state.sqlite").scan({ cwd: root })) found.push(rel(join(root, f, "..")));
+  // The per-question sessions of RSI evaluations would bury the rest; their traces are summarized in the RSI view.
+  for await (const f of new Bun.Glob("**/state.sqlite").scan({ cwd: root })) if (!/(^|\/)eval\/locomo\//.test(f)) found.push(rel(join(root, f, "..")));
   return found.sort();
 }
 
@@ -109,6 +110,22 @@ function guard(handler: (req: Request) => Response | Promise<Response>) {
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
+// The RSI loop (scripts/rsi.ts) keeps its state in <dir>/rsi; it may have been started here or from the command line.
+const rsiDir = rel(join(root, "rsi"));
+function rsiPid() {
+  const pid = Number(existsSync(join(rsiDir, "pid")) ? readFileSync(join(rsiDir, "pid"), "utf8") : NaN);
+  if (!Number.isSafeInteger(pid)) return null;
+  try { process.kill(pid, 0); return pid; } catch { return null; }
+}
+async function rsi() {
+  const tail = async (name: string, n: number) => {
+    const f = Bun.file(join(rsiDir, name));
+    return await f.exists() ? (await f.text()).trimEnd().split("\n").slice(-n) : [];
+  };
+  const state = Bun.file(join(rsiDir, "state.json"));
+  return { dir: rsiDir, pid: rsiPid(), state: await state.exists() ? await state.json() : null, lines: await tail("rsi.log", 300), launcher: await tail("launcher.log", 40) };
+}
+
 // ponytail: bound to loopback with no user auth; add authentication before exposing it beyond localhost
 const server = Bun.serve({
   hostname: "127.0.0.1",
@@ -146,6 +163,16 @@ const server = Bun.serve({
       }),
     },
     "/api/runs/stop": { POST: guard(async req => Response.json(runs.stop(String((await req.json() as { dir?: string }).dir)))) },
+    "/api/rsi": guard(async () => Response.json(await rsi())),
+    "/api/rsi/start": { POST: guard(async req => Response.json(runs.startRsi(rsiDir, await req.json() as runs.RsiRequest))) },
+    "/api/rsi/stop": {
+      POST: guard(() => {
+        if (runs.list().some(r => r.dir === rsiDir && r.running)) return Response.json(runs.stop(rsiDir));
+        const pid = rsiPid() ?? (() => { throw new Error("The RSI loop is not running"); })();
+        process.kill(pid, "SIGTERM");
+        return Response.json({ pid });
+      }),
+    },
     "/api/output": guard(req => json(runs.output(params(req).get("dir") ?? ""))),
     // Output of runs from before this server started, kept in the session's run.log.
     "/api/runlog": guard(async req => {
