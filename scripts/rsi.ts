@@ -14,6 +14,8 @@ const { values: opts } = parseArgs({
     calls: { type: "string", default: "150" },
     generations: { type: "string" },
     "per-category": { type: "string" },
+    // Questions solved at once in an evaluation; each runs its own session. Defaults to all of them.
+    parallel: { type: "string" },
     seed: { type: "string" },
     delta: { type: "string", default: "0.05" },
   },
@@ -113,7 +115,7 @@ async function evaluate(state: State, g: Generation) {
   g.commit ??= (await $`git -C ${workspace} rev-parse HEAD`.text()).trim();
   rmSync(join(out, "eval.json"), { force: true });
   await run(["bun", join(repo, "scripts", "rsi-eval.ts"), workspace, "--out", out, "--per-category", opts["per-category"]!, "--seed", opts.seed!,
-    "--delta", opts.delta!, ...(state.incumbent ? ["--baseline", state.incumbent.eval] : [])], join(dir, "eval.log"));
+    "--delta", opts.delta!, "--harness-concurrency", opts.parallel ?? String(6 * Number(opts["per-category"])), ...(state.incumbent ? ["--baseline", state.incumbent.eval] : [])], join(dir, "eval.log"));
   const evalPath = join(out, "eval.json");
   const e: Eval | undefined = existsSync(evalPath) ? JSON.parse(readFileSync(evalPath, "utf8")) : undefined;
   if (!e || e.transient) throw new Error(`evaluation did not finish: ${e?.reason ?? "no eval.json (see eval.log)"}`);
@@ -143,7 +145,7 @@ async function main() {
   } else Object.assign(fixed, { perCategory: opts["per-category"] ?? fixed.perCategory, seed: opts.seed ?? fixed.seed });
   opts["per-category"] = fixed.perCategory;
   opts.seed = fixed.seed;
-  state.settings = { calls: opts.calls, perCategory: fixed.perCategory, seed: fixed.seed, delta: opts.delta, generations: opts.generations };
+  state.settings = { calls: opts.calls, perCategory: fixed.perCategory, seed: fixed.seed, delta: opts.delta, parallel: opts.parallel, generations: opts.generations };
   const save = () => writeFileSync(statePath, JSON.stringify(state, null, 2));
   const limit = opts.generations ? Number(opts.generations) : Infinity;
   log(`loop started (pid ${process.pid}); incumbent ${state.incumbent ? `gen ${state.incumbent.gen}` : "none yet"}`);

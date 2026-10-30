@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 // Harness runs started from the dashboard. Each run is a child process of `src/index.ts` with its own --dir;
 // the harness state lives in that directory, so a stopped run resumes from the same state.
 
-export type RsiRequest = { calls?: number; generations?: number; perCategory?: number; seed?: number; delta?: number };
+export type RsiRequest = { calls?: number; generations?: number; perCategory?: number; parallel?: number; seed?: number; delta?: number };
 
 export type RunRequest = {
   kind: "run" | "bench";
@@ -74,7 +74,7 @@ export function start(dir: string, request: RunRequest, resume: boolean) {
 export function startRsi(dir: string, r: RsiRequest) {
   if (runs.get(dir)?.endedAt === null) throw new Error(`${dir} is already running`);
   const args = ["--dir", dir];
-  for (const [flag, value] of [["--calls", r.calls], ["--generations", r.generations], ["--per-category", r.perCategory]] as const) {
+  for (const [flag, value] of [["--calls", r.calls], ["--generations", r.generations], ["--per-category", r.perCategory], ["--parallel", r.parallel]] as const) {
     const v = positive(value, flag.slice(2));
     if (v !== undefined) args.push(flag, v);
   }
