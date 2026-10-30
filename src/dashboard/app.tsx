@@ -374,6 +374,7 @@ function Dashboard({ session }: { session: string }) {
           <TabsTrigger value="tasks">タスク</TabsTrigger>
           <TabsTrigger value="goals">目標</TabsTrigger>
           <TabsTrigger value="knowledge">知識・領域</TabsTrigger>
+          <TabsTrigger value="diagnostics">診断</TabsTrigger>
           <TabsTrigger value="log">ログ</TabsTrigger>
         </TabsList>
 
@@ -481,6 +482,7 @@ function Dashboard({ session }: { session: string }) {
         </TabsContent>
 
         <TabsContent value="files"><Files session={session} /></TabsContent>
+        <TabsContent value="diagnostics"><SessionDiagnostics session={session} /></TabsContent>
 
         <TabsContent value="log">
           <Card>
@@ -590,10 +592,89 @@ function RsiTelemetry({ gens, stats }: { gens: Generation[]; stats: GenStats }) 
 }
 
 // One generation against the harness it was built on: by category, by question, and the improver's calls.
+type Diagnosis = {
+  tools: { tool: string; calls: number; errors: number; meanChars: number; questions: number }[]; unused: string[];
+  errors: { sample: string; tool: string; error: string }[]; empty: { sample: string; tool: string; args: string }[];
+  repeats: { sample: string; task: string; times: number; call: string }[];
+  outcomes: Record<string, number>; nudged: number; episodes: number; contextEdits: number; memoryWrites: number;
+  questions: { sample: string; score?: number; agents: number; episodes: number; calls: number; peak: number; contextEdits: number; memoryWrites: number; memoryChars: number }[];
+};
+
+// What scripts/rsi-traces.ts gives the RSI improver: how tools were used and how agents managed their context.
+function Diagnostics({ d, sample, onSample, trace }: { d: Diagnosis; sample?: string; onSample?: (s: string) => void; trace?: string }) {
+  const problems = [
+    ...d.errors.map((e, i) => ({ id: `e${i}`, kind: "エラー", sample: e.sample, detail: `${e.tool}: ${e.error}` })),
+    ...d.empty.map((e, i) => ({ id: `n${i}`, kind: "空振り", sample: e.sample, detail: `${e.tool} ${e.args}` })),
+    ...d.repeats.map((r, i) => ({ id: `r${i}`, kind: `繰り返し ${r.times} 回`, sample: r.sample, detail: r.call })),
+  ];
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Card>
+          <CardHeader><CardTitle>ツールの使い方</CardTitle><CardDescription>一度も呼ばれなかったツール（役によって使えないものを含む）: {d.unused.join(", ") || "なし"}</CardDescription></CardHeader>
+          <CardContent>
+            <DataTable rows={d.tools.map(t => ({ ...t, id: t.tool }))} empty="呼び出しがありません" columns={[
+              { key: "tool", label: "ツール" },
+              { key: "calls", label: "回数", className: "text-right tabular-nums" },
+              { key: "errors", label: "エラー", className: "text-right tabular-nums" },
+              { key: "meanChars", label: "結果の平均文字数", render: r => num.format(r.meanChars), className: "text-right tabular-nums" },
+              { key: "questions", label: "使った問題", className: "text-right tabular-nums" },
+            ]} />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>コンテキストの扱い（CLM）</CardTitle>
+            <CardDescription>
+              エピソードの終わり方: {Object.entries(d.outcomes).map(([k, v]) => `${k} ${v}`).join("・") || "-"}。続行を促されたエピソード {d.nudged} / {d.episodes}。context_edit {d.contextEdits} 回、作業メモの更新 {d.memoryWrites} 回。{onSample && "行を選ぶと呼び出しの記録を表示します"}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <DataTable rows={d.questions.map(q => ({ ...q, id: q.sample }))} selected={sample} onSelect={onSample && (r => onSample(r.sample))} empty="記録がありません" columns={[
+              { key: "sample", label: "問題", render: r => <Clip text={r.sample} width="max-w-[14rem]" /> },
+              { key: "score", label: "点", render: r => r.score ?? "-", className: "text-right tabular-nums" },
+              { key: "calls", label: "呼出", className: "text-right tabular-nums" },
+              { key: "peak", label: "ピーク", render: r => num.format(r.peak), className: "text-right tabular-nums" },
+              { key: "contextEdits", label: "context_edit", className: "text-right tabular-nums" },
+              { key: "memoryWrites", label: "メモ更新", className: "text-right tabular-nums" },
+              { key: "memoryChars", label: "メモ文字数", render: r => num.format(r.memoryChars), className: "text-right tabular-nums" },
+            ]} />
+          </CardContent>
+        </Card>
+      </div>
+      <Card>
+        <CardHeader><CardTitle>問題のある呼び出し</CardTitle><CardDescription>エラー、何も見つからなかった検索、同じエピソードで同じ引数の呼び出しの繰り返し</CardDescription></CardHeader>
+        <CardContent>
+          <DataTable rows={problems} empty="見つかりません" columns={[
+            { key: "kind", label: "種類" },
+            { key: "sample", label: "問題", render: r => <Clip text={r.sample} width="max-w-[14rem]" /> },
+            { key: "detail", label: "内容", render: r => <Clip text={r.detail} width="max-w-xl" /> },
+          ]} />
+        </CardContent>
+      </Card>
+      {trace && (
+        <Card>
+          <CardHeader><CardTitle>呼び出しの記録</CardTitle><CardDescription>各エピソードのツール呼び出しを順に並べたもの（[ ] はその時点の入力トークン）。改善役に渡す trace.md と同じ内容です</CardDescription></CardHeader>
+          <CardContent><pre className="max-h-[32rem] overflow-auto rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap">{trace}</pre></CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function SessionDiagnostics({ session }: { session: string }) {
+  const d = usePoll<Diagnosis & { trace: string }>(`/api/diagnostics?s=${enc(session)}`, 10_000);
+  if (!d) return <div className="text-muted-foreground">診断を読み込み中…</div>;
+  return <Diagnostics d={d} trace={d.trace} />;
+}
+
 function RsiDetail({ gens, gen, onGen, stats }: { gens: Generation[]; gen?: number; onGen: (g: number) => void; stats: GenStats }) {
   const g = gens.find(x => x.gen === gen);
   const detail = usePoll<RsiGen>(g ? `/api/rsi/gen?n=${g.gen}` : null, 5000);
   const base = usePoll<RsiGen>(g && g.base !== null ? `/api/rsi/gen?n=${g.base}` : null, 60_000);
+  const diag = usePoll<Diagnosis>(g ? `/api/rsi/diagnostics?n=${g.gen}` : null, 15_000);
+  const [sample, setSample] = useState<string>();
+  const trace = usePoll<{ text: string }>(g && sample ? `/api/rsi/trace?n=${g.gen}&sample=${enc(sample)}` : null, 30_000);
   if (!g) return <div className="text-muted-foreground">まだ世代がありません</div>;
   const cats = stats[g.gen]?.eval?.byCategory ?? {}, baseCats = g.base !== null ? stats[g.base]?.eval?.byCategory ?? {} : {};
   const baseById = new Map((base?.samples ?? []).map(s => [s.id, s]));
@@ -681,6 +762,7 @@ function RsiDetail({ gens, gen, onGen, stats }: { gens: Generation[]; gen?: numb
           ]} />
         </CardContent>
       </Card>
+      {diag && <Diagnostics d={diag} sample={sample} onSample={setSample} trace={trace?.text} />}
     </div>
   );
 }

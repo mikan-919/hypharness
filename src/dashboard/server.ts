@@ -9,6 +9,7 @@ import { history, openChat, organize, reply, WINDOW } from "../chat.ts";
 import { centralization, type Store } from "../db.ts";
 import type { Llm } from "../locomo.ts";
 import { DEFAULTS } from "../../scripts/rsi-defaults.ts";
+import { collect, diagnose, traceMarkdown, type Stats } from "../../scripts/rsi-traces.ts";
 import * as runs from "./runs.ts";
 import index from "./index.html";
 
@@ -180,6 +181,18 @@ async function evalTotals(dir: string, expected: number) {
   };
 }
 
+// Call-level traces of a generation's evaluated questions (scripts/rsi-traces.ts), keyed by question directory.
+async function generationTraces(gen: number) {
+  const out = join(genDir(gen), "eval", "locomo");
+  const judged = await jsonl(join(out, "judgments.jsonl"));
+  const stats = new Map<string, Stats>();
+  for (const j of judged) {
+    const sample = String(j.id).replaceAll(":", "-"), db = join(out, String(j.arm), sample, "state.sqlite");
+    if (existsSync(db) && !stats.has(sample)) stats.set(sample, collect(db, sample, j.score));
+  }
+  return stats;
+}
+
 // One generation in detail: the improver's calls and every evaluated question with its score and context size.
 async function rsiGeneration(gen: number) {
   const dir = genDir(gen);
@@ -215,6 +228,11 @@ const server = Bun.serve({
         lastAt: (d.query("select max(at) at from log").get() as { at: number | null }).at };
     })))),
     "/api/overview": guard(async req => { const s = await session(params(req).get("s")); return json(s && overview(s.db)); }),
+    "/api/diagnostics": guard(async req => {
+      const s = await session(params(req).get("s"));
+      const stats = s && collect(join(s.id, "state.sqlite"), s.id);
+      return json(stats && { ...diagnose([stats]), trace: traceMarkdown(stats) });
+    }),
     "/api/agent": guard(async req => { const p = params(req), s = await session(p.get("s")); return json(s && agent(s.db, p.get("id") ?? "")); }),
     "/api/episode": guard(async req => { const p = params(req), s = await session(p.get("s")); return json(s && episode(s.db, p.get("id") ?? "")); }),
     "/api/files": guard(async req => {
@@ -243,6 +261,16 @@ const server = Bun.serve({
     "/api/rsi/gen": guard(async req => {
       const n = Number(params(req).get("n"));
       return json(Number.isSafeInteger(n) && n >= 0 ? await rsiGeneration(n) : undefined);
+    }),
+    "/api/rsi/diagnostics": guard(async req => {
+      const n = Number(params(req).get("n"));
+      return json(Number.isSafeInteger(n) && n >= 0 && existsSync(genDir(n)) ? diagnose([...(await generationTraces(n)).values()]) : undefined);
+    }),
+    // Only questions found among the generation's judgments are read, so the parameter cannot name another file.
+    "/api/rsi/trace": guard(async req => {
+      const p = params(req), n = Number(p.get("n"));
+      const s = Number.isSafeInteger(n) && n >= 0 && existsSync(genDir(n)) ? (await generationTraces(n)).get(p.get("sample") ?? "") : undefined;
+      return json(s && { text: traceMarkdown(s) });
     }),
     "/api/rsi/start": { POST: guard(async req => Response.json(runs.startRsi(rsiDir, await req.json() as runs.RsiRequest))) },
     "/api/rsi/stop": {

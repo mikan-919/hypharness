@@ -138,3 +138,31 @@ test("the chat view is empty until the first message and refuses an empty one", 
     proc.kill();
   }
 });
+
+test("diagnostics summarize a session's tool use and a generation's questions, and refuse unknown questions", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyph-diag-"));
+  const out = join(dir, ".hyph", "rsi", "gen-0", "eval", "locomo");
+  mkdirSync(join(out, "dynamic", "q-1"), { recursive: true });
+  const store = new Store(join(out, "dynamic", "q-1", "state.sqlite"));
+  store.init("p", "", defaultConfig);
+  store.run("insert into episodes(id, agent, task, messages, status) values('e1', 'lead', 'T1', ?, 'finished')", JSON.stringify([
+    { role: "user", content: "start", timestamp: 1 },
+    { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "knowledge_search", arguments: { query: "x" } }], usage: { input: 100, output: 1, cacheRead: 0, cacheWrite: 0 }, timestamp: 2 },
+  ]));
+  store.run("insert into ops(episode, call_id, result, is_error) values('e1', 'c1', 'No matches', 0)");
+  store.db.close();
+  await Bun.write(join(out, "judgments.jsonl"), `${JSON.stringify({ arm: "dynamic", id: "q:1", score: 0 })}\n`);
+  mkdirSync(join(dir, ".hyph", "run"), { recursive: true });
+  new Store(join(dir, ".hyph", "run", "state.sqlite")).init("p", "", defaultConfig);
+  const { proc, base } = await serve(dir);
+  try {
+    const d = await (await fetch(`${base}/api/rsi/diagnostics?n=0`)).json() as { tools: { tool: string }[]; empty: unknown[]; questions: { sample: string; peak: number }[] };
+    expect([d.tools.map(t => t.tool), d.empty.length, d.questions]).toEqual([["knowledge_search"], 1, [expect.objectContaining({ sample: "q-1", peak: 100 })]]);
+    expect(((await (await fetch(`${base}/api/rsi/trace?n=0&sample=q-1`)).json()) as { text: string }).text).toContain('knowledge_search {"query":"x"}');
+    expect((await fetch(`${base}/api/rsi/trace?n=0&sample=..%2F..%2Fx`)).status).toBe(404);
+    const s = await (await fetch(`${base}/api/diagnostics?s=.hyph/run`)).json() as { episodes: number; trace: string };
+    expect([s.episodes, s.trace]).toEqual([0, expect.stringContaining("# .hyph/run")]);
+  } finally {
+    proc.kill();
+  }
+});

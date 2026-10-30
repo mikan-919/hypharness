@@ -38,6 +38,7 @@ test("traces recover every call, including steps a context_edit replaced, and su
   expect(s.memoryWrites.lead).toBe(1);
   const trace = traceMarkdown(s);
   expect(trace).toContain('1. [');
+  expect(trace).toMatch(/## Tasks\n- T-\S+ steer done by lead: \d+ calls — /);
   expect(trace).toContain('knowledge_search {"query":"Oslo"} → ');
   const d = diagnosticsMarkdown([s]);
   expect(d).toContain("| knowledge_search | 2 | 0 |");

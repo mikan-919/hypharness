@@ -16,6 +16,10 @@ Diagnose before changing anything. Start from questions that lost points and the
 2. Tool use: Are the right tools called with good arguments? Look for errors, empty lookups, identical calls repeated, results far larger than needed, and tools that would have found the answer but were never called. Check whether tool descriptions, result formats or limits cause it.
 3. Organization (DeLM): Are agents, tasks and verification used where they help, or do they add calls without catching mistakes? Is the work concentrated on lead?
 4. Answers: For each wrong answer, find where it went wrong: evidence never found, found but misread (dates, people), or the answer not written as asked.
+5. Context length: The harness's principle is that no agent's context grows long. For each large peak, find in trace.md the call where the prompt jumped and what caused it: a large tool result kept in context, steps never compacted, a long working memory, or a long opening message. Prefer changes that keep only what the next step needs.
+6. Memory (arms ending in -memory, the conversation held in DeLM): Do lookups reach the evidence in a few calls, or do they miss and retry? Would a different split of the conversation, search, or domain layout have found it?
+7. Market roles (mode market): Do the investor's budgets match what the work spent, are declines and re-splits wasting calls, and are the critic's objections upheld or overruled?
+Checks 6 and 7 apply only when the evaluated arm uses them.
 
 Then make one focused change to the harness source that addresses the most frequent cause you found. bun run check and bun test must pass; add a test for the change.
 Before finishing, write rsi-traces/note.md: the diagnosis (which check failed, in which questions, with call-level evidence), what you changed and why, and the effect you predict on score and peak tokens.`;
