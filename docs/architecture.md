@@ -6,14 +6,22 @@ hypharness は「DeLM × CLM Core Specification」に基づくエージェント
 
 | ファイル | 役割 |
 | --- | --- |
-| [`src/index.ts`](../src/index.ts) | コマンドライン。実行と再開、`status`、`bench`、`locomo` |
+| [`src/index.ts`](../src/index.ts) | コマンドライン。実行と再開、`status`、`bench`、`locomo`、`chat` |
 | [`src/db.ts`](../src/db.ts) | SQLite の状態（`Store`）と設定の既定値 |
 | [`src/scheduler.ts`](../src/scheduler.ts) | 巡回ごとの割り当て、検証の手配、停止条件、集計 |
 | [`src/agent.ts`](../src/agent.ts) | 1エピソードの実行。システムプロンプト、ツールの実行と記録、モデル呼び出しの時間切れ |
 | [`src/tools.ts`](../src/tools.ts) | エージェントが使うツール |
+| [`src/triggers.ts`](../src/triggers.ts) | イベントや DeLM の状態から、それを扱う役にタスクを作るトリガー。market の流れと、記憶の domain の担当を起こす規則 |
+| [`src/memory.ts`](../src/memory.ts) | 会話を文ごとに検証済みの知識として DeLM に取り込む処理。LoCoMo の `-memory` 方式とフロントチャットが使う |
+| [`src/chat.ts`](../src/chat.ts) | フロントチャット。直近の発言だけを文脈に持ち、古い発言を記憶へ移す |
 | [`src/locomo.ts`](../src/locomo.ts) | LoCoMo-Plus ベンチマーク |
 | [`src/dashboard/`](../src/dashboard/) | 操作画面のサーバー（`server.ts`）、実行の起動と停止（`runs.ts`）、画面（`app.tsx`） |
 | [`src/auth.ts`](../src/auth.ts) | `auth.json` を読み書きする認証情報の保存先 |
+| [`scripts/rsi.ts`](../scripts/rsi.ts) | 自己改善ループ。世代ごとに改善と評価を進め、`state.json` に記録する |
+| [`scripts/rsi-eval.ts`](../scripts/rsi-eval.ts) | 候補を LoCoMo-Plus の固定サブセットで採点し、採用するか決める |
+| [`scripts/rsi-traces.ts`](../scripts/rsi-traces.ts) | 改善役に渡す評価記録（`trace.md`、`diagnostics.md`）の作成 |
+| [`scripts/rsi-judges.ts`](../scripts/rsi-judges.ts) | 自己改善の投資家役・批判役・評価役。market 組織の同名の役とは別物 |
+| [`scripts/rsi-defaults.ts`](../scripts/rsi-defaults.ts) | 自己改善の設定の既定値。ダッシュボードの入力欄と共有する |
 
 ## 状態
 
