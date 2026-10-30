@@ -1,7 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -158,6 +163,171 @@ function AgentPanel({ session, agent }: { session: string; agent: Row }) {
   );
 }
 
+type RunInfo = { dir: string; kind: string; args: string[]; startedAt: number; endedAt: number | null; exitCode: number | null; running: boolean };
+
+async function post(url: string, body: unknown) {
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error ?? res.statusText);
+  return data;
+}
+
+const toInt = (v: string) => v.trim() ? Number(v) : undefined;
+const enc = encodeURIComponent;
+// A bench run owns several sessions under its directory, so a session belongs to the run whose dir contains it.
+const runFor = (list: RunInfo[] | undefined, session: string) =>
+  list?.filter(r => r.dir === session || session.startsWith(`${r.dir}/`)).sort((a, b) => b.startedAt - a.startedAt)[0];
+
+function Field({ id, label, hint, children }: { id: string; label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <div className="grid gap-1.5">
+      <Label htmlFor={id}>{label}</Label>
+      {children}
+      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+    </div>
+  );
+}
+
+function NewRun({ onStarted, onClose }: { onStarted: (dir: string) => void; onClose: () => void }) {
+  const [form, setForm] = useState({ name: "", purpose: "", constraints: "", mode: "dynamic", calls: "80", agents: "", concurrency: "", check: "", allowShell: false });
+  const [error, setError] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true); setError(undefined);
+    try {
+      const bench = form.mode === "bench";
+      const run = await post("/api/runs", {
+        name: form.name, kind: bench ? "bench" : "run", mode: bench ? undefined : form.mode, purpose: form.purpose, constraints: form.constraints,
+        calls: toInt(form.calls), agents: toInt(form.agents), concurrency: toInt(form.concurrency), check: form.check, allowShell: form.allowShell,
+      });
+      onStarted(run.dir);
+    } catch (err) { setError(String((err as Error).message)); } finally { setBusy(false); }
+  };
+  return (
+    <Card>
+      <CardHeader><CardTitle>新規実行</CardTitle><CardDescription>目的と制約だけを渡します。達成の手順はエージェントが決めます</CardDescription></CardHeader>
+      <CardContent>
+        <form onSubmit={submit} className="grid gap-4 md:grid-cols-2">
+          <Field id="purpose" label="最上位目的"><Textarea id="purpose" required rows={3} value={form.purpose} onChange={set("purpose")} placeholder="例: CSV を集計する CLI を書き、テストを通す" /></Field>
+          <Field id="constraints" label="制約" hint="任意"><Textarea id="constraints" rows={3} value={form.constraints} onChange={set("constraints")} placeholder="例: TypeScript のみ、外部パッケージを使わない" /></Field>
+          <Field id="name" label="セッション名" hint="小文字・数字・- と _（.hyph/<名前> に保存）"><Input id="name" required pattern="[a-z0-9][a-z0-9_\-]{0,39}" value={form.name} onChange={set("name")} placeholder="csv-cli" /></Field>
+          <Field id="mode" label="組織" hint="bench は single・fixed・dynamic を同じ条件で順に実行して比較します">
+            <Select value={form.mode} onValueChange={v => setForm({ ...form, mode: v })}>
+              <SelectTrigger id="mode"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="dynamic">dynamic（エージェントが増減を判断）</SelectItem>
+                <SelectItem value="fixed">fixed（3体で固定）</SelectItem>
+                <SelectItem value="single">single（1体）</SelectItem>
+                <SelectItem value="bench">bench（3方式を比較）</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          <div className="grid grid-cols-3 gap-3">
+            <Field id="calls" label="呼び出し上限"><Input id="calls" type="number" min={1} value={form.calls} onChange={set("calls")} /></Field>
+            <Field id="agents" label="エージェント上限"><Input id="agents" type="number" min={1} value={form.agents} onChange={set("agents")} placeholder="既定" /></Field>
+            <Field id="concurrency" label="同時実行"><Input id="concurrency" type="number" min={1} value={form.concurrency} onChange={set("concurrency")} placeholder="既定" /></Field>
+          </div>
+          <Field id="check" label="終了後の検査コマンド" hint="作業ディレクトリで実行し、終了コードを結果に含めます"><Input id="check" value={form.check} onChange={set("check")} placeholder="bun test" /></Field>
+          <div className="flex items-center gap-2">
+            <Switch id="shell" checked={form.allowShell} onCheckedChange={v => setForm({ ...form, allowShell: v })} />
+            <Label htmlFor="shell">シェルの実行を許可する</Label>
+          </div>
+          <div className="flex items-center justify-end gap-2 md:col-span-2">
+            {error && <span className="mr-auto text-sm text-destructive">{error}</span>}
+            <Button type="button" variant="ghost" onClick={onClose}>閉じる</Button>
+            <Button type="submit" disabled={busy}>{busy ? "起動中…" : "実行する"}</Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function RunControl({ session, o }: { session: string; o?: Overview }) {
+  const list = usePoll<RunInfo[]>("/api/runs", 2000);
+  const run = runFor(list, session);
+  const live = usePoll<RunInfo & { lines: string[] }>(run ? `/api/output?dir=${enc(run.dir)}` : null, 2000);
+  const saved = usePoll<{ lines: string[] }>(run ? null : `/api/runlog?s=${enc(session)}`, 10_000);
+  const out = live ?? (saved?.lines.length ? saved : undefined);
+  const [calls, setCalls] = useState("");
+  const [allowShell, setAllowShell] = useState(false);
+  const [check, setCheck] = useState("");
+  const [error, setError] = useState<string>();
+  const loaded = !!o;
+  useEffect(() => { if (o) { setCalls(String(o.modelCalls + 50)); setAllowShell(!!o.config.allowShell); } }, [session, loaded]);
+  const logRef = useRef<HTMLPreElement>(null);
+  useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight); }, [out?.lines.length]);
+  const act = async (fn: () => Promise<unknown>) => { setError(undefined); try { await fn(); } catch (e) { setError(String((e as Error).message)); } };
+  const running = !!run?.running;
+  const done = o?.goals.find(g => g.id === "G0")?.status === "done";
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-4">
+        <div className="grid gap-1.5">
+          <CardTitle className="flex items-center gap-2">実行 <Badge variant={running ? "secondary" : "outline"}>{running ? "実行中" : "停止中"}</Badge></CardTitle>
+          <CardDescription>
+            {run ? (running ? `${time(run.startedAt)} に開始` : `${time(run.endedAt)} に終了（終了コード ${run.exitCode}）`) : out ? "前回までの実行出力（run.log）" : "このダッシュボードを起動してからは実行していません"}
+          </CardDescription>
+        </div>
+        {running ? (
+          <Button variant="destructive" onClick={() => act(() => post("/api/runs/stop", { dir: run!.dir }))}>停止する</Button>
+        ) : o && (
+          <form className="flex flex-wrap items-end gap-3" onSubmit={e => { e.preventDefault(); act(() => post("/api/runs/resume", { session, calls: toInt(calls), allowShell, check })); }}>
+            <Field id="resume-calls" label="呼び出し上限（累計）"><Input id="resume-calls" className="w-32" type="number" min={1} value={calls} onChange={e => setCalls(e.target.value)} /></Field>
+            <Field id="resume-check" label="検査コマンド"><Input id="resume-check" className="w-40" value={check} onChange={e => setCheck(e.target.value)} placeholder="任意" /></Field>
+            <div className="flex h-9 items-center gap-2">
+              <Switch id="resume-shell" checked={allowShell} onCheckedChange={setAllowShell} />
+              <Label htmlFor="resume-shell">シェルを許可</Label>
+            </div>
+            <Button type="submit" disabled={done} title={done ? "最上位目標は完了しています" : undefined}>再開する</Button>
+          </form>
+        )}
+      </CardHeader>
+      {(error || out) && (
+        <CardContent className="grid gap-2">
+          {error && <div className="text-sm text-destructive">{error}</div>}
+          {out && (
+            <pre ref={logRef} className="h-56 overflow-auto rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap">
+              {out.lines.slice(-400).join("\n") || "(出力なし)"}
+            </pre>
+          )}
+        </CardContent>
+      )}
+    </Card>
+  );
+}
+
+function Files({ session }: { session: string }) {
+  const list = usePoll<{ path: string; size: number }[]>(`/api/files?s=${enc(session)}`, 5000);
+  const [path, setPath] = useState<string>();
+  const file = usePoll<{ path: string; size: number; truncated: boolean; text: string }>(path ? `/api/file?s=${enc(session)}&path=${enc(path)}` : null, 5000);
+  useEffect(() => setPath(undefined), [session]);
+  return (
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+      <Card>
+        <CardHeader><CardTitle>作業ディレクトリ</CardTitle><CardDescription>エージェントが作成した成果物</CardDescription></CardHeader>
+        <CardContent>
+          <DataTable rows={(list ?? []).map(f => ({ ...f, id: f.path }))} selected={path} onSelect={r => setPath(r.path)} empty="ファイルなし" columns={[
+            { key: "path", label: "パス", render: r => <Clip text={r.path} width="max-w-xs" /> },
+            { key: "size", label: "サイズ", render: r => `${num.format(r.size)} B`, className: "text-right tabular-nums" },
+          ]} />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>{path ?? "ファイルを選択"}</CardTitle>{file?.truncated && <CardDescription>先頭 200,000 バイトのみ表示</CardDescription>}</CardHeader>
+        <CardContent>
+          <ScrollArea className="h-[32rem] rounded-md border p-3">
+            <pre className="text-xs whitespace-pre-wrap">{file?.text ?? ""}</pre>
+          </ScrollArea>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function Dashboard({ session }: { session: string }) {
   const o = usePoll<Overview>(`/api/overview?s=${encodeURIComponent(session)}`);
   const [agentId, setAgentId] = useState<string>();
@@ -165,7 +335,7 @@ function Dashboard({ session }: { session: string }) {
   const [tab, setTab] = useState(() => location.hash.slice(1) || "agents");
   useEffect(() => { history.replaceState(null, "", `#${tab}`); }, [tab]);
   useEffect(() => setAgentId(undefined), [session]);
-  if (!o) return <div className="text-muted-foreground">読み込み中…</div>;
+  if (!o) return <div className="grid gap-6"><RunControl session={session} /><div className="text-muted-foreground">状態を読み込み中…</div></div>;
   const t = o.totals, root = o.goals.find(g => g.id === "G0");
   const work = o.tasks.filter(x => x.kind === "work");
   const agent = o.agents.find(a => a.id === agentId);
@@ -173,6 +343,7 @@ function Dashboard({ session }: { session: string }) {
 
   return (
     <div className="grid gap-6">
+      <RunControl session={session} o={o} />
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">最上位目的 {root && <Status value={root.status} />}</CardTitle>
@@ -197,6 +368,7 @@ function Dashboard({ session }: { session: string }) {
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="flex-wrap">
           <TabsTrigger value="agents">エージェント</TabsTrigger>
+          <TabsTrigger value="files">成果物</TabsTrigger>
           <TabsTrigger value="telemetry">テレメトリ</TabsTrigger>
           <TabsTrigger value="tasks">タスク</TabsTrigger>
           <TabsTrigger value="goals">目標</TabsTrigger>
@@ -310,6 +482,8 @@ function Dashboard({ session }: { session: string }) {
           </Card>
         </TabsContent>
 
+        <TabsContent value="files"><Files session={session} /></TabsContent>
+
         <TabsContent value="log">
           <Card>
             <CardHeader><CardTitle>イベントログ</CardTitle><CardDescription>新しい順に最大 500 件</CardDescription></CardHeader>
@@ -327,15 +501,22 @@ function Dashboard({ session }: { session: string }) {
 }
 
 function App() {
-  const list = usePoll<Session[]>("/api/sessions", 10_000);
+  const list = usePoll<Session[]>("/api/sessions");
   const [session, setSession] = useState<string>();
+  const [creating, setCreating] = useState(false);
+  // A just-started run may not have a state file yet; keep it selected, and move into a bench run's first session once it appears.
   useEffect(() => {
-    if (list?.length && !list.some(s => s.id === session)) setSession([...list].sort((a, b) => (b.lastAt ?? 0) - (a.lastAt ?? 0))[0]!.id);
+    if (!list?.length || (session && list.some(s => s.id === session))) return;
+    const child = session && list.find(s => s.id.startsWith(`${session}/`));
+    if (child) setSession(child.id);
+    else if (!session) setSession([...list].sort((a, b) => (b.lastAt ?? 0) - (a.lastAt ?? 0))[0]!.id);
   }, [list, session]);
   return (
     <div className="mx-auto grid max-w-[1600px] gap-6 p-4 md:p-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold">hypharness</h1>
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+        <Button variant={creating ? "secondary" : "default"} onClick={() => setCreating(!creating)}>新規実行</Button>
         {list && list.length > 0 && (
           <Select value={session} onValueChange={setSession}>
             <SelectTrigger className="w-full sm:w-[28rem]" aria-label="セッション"><SelectValue placeholder="セッション" /></SelectTrigger>
@@ -344,8 +525,10 @@ function App() {
             </SelectContent>
           </Select>
         )}
+        </div>
       </header>
-      {list && list.length === 0 && <div className="text-muted-foreground">状態ファイル（state.sqlite）が見つかりません。ハーネスを一度実行してください。</div>}
+      {creating && <NewRun onClose={() => setCreating(false)} onStarted={dir => { setCreating(false); setSession(dir); }} />}
+      {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
       {session && <Dashboard session={session} />}
     </div>
   );
