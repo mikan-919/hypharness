@@ -359,7 +359,7 @@ function Dashboard({ session }: { session: string }) {
         <Kpi label="入力トークン" value={num.format(promptTokens(t))} note={`キャッシュ外 ${num.format(t.input)}`} />
         <Kpi label="出力トークン" value={num.format(t.output)} />
         <Kpi label="キャッシュ読み取り" value={pct(t.cacheRead, promptTokens(t))} note={`${num.format(t.cacheRead)} トークン`} />
-        <Kpi label="最大入力文字数" value={num.format(t.maxPromptChars)} />
+        <Kpi label="最大入力トークン" value={num.format(t.maxPromptTokens)} note="1回の呼び出しの入力（キャッシュ分を含む）" />
         <Kpi label="モデル待ち時間" value={`${num.format(Math.round(t.ms / 1000))} 秒`} />
         <Kpi label="エージェント" value={`${o.agents.filter(a => a.status === "active").length} / ${o.agents.length}`} note="稼働 / 全体" />
         <Kpi label="作業タスク" value={`${work.filter(x => x.status === "done").length} / ${work.length}`} note="検証済み / 全体" />
@@ -391,7 +391,7 @@ function Dashboard({ session }: { session: string }) {
                 { key: "input", label: "入力", render: r => num.format(promptTokens(r)), className: "text-right tabular-nums" },
                 { key: "output", label: "出力", render: r => num.format(r.output), className: "text-right tabular-nums" },
                 { key: "cacheRead", label: "キャッシュ", render: r => pct(r.cacheRead, promptTokens(r)), className: "text-right tabular-nums" },
-                { key: "maxPromptChars", label: "最大入力", render: r => num.format(r.maxPromptChars), className: "text-right tabular-nums" },
+                { key: "maxPromptTokens", label: "最大入力トークン", render: r => num.format(r.maxPromptTokens), className: "text-right tabular-nums" },
                 { key: "memoryVersion", label: "記憶", render: r => `v${r.memoryVersion} · ${num.format(r.memoryChars)}字` },
                 { key: "lastAt", label: "最終呼び出し", render: r => time(r.lastAt) },
               ]} />
@@ -401,10 +401,7 @@ function Dashboard({ session }: { session: string }) {
         </TabsContent>
 
         <TabsContent value="telemetry" className="grid gap-4">
-          <div className="grid gap-4 xl:grid-cols-2">
-            <PerCallChart title="1回の入力の文字数" description="システムプロンプトと文脈の合計。長期実行で増え続けないことを確認します" usage={o.usage} agents={o.agents} field="promptChars" />
-            <PerCallChart title="入力トークン" description="プロバイダーが報告した呼び出しごとの入力トークン数（キャッシュ分を含む）" usage={o.usage.map(u => ({ ...u, promptTokens: promptTokens(u) }))} agents={o.agents} field="promptTokens" />
-          </div>
+          <PerCallChart title="1回の入力トークン" description="プロバイダーが報告した呼び出しごとの入力トークン数（キャッシュ分を含む）。長期実行で増え続けないことを確認します" usage={o.usage.map(u => ({ ...u, promptTokens: promptTokens(u) }))} agents={o.agents} field="promptTokens" />
           <Card>
             <CardHeader><CardTitle>呼び出しの記録</CardTitle><CardDescription>新しい順に最大 200 件</CardDescription></CardHeader>
             <CardContent>
@@ -414,7 +411,7 @@ function Dashboard({ session }: { session: string }) {
                 { key: "cacheRead", label: "キャッシュ読取", render: r => num.format(r.cacheRead), className: "text-right tabular-nums" },
                 { key: "cacheWrite", label: "キャッシュ書込", render: r => num.format(r.cacheWrite), className: "text-right tabular-nums" },
                 { key: "output", label: "出力", render: r => num.format(r.output), className: "text-right tabular-nums" },
-                { key: "promptChars", label: "入力文字数", render: r => num.format(r.promptChars), className: "text-right tabular-nums" },
+                { key: "promptTokens", label: "入力合計", render: r => num.format(promptTokens(r)), className: "text-right tabular-nums" },
                 { key: "ms", label: "時間", render: r => `${num.format(r.ms)} ms`, className: "text-right tabular-nums" },
               ]} />
             </CardContent>

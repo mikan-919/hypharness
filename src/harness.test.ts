@@ -53,6 +53,9 @@ test("A: a purpose alone leads to planned, executed, independently verified work
   const root = store.goal("G0")!;
   expect(root.verified_by).not.toBe("lead");
   for (const t of store.all<{ verified_by: string; claimed_by: string }>("select * from tasks where kind = 'work'")) expect(t.verified_by).not.toBe(t.claimed_by);
+  // Each tool result names its own position, so a range can be given to context_edit without an outline.
+  const msgs = JSON.parse(store.get<{ messages: string }>("select messages from episodes limit 1")!.messages) as Message[];
+  msgs.forEach((m, i) => { if (m.role === "toolResult") expect((m.content[0] as { text: string }).text).toMatch(new RegExp(`\\[#${i} · live context: ~\\d+ tokens\\]$`)); });
 });
 
 test("B: the organization grows only when verification needs another agent", async () => {
@@ -146,7 +149,11 @@ test("web_search sends the query to Parallel and returns ranked excerpts", async
     expect(sent!.url).toBe("https://api.parallel.ai/v1/search");
     expect((sent!.init.headers as Record<string, string>)["x-api-key"]).toBe("test-key");
     expect(JSON.parse(sent!.init.body as string)).toMatchObject({ search_queries: ["bun sqlite api"], mode: "fast", session_id: "T-1", advanced_settings: { source_policy: { include_domains: ["bun.com"] } } });
-    expect(out).toContain("[1] SQLite\nhttps://bun.com/docs/api/sqlite\nbun:sqlite is built in");
+    expect(out).toMatch(/^\[1\] K-\S+ SQLite\nhttps:\/\/bun.com\/docs\/api\/sqlite\nbun:sqlite is built in$/);
+    // Results become hypotheses with the URL as source, once per URL.
+    await tools.web_search!.run(c, args);
+    expect(store.all("select gist, source, status from knowledge")).toEqual([{ gist: "SQLite", source: "https://bun.com/docs/api/sqlite", status: "hypothesis" }]);
+    expect(out).toContain(store.get<{ id: string }>("select id from knowledge")!.id);
   } finally {
     globalThis.fetch = original;
     if (key === undefined) delete process.env.PARALLEL_API_KEY; else process.env.PARALLEL_API_KEY = key;
@@ -191,4 +198,26 @@ test("unlimited defaults stay unlimited after the config is stored and read back
   expect(store.config).toMatchObject({ maxAgents: Infinity, maxConcurrency: Infinity, maxModelCalls: Infinity, maxSteps: 16 });
   expect(store.takeModelCall()).toBe(true);
   expect(JSON.parse(store.meta("config")!).maxModelCalls).toBeNull(); // what the dashboard reads
+});
+
+test("working memory can be edited in part, and a range of steps is replaced only by a shorter note", () => {
+  const { store, rt } = setup({});
+  const step = (id: string, name: string, text: string): Message[] => [
+    { role: "assistant", content: [{ type: "toolCall", id, name, arguments: {} }], api: "x", provider: "x", model: "x", usage: {} as never, stopReason: "toolUse", timestamp: 0 } as Message,
+    { role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text }], isError: false, timestamp: 0 },
+  ];
+  const messages: Message[] = [{ role: "user", content: "opening", timestamp: 0 }, ...step("c1", "file_read", "x".repeat(500)), ...step("c2", "shell", "y".repeat(500)), ...step("c3", "context_edit", "")];
+  store.run("insert into episodes(id, agent, task, messages, status) values('e', 'lead', 'T-1', ?, 'running')", JSON.stringify(messages));
+  const c = { store, agent: store.agent("lead")!, task: { id: "T-1" }, workspace: rt.workspace, contextDir: rt.contextDir, episode: "e", messages } as unknown as ToolContext;
+
+  tools.memory_write!.run(c, { content: "plan: A\nstatus: todo" });
+  tools.memory_edit!.run(c, { old: "todo", new: "done" });
+  expect(store.memory("lead")).toEqual({ memory: "plan: A\nstatus: done", version: 2 });
+  expect(() => tools.memory_edit!.run(c, { old: "missing", new: "x" })).toThrow("does not occur");
+
+  expect(() => tools.context_edit!.run(c, { from: 1, to: 4, note: "z".repeat(5000) })).toThrow("must shrink");
+  expect(() => tools.context_edit!.run(c, { from: 2, to: 4, note: "n" })).toThrow("must not separate");
+  tools.context_edit!.run(c, { from: 1, to: 4, note: "read the file and ran the tests; both fine" });
+  expect(messages.map(m => m.role)).toEqual(["user", "user", "assistant", "toolResult"]);
+  expect(store.get<{ n: number }>("select count(*) n from episode_history where episode = 'e'")!.n).toBe(1);
 });
