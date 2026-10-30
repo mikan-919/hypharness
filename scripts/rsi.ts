@@ -76,7 +76,7 @@ async function writeTraces(state: State, workspace: string) {
   rmSync(dst, { recursive: true, force: true });
   mkdirSync(dst, { recursive: true });
   await $`cp ${state.incumbent!.eval} ${join(dst, "eval.json")}`;
-  await $`rsync -a --prune-empty-dirs --include=*/ --include=contexts/*** --include=answer.txt --include=*.jsonl --exclude=* ${join(src, "locomo")}/ ${join(dst, "locomo")}/`.quiet();
+  await $`rsync -a --prune-empty-dirs '--include=*/' '--include=contexts/***' --include=answer.txt '--include=*.jsonl' '--exclude=*' ${join(src, "locomo")}/ ${join(dst, "locomo")}/`.quiet();
   await Bun.write(join(dst, "history.md"), `# Earlier generations\n\n${history(state)}\n`);
 }
 
@@ -160,7 +160,9 @@ async function main() {
       g.error = undefined;
       if (g.phase === "done") log(`gen ${g.gen}: ${g.accepted ? "accepted" : "rejected"} (${g.reason})`);
     } catch (e) {
-      g.error = e instanceof Error ? e.message : String(e);
+      // A failed shell step (ShellError) carries the command's stderr, which the message alone omits.
+      const stderr = (e as { stderr?: Buffer }).stderr?.toString().trim();
+      g.error = `${e instanceof Error ? e.message : String(e)}${stderr ? `: ${stderr.slice(-500)}` : ""}`;
       log(`gen ${g.gen}: ${g.error}; retrying in ${RETRY_MS / 60_000} min`);
       save();
       await Bun.sleep(RETRY_MS);
