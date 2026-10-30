@@ -45,7 +45,8 @@ export function collect(dbPath: string, sample: string, score?: number): Stats {
     });
     const memoryWrites = Object.fromEntries((db.query("select agent, count(*) n from context_history group by agent").all() as { agent: string; n: number }[]).map(r => [r.agent, r.n]));
     const memoryChars = Object.fromEntries((db.query("select agent, length(memory) n from context").all() as { agent: string; n: number }[]).map(r => [r.agent, r.n]));
-    const agents = (db.query("select count(*) n from agents").get() as { n: number }).n;
+    // Agents that ran; dormant memory stewards are not counted.
+    const agents = (db.query("select count(distinct agent) n from episodes").get() as { n: number }).n;
     const tasks = (db.query("select t.id, t.kind, t.status, t.claimed_by claimedBy, t.budget, (select count(*) from usage u where u.task = t.id) used, coalesce(t.result, t.feedback, '') result from tasks t order by t.created_at").all() as Stats["tasks"]);
     return { sample, score, episodes, memoryWrites, memoryChars, agents, tasks, peak: Math.max(0, ...episodes.map(e => e.peak)) };
   } finally {
