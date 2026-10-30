@@ -644,11 +644,18 @@ export const tools: Record<string, Def<TSchema>> = {
     },
   }),
   shell: def({
-    description: "Run a shell command in the workspace (60 s timeout). Requires host permission (--allow-shell).",
+    description: "Run a shell command in an isolated workspace (60 s timeout). Requires host permission (--allow-shell) and bubblewrap.",
     parameters: Type.Object({ command: Type.String() }),
     async run(c, a) {
       if (!c.store.config.allowShell) fail("Shell is not permitted by the host; start the harness with --allow-shell to grant it");
-      const proc = Bun.spawn(["sh", "-c", a.command], { cwd: c.workspace, stdout: "pipe", stderr: "pipe", timeout: 60_000 });
+      const bwrap = Bun.which("bwrap") ?? fail("Shell requires bubblewrap");
+      const shell = realpathSync(Bun.which("sh") ?? fail("Shell executable not found"));
+      const system = ["/nix/store", "/run/current-system/sw", "/usr", "/bin", "/lib", "/lib64", "/etc/resolv.conf", "/etc/ssl/certs"]
+        .filter(existsSync).flatMap(path => ["--ro-bind", path, path]);
+      const proc = Bun.spawn([bwrap, "--unshare-user", "--unshare-pid", "--die-with-parent", "--clearenv",
+        ...system, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind", resolve(c.workspace), "/workspace",
+        "--chdir", "/workspace", "--setenv", "PATH", "/run/current-system/sw/bin:/usr/bin:/bin", "--setenv", "HOME", "/tmp",
+        "--", shell, "-c", a.command], { stdout: "pipe", stderr: "pipe", timeout: 60_000 });
       const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
       return `exit ${code}\n${out}${err ? `\nstderr:\n${err}` : ""}`;
     },
@@ -659,6 +666,7 @@ export const tools: Record<string, Def<TSchema>> = {
 export function toolSchemas(): Tool[] {
   return Object.entries(tools)
     .filter(([name]) => name !== "web_search" || process.env.PARALLEL_API_KEY)
+    .filter(([name]) => name !== "shell" || Bun.which("bwrap"))
     .map(([name, t]) => ({ name, description: t.description, parameters: t.parameters }));
 }
 

@@ -107,6 +107,18 @@ test("workspace paths cannot escape, including through symlinks", () => {
   expect(() => safePath(dir, "link/x")).toThrow();
 });
 
+test("shell confines writes and does not expose the host environment", async () => {
+  if (!Bun.which("bwrap")) return;
+  const { store, rt, dir } = setup({ allowShell: true });
+  const c = { store, agent: store.agent("lead")!, task: { id: "T-1" }, workspace: rt.workspace, contextDir: rt.contextDir, episode: "e", messages: [] } as unknown as ToolContext;
+  await Bun.write(join(dir, "outside"), "private");
+  const probe = await tools.shell!.run(c, { command: "printf ok" });
+  if (!String(probe).includes("exit 0\nok")) return; // User namespaces may be disabled by the host.
+  const result = await tools.shell!.run(c, { command: `printf '%s' "${"${HOME}"}"; test ! -e '${dir}/outside' && echo hidden; echo written > result` });
+  expect(result).toContain("exit 0\n/tmphidden");
+  expect(await Bun.file(join(rt.workspace, "result")).text()).toBe("written\n");
+});
+
 test("a provider that keeps failing stops the run instead of spending the budget", async () => {
   const { rt } = setup({});
   const faux = fauxProvider();
