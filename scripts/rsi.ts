@@ -2,7 +2,7 @@
 // worktree of its own source; scripts/rsi-eval.ts scores the resulting candidate against the incumbent; an accepted
 // candidate becomes the harness that runs the next generation. state.json records every generation for the dashboard.
 // Every step resumes after a stop: the session from its state.sqlite, the evaluation from its LoCoMo output.
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { $, type Subprocess } from "bun";
@@ -40,6 +40,8 @@ const repo = resolve(import.meta.dir, "..");
 const root = resolve(opts.dir!);
 const statePath = join(root, "state.json"), pidPath = join(root, "pid");
 const genDir = (gen: number) => join(root, `gen-${gen}`);
+// Only the loop that wrote the pid file removes it; a second start that is refused must leave the running loop visible.
+const releasePid = () => { if (existsSync(pidPath) && readFileSync(pidPath, "utf8") === String(process.pid)) rmSync(pidPath); };
 
 const log = (line: string) => {
   const stamped = `${new Date().toISOString()} ${line}`;
@@ -128,7 +130,7 @@ async function main() {
     if (alive && pid !== process.pid) throw new Error(`An RSI loop is already running in ${root} (pid ${pid})`);
   }
   writeFileSync(pidPath, String(process.pid));
-  for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => { child?.kill("SIGTERM"); rmSync(pidPath, { force: true }); process.exit(0); });
+  for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => { child?.kill("SIGTERM"); releasePid(); process.exit(0); });
 
   const state: State = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { settings: {}, generations: [] };
   // Every generation is compared with the incumbent on the same samples, so the sample set is fixed by the first start.
@@ -166,11 +168,11 @@ async function main() {
     save();
   }
   log("generation limit reached");
-  unlinkSync(pidPath);
+  releasePid();
 }
 
 if (import.meta.main) await main().catch(e => {
   log(`stopped: ${e instanceof Error ? e.message : String(e)}`);
-  rmSync(pidPath, { force: true });
+  releasePid();
   process.exit(1);
 });
