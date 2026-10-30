@@ -49,7 +49,7 @@ create table if not exists log(id integer primary key, at int not null, agent te
 export type Agent = { id: string; role: string; status: "active" | "dormant"; parent: string | null; idle: number };
 export type Goal = { id: string; parent: string | null; description: string; status: "open" | "review" | "done" | "dropped"; owner: string; deliverable: string | null; feedback: string | null; verified_by: string | null; rev: number };
 export type Task = {
-  id: string; goal: string; kind: "work" | "verify" | "steer" | "invest" | "critique" | "judge"; description: string; status: "open" | "claimed" | "review" | "done" | "failed";
+  id: string; goal: string; kind: "work" | "verify" | "steer" | "invest" | "critique" | "judge" | "organize"; description: string; status: "open" | "claimed" | "review" | "done" | "failed";
   author: string; assignee: string | null; exclude: string | null; target: string | null; claimed_by: string | null; lease_until: number | null;
   result: string | null; feedback: string | null; verified_by: string | null; rev: number;
   budget: number | null; // model calls a funded task may use across all its episodes

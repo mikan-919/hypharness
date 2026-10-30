@@ -910,7 +910,7 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
 }
 
 type ChatInfo = {
-  dir: string; window: number; memory: { knowledge: number; domains: number };
+  dir: string; window: number; memory: { knowledge: number; domains: number; organizing: number };
   messages: { id: number; role: "user" | "assistant"; text: string; at: number; remembered: number }[];
 };
 type ChatReply = { calls: number; lookups: number; peakTokens: number; remembered: number };
@@ -971,7 +971,7 @@ function Chat({ onOpen }: { onOpen: (id: string) => void }) {
         </CardContent>
       </Card>
       <div className="grid content-start gap-4">
-        <Kpi label="記憶の件数" value={num.format(info.memory.knowledge)} note={`domain ${info.memory.domains} 件（1日1件）`} />
+        <Kpi label="記憶の件数" value={num.format(info.memory.knowledge)} note={`domain ${info.memory.domains} 件・整理待ち ${info.memory.organizing} 件`} />
         <Kpi label="直前の応答" value={last ? `${last.calls} 回` : "-"} note={last ? `検索 ${last.lookups} 回・記憶へ移した発言 ${last.remembered} 件` : "モデル呼び出しの回数"} />
         <Kpi label="直前のピーク入力" value={last ? num.format(last.peakTokens) : "-"} note="応答中の1回の呼び出しの最大入力トークン" />
         {n > 0 && <Button variant="outline" onClick={() => onOpen(info.dir)}>記憶の中身を見る</Button>}

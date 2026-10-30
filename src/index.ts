@@ -6,7 +6,7 @@ import { defaultConfig, Store, type Config } from "./db.ts";
 import { report, runScheduler } from "./scheduler.ts";
 import type { Runtime } from "./agent.ts";
 import { CATEGORIES, HARNESS_ARMS, runLocomo } from "./locomo.ts";
-import { openChat, reply } from "./chat.ts";
+import { openChat, organize, reply } from "./chat.ts";
 
 const { values: opts, positionals } = parseArgs({
   allowPositionals: true,
@@ -106,6 +106,8 @@ if (command === "locomo") {
     if (!line.trim()) break;
     const r = await reply(llm, store, line.trim());
     console.log(`${r.reply}\n  [${r.calls} calls, ${r.lookups} lookups, peak ${r.peakTokens} tokens, ${r.remembered} messages moved to memory]`);
+    const o = await organize(llm, store, join(opts.dir!, "chat"));
+    if (o) console.log(`  [stewards organized memory: ${o.status} after ${o.rounds} rounds]`);
     process.stdout.write("> ");
   }
   store.db.close();

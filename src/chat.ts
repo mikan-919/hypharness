@@ -4,10 +4,16 @@ import { defaultConfig, Store, type Agent, type Task } from "./db.ts";
 import type { Llm } from "./locomo.ts";
 import { rememberTurns, type Turn } from "./memory.ts";
 import { tools, type ToolContext } from "./tools.ts";
+import { emit } from "./triggers.ts";
+import { runScheduler } from "./scheduler.ts";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 
 // Front chat: the model that talks to the user keeps only the last few messages in its context. Older messages are
 // handed to DeLM as knowledge (one sentence per item, one domain per day), and the model looks them up when a reply
 // needs them. The chat log itself stays in the store for display, never in the model's context.
+// Each domain has a steward agent; as memory accumulates, a trigger sets the steward to organize its domain, and
+// organize() runs those tasks after a reply.
 
 export const WINDOW = 6;
 const MAX_STEPS = 8;
@@ -25,6 +31,8 @@ export function openChat(path: string) {
   store.db.exec("create table if not exists chat(id integer primary key, role text not null, text text not null, at int not null, remembered int not null default 0)");
   // The store's purpose and lead agent let DeLM agents organize the same memory later.
   store.init("Keep the memory of a conversation with a user organized so the front chat can find what it needs.", "", defaultConfig);
+  // The chat never finishes: G0 stays in review, so it is never steered or verified and only triggered work runs.
+  store.run("update goals set status = 'review' where id = 'G0' and status = 'open'");
   return store;
 }
 
@@ -40,9 +48,10 @@ const turnOf = (m: ChatMessage): Turn => {
 export function rememberOld(store: Store) {
   const all = history(store), old = all.slice(0, Math.max(0, all.length - WINDOW)).filter(m => !m.remembered);
   for (const d of new Set(old.map(m => day(m.at)))) {
-    const ofDay = all.filter(m => day(m.at) === d);
-    rememberTurns(store, { id: `D-chat-${d}`, name: `Chat ${d}`, description: `Messages with the user on ${d}` },
+    const ofDay = all.filter(m => day(m.at) === d), domain = `D-chat-${d}`;
+    const added = rememberTurns(store, { id: domain, name: `Chat ${d}`, description: `Messages with the user on ${d}` },
       ofDay.map(turnOf), ofDay.flatMap((m, i) => old.includes(m) ? [i] : []), i => `c${ofDay[i]!.id}`);
+    store.tx(() => emit(store, "front", "memory_grown", { domain, added }));
   }
   for (const m of old) store.run("update chat set remembered = 1 where id = ?", m.id);
   return old.length;
@@ -86,4 +95,12 @@ export async function reply(llm: Llm, store: Store, text: string): Promise<ChatR
   answer ||= "(no reply)";
   store.run("insert into chat(role, text, at) values('assistant', ?, ?)", answer, Date.now());
   return { reply: answer, calls, lookups, peakTokens, remembered };
+}
+
+// Runs the organizing work the triggers created (stewards splitting, merging, or handing over domains), with a
+// bounded number of rounds; each organize task also has its own call budget.
+export async function organize(llm: Llm, store: Store, dir: string, rounds = 6) {
+  if (!store.get("select 1 from tasks where kind = 'organize' and status in ('open', 'claimed')")) return undefined;
+  mkdirSync(join(dir, "workspace"), { recursive: true });
+  return runScheduler({ store, ...llm, workspace: join(dir, "workspace"), contextDir: join(dir, "contexts") }, rounds);
 }

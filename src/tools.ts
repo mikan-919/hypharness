@@ -304,7 +304,10 @@ export const tools: Record<string, Def<TSchema>> = {
       const task = requireCurrent(c);
       c.store.tx(() => {
         if (task.kind === "invest") fail("Decide an invest task with goal_fund or goal_decline");
-        if (task.kind === "critique" || task.kind === "judge") {
+        if (task.kind === "organize") {
+          c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", a.result, task.id);
+          c.store.setMeta(`organized:${task.target}`, String(c.store.get<{ n: number }>("select count(*) n from domain_knowledge where domain = ?", task.target)!.n));
+        } else if (task.kind === "critique" || task.kind === "judge") {
           if (!a.verdict) fail(`${task.kind} tasks need a verdict`);
           c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `${a.verdict}: ${a.result}`, task.id);
           // A critique that passes, and every ruling, decides the work; objections go to the evaluator first.
@@ -475,9 +478,23 @@ export const tools: Record<string, Def<TSchema>> = {
     run(c, a) {
       requireSteward(c.store, a.id, c.agent);
       c.store.agent(a.to) ?? fail(`Unknown agent ${a.to}`);
-      c.store.run("update domains set steward = ?, rev = rev + 1 where id = ? and steward = ?", a.to, a.id, c.agent.id);
-      c.store.log(c.agent.id, "domain_transferred", { id: a.id, to: a.to });
+      c.store.tx(() => {
+        c.store.run("update domains set steward = ?, rev = rev + 1 where id = ? and steward = ?", a.to, a.id, c.agent.id);
+        emit(c.store, c.agent.id, "domain_transferred", { id: a.id, to: a.to });
+      });
       return `Domain ${a.id} now stewarded by ${a.to}`;
+    },
+  }),
+
+  domain_request: def({
+    description: "Ask the steward of another domain to transfer it to you, for example to merge it with a domain you steward. Its steward decides.",
+    parameters: Type.Object({ domain: Str("Domain ID"), reason: Str("What you would do with it and why that helps retrieval") }),
+    run(c, a) {
+      const d = c.store.get<{ steward: string; status: string }>("select steward, status from domains where id = ?", a.domain) ?? fail(`Unknown domain ${a.domain}`);
+      if (d.status !== "active") fail(`Domain ${a.domain} is ${d.status}`);
+      if (d.steward === c.agent.id) fail(`You already steward ${a.domain}`);
+      emit(c.store, c.agent.id, "transfer_requested", { domain: a.domain, steward: d.steward, reason: a.reason });
+      return `Asked ${d.steward} to transfer ${a.domain}`;
     },
   }),
 

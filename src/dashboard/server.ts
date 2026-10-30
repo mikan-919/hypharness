@@ -5,7 +5,7 @@ import { parseArgs } from "node:util";
 import type { Message } from "@earendil-works/pi-ai";
 import { render, safePath } from "../tools.ts";
 import { openModel } from "../auth.ts";
-import { history, openChat, reply, WINDOW } from "../chat.ts";
+import { history, openChat, organize, reply, WINDOW } from "../chat.ts";
 import type { Store } from "../db.ts";
 import type { Llm } from "../locomo.ts";
 import { DEFAULTS } from "../../scripts/rsi-defaults.ts";
@@ -106,9 +106,9 @@ const chatDir = rel(join(root, "chat"));
 let chatStore: Store | undefined, chatLlm: Llm | undefined, chatQueue: Promise<unknown> = Promise.resolve();
 const chatOpen = () => chatStore ??= (mkdirSync(chatDir, { recursive: true }), openChat(join(chatDir, "state.sqlite")));
 function chatView() {
-  if (!chatStore && !existsSync(join(chatDir, "state.sqlite"))) return { dir: chatDir, window: WINDOW, messages: [], memory: { knowledge: 0, domains: 0 } };
+  if (!chatStore && !existsSync(join(chatDir, "state.sqlite"))) return { dir: chatDir, window: WINDOW, messages: [], memory: { knowledge: 0, domains: 0, organizing: 0 } };
   const s = chatOpen();
-  return { dir: chatDir, window: WINDOW, messages: history(s), memory: s.get("select (select count(*) from knowledge) knowledge, (select count(*) from domains where status = 'active') domains") };
+  return { dir: chatDir, window: WINDOW, messages: history(s), memory: s.get("select (select count(*) from knowledge) knowledge, (select count(*) from domains where status = 'active') domains, (select count(*) from tasks where kind = 'organize' and status in ('open', 'claimed')) organizing") };
 }
 
 function guard(handler: (req: Request) => Response | Promise<Response>) {
@@ -258,7 +258,8 @@ const server = Bun.serve({
         const { text } = await req.json() as { text?: unknown };
         if (typeof text !== "string" || !text.trim() || text.length > 20_000) throw new Error("text must be 1-20000 characters");
         const next = chatQueue.then(async () => reply(chatLlm ??= await openModel(), chatOpen(), text.trim()));
-        chatQueue = next.catch(() => {});
+        // Stewards organize memory after the reply is sent; the next reply waits for them.
+        chatQueue = next.then(() => organize(chatLlm!, chatOpen(), chatDir)).catch(e => console.error(`chat organize: ${e}`));
         return Response.json({ ...(await next), ...chatView() });
       }),
     },

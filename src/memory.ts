@@ -9,15 +9,26 @@ export const MEMORY_GUIDE = "The conversation is not in the workspace. It was sp
 export const splitSentences = (text: string) => text.split(/(?<=[。！？])\s*|(?<=[.!?])\s+/).map(s => s.trim()).filter(Boolean);
 
 // when labels the turn's time (a session date or a timestamp); line is the turn as shown in raw evidence.
+export const stewardOf = (domain: string) => `steward-${domain.toLowerCase()}`;
+export const isSteward = (agent: string) => agent.startsWith("steward-");
+
 export type Turn = { speaker: string; text: string; line: string; when: string };
 
 // Records turns[i] for each i in pick; raw evidence takes the neighbouring turns from the whole list.
-// The domain is created on first use; key(i) must be unique per turn across the store.
+// The domain is created on first use with a steward of its own, dormant until a trigger gives it organizing work;
+// key(i) must be unique per turn across the store.
 export function rememberTurns(store: Store, domain: { id: string; name: string; description: string }, turns: Turn[], pick: number[], key: (i: number) => string) {
   const now = Date.now();
   let n = 0;
   store.tx(() => {
-    store.run("insert or ignore into domains(id, name, description, steward, status) values(?, ?, ?, 'lead', 'active')", domain.id, domain.name, domain.description);
+    if (!store.get("select 1 from domains where id = ?", domain.id)) {
+      const steward = stewardOf(domain.id);
+      if (!store.agent(steward)) {
+        store.addAgent(steward, `steward of domain ${domain.id} (${domain.name}): keeps its knowledge organized so it can be found`, "host");
+        store.run("update agents set status = 'dormant' where id = ?", steward);
+      }
+      store.run("insert into domains(id, name, description, steward, status) values(?, ?, ?, ?, 'active')", domain.id, domain.name, domain.description, steward);
+    }
     for (const i of pick) {
       const t = turns[i]!, when = t.when ? `[${t.when}] ` : "";
       const around = turns.slice(Math.max(0, i - 2), i + 3).map(x => x.line).join("\n");

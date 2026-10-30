@@ -1,4 +1,5 @@
 import type { Agent, Goal, Store, Task } from "./db.ts";
+import { isSteward } from "./memory.ts";
 
 // Triggers: which role an event or a state of the shared DeLM sets to work. Agents are not told what to do by a
 // coordinator; a tool records an event (emit), and the matching triggers create tasks for the roles that handle it.
@@ -27,8 +28,14 @@ export const ROLES: Record<string, { role: string; kinds: Task["kind"][] }> = {
 
 export const isMarket = (store: Store) => store.config.organization === "market";
 
-// Whether an agent may claim a task: market roles take only their own kinds, and workers take everything else.
+// New knowledge in a domain since it was last organized before its steward is set to organize it.
+export const ORGANIZE_EVERY = 12;
+const ORGANIZE_BUDGET = 12;
+
+// Whether an agent may claim a task: memory stewards take only organizing work and nobody else does; in market mode
+// the roles take only their own kinds, and workers take everything else.
 export function eligible(store: Store, agent: Agent, task: Pick<Task, "kind">) {
+  if (isSteward(agent.id) || task.kind === "organize") return isSteward(agent.id) && task.kind === "organize";
   if (!isMarket(store)) return true;
   const r = ROLES[agent.id];
   return r ? r.kinds.includes(task.kind) : !Object.values(ROLES).some(x => x.kinds.includes(task.kind));
@@ -37,6 +44,7 @@ export function eligible(store: Store, agent: Agent, task: Pick<Task, "kind">) {
 // Tools a role may not use; execute() rejects any tool missing from the agent's list.
 export function withheldTools(store: Store, agent: Agent) {
   const withheld = new Set<string>();
+  if (isSteward(agent.id)) for (const t of ["file_write", "shell", "task_create", "task_assign", "agent_spawn", "goal_create", "goal_complete", "goal_update", "goal_transfer"]) withheld.add(t);
   if (!(isMarket(store) && agent.id === "investor")) { withheld.add("goal_fund"); withheld.add("goal_decline"); }
   if (isMarket(store) && agent.id === "lead") for (const t of ["file_write", "shell", "task_create", "task_assign", "agent_spawn"]) withheld.add(t);
   return withheld;
@@ -74,7 +82,43 @@ function invest(store: Store, author: string, goal: Goal, why: string) {
   });
 }
 
+function organize(store: Store, author: string, domain: string, why: string) {
+  const d = store.get<{ id: string; name: string; description: string; steward: string; status: string }>("select * from domains where id = ?", domain);
+  if (!d || d.status !== "active" || !isSteward(d.steward)) return;
+  if (store.get("select 1 from tasks where kind = 'organize' and target = ? and assignee = ? and status in ('open', 'claimed')", domain, d.steward)) return;
+  const n = (id: string) => store.get<{ n: number }>("select count(*) n from domain_knowledge where domain = ?", id)!.n;
+  const others = store.all<{ id: string; name: string; steward: string }>("select id, name, steward from domains where status = 'active' and id != ? order by id", domain);
+  const sample = store.all<{ gist: string }>("select k.gist from knowledge k join domain_knowledge dk on dk.knowledge = k.id where dk.domain = ? order by k.created_at desc limit 12", domain);
+  store.run("update agents set status = 'active', idle = 0 where id = ? and status = 'dormant'", d.steward);
+  store.addTask({
+    goal: "G0", kind: "organize", author, assignee: d.steward, target: domain, budget: ORGANIZE_BUDGET,
+    description: `${why}\nYou steward ${d.id} (${d.name}: ${d.description}), ${n(d.id)} knowledge items. Recent ones:\n${sample.map(s => `- ${s.gist}`).join("\n")}\n`
+      + `Other domains: ${others.map(o => `${o.id} ${o.name} (n=${n(o.id)}, steward ${o.steward})`).join("; ") || "none"}.\n`
+      + `Reorganize only if it makes knowledge easier to find: domain_split by topic, domain_merge domains you steward, or domain_request another steward's domain to merge it. Then task_finish with what you changed, or why nothing needed changing. Budget: ${ORGANIZE_BUDGET} model calls.`,
+  });
+}
+
 export const EVENT_TRIGGERS: EventTrigger[] = [
+  {
+    // Memory handed to DeLM (src/chat.ts) sets the domain's steward to organize it once enough has accumulated.
+    on: "memory_grown",
+    fire(store, agent, d) {
+      const now = store.get<{ n: number }>("select count(*) n from domain_knowledge where domain = ?", d.domain)!.n;
+      if (now - Number(store.meta(`organized:${d.domain}`) ?? 0) >= ORGANIZE_EVERY) organize(store, agent, d.domain, `${d.added} new knowledge items arrived in ${d.domain}.`);
+    },
+  },
+  {
+    on: "transfer_requested",
+    fire(store, agent, d) {
+      organize(store, agent, d.domain, `${agent} asks you to transfer ${d.domain} to it: ${d.reason}\nIf that helps retrieval, hand it over with domain_transfer to ${agent}; otherwise finish and say why not.`);
+    },
+  },
+  {
+    on: "domain_transferred",
+    fire(store, agent, d) {
+      organize(store, agent, d.id, `${agent} transferred ${d.id} to you. Merge or reorganize it if that helps retrieval.`);
+    },
+  },
   {
     on: "work_submitted", modes: CLASSIC,
     fire(store, agent, d) {
