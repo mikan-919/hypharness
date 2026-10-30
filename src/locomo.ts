@@ -357,7 +357,7 @@ export async function predictDirect(llm: Llm, s: Sample): Promise<Prediction> {
 }
 
 // A harness arm is an organization, optionally with "-memory": the conversation is held in DeLM instead of files.
-export const HARNESS_ARMS = ["single", "fixed", "dynamic", "single-memory", "fixed-memory", "dynamic-memory"] as const;
+export const HARNESS_ARMS = ["single", "fixed", "dynamic", "market", "single-memory", "fixed-memory", "dynamic-memory", "market-memory"] as const;
 export type HarnessArm = (typeof HARNESS_ARMS)[number];
 const armParts = (arm: HarnessArm) => ({ mode: arm.split("-")[0] as Config["organization"], memory: arm.endsWith("-memory") });
 
@@ -382,7 +382,7 @@ export async function predictHarness(llm: Llm, s: Sample, arm: HarnessArm, dir: 
   const store = new Store(join(dir, "state.sqlite"));
   try {
     const config: Config = mode === "single" ? { ...defaultConfig, organization: "single", maxAgents: 1, maxConcurrency: 1, maxModelCalls: calls }
-      : mode === "fixed" ? { ...defaultConfig, organization: "fixed", maxAgents: 3, maxModelCalls: calls } : { ...defaultConfig, maxModelCalls: calls };
+      : mode === "fixed" ? { ...defaultConfig, organization: "fixed", maxAgents: 3, maxModelCalls: calls } : { ...defaultConfig, organization: mode, maxModelCalls: calls };
     const fresh = store.purpose === undefined;
     store.init(harnessPurpose(s, arm), `Use only the conversation ${memory ? "stored as knowledge" : "files"}; do not invent facts that are not in them.`, config);
     if (fresh && memory) ingestConversation(store, s.chunks.join("\n"));

@@ -213,14 +213,15 @@ function NewRun({ onStarted, onClose }: { onStarted: (dir: string) => void; onCl
           <Field id="purpose" label="最上位目的"><Textarea id="purpose" required rows={3} value={form.purpose} onChange={set("purpose")} placeholder="例: CSV を集計する CLI を書き、テストを通す" /></Field>
           <Field id="constraints" label="制約" hint="任意"><Textarea id="constraints" rows={3} value={form.constraints} onChange={set("constraints")} placeholder="例: TypeScript のみ、外部パッケージを使わない" /></Field>
           <Field id="name" label="セッション名" hint="小文字・数字・- と _（.hyph/<名前> に保存）"><Input id="name" required pattern="[a-z0-9][a-z0-9_\-]{0,39}" value={form.name} onChange={set("name")} placeholder="csv-cli" /></Field>
-          <Field id="mode" label="組織" hint="bench は single・fixed・dynamic を同じ条件で順に実行して比較します">
+          <Field id="mode" label="組織" hint="bench は single・fixed・dynamic・market を同じ条件で順に実行して比較します">
             <Select value={form.mode} onValueChange={v => setForm({ ...form, mode: v })}>
               <SelectTrigger id="mode"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="dynamic">dynamic（エージェントが増減を判断）</SelectItem>
+                <SelectItem value="market">market（分割・出資・作業・批判をイベントで回す）</SelectItem>
                 <SelectItem value="fixed">fixed（3体で固定）</SelectItem>
                 <SelectItem value="single">single（1体）</SelectItem>
-                <SelectItem value="bench">bench（3方式を比較）</SelectItem>
+                <SelectItem value="bench">bench（4方式を比較）</SelectItem>
               </SelectContent>
             </Select>
           </Field>
@@ -800,6 +801,7 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
                     <SelectTrigger id="rsi-mode"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="dynamic">dynamic</SelectItem>
+                      <SelectItem value="market">market</SelectItem>
                       <SelectItem value="fixed">fixed</SelectItem>
                       <SelectItem value="single">single</SelectItem>
                     </SelectContent>
@@ -811,6 +813,8 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
                     <SelectContent>
                       <SelectItem value="dynamic">dynamic</SelectItem>
                       <SelectItem value="dynamic-memory">dynamic-memory</SelectItem>
+                      <SelectItem value="market">market</SelectItem>
+                      <SelectItem value="market-memory">market-memory</SelectItem>
                     </SelectContent>
                   </Select>
                 </Field>

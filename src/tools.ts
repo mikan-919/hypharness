@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "node
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { StringEnum, Type, type Message, type Static, type TSchema, type Tool } from "@earendil-works/pi-ai";
 import type { Agent, Goal, Store, Task } from "./db.ts";
-import { emit, requestVerification } from "./triggers.ts";
+import { emit, MAX_DECLINES, requestVerification } from "./triggers.ts";
 
 // messages is the caller's live context for the current episode; context_edit changes it in place.
 export type ToolContext = { store: Store; agent: Agent; task: Task; workspace: string; contextDir: string; episode: string; messages: Message[] };
@@ -34,8 +34,15 @@ function requireSteward(store: Store, id: string, agent: Agent) {
   return domain;
 }
 
+function requireInvest(c: ToolContext, goal: string) {
+  const task = requireCurrent(c);
+  if (task.kind !== "invest" || task.target !== goal) fail(`Your current task ${task.id} is not the invest task for ${goal}`);
+  if (c.store.goal(goal)?.status !== "open") fail(`Goal ${goal} is not open`);
+  return task;
+}
+
 function dynamicOnly(store: Store) {
-  if (store.config.organization !== "dynamic") fail(`Agent composition is fixed in ${store.config.organization} mode`);
+  if (store.config.organization !== "dynamic" && store.config.organization !== "market") fail(`Agent composition is fixed in ${store.config.organization} mode`);
 }
 
 
@@ -171,7 +178,7 @@ export const tools: Record<string, Def<TSchema>> = {
       if (parent.status !== "open") fail(`Goal ${parent.id} is ${parent.status}`);
       const id = c.store.id("G");
       c.store.run("insert into goals(id, parent, description, status, owner, created_at) values(?, ?, ?, 'open', ?, ?)", id, a.parent, a.description, c.agent.id, Date.now());
-      c.store.log(c.agent.id, "goal_created", { id, parent: a.parent });
+      emit(c.store, c.agent.id, "goal_created", { id, parent: a.parent });
       return `Created goal ${id}`;
     },
   }),
@@ -223,6 +230,32 @@ export const tools: Record<string, Def<TSchema>> = {
     },
   }),
 
+  // --- Market: the investor's decisions (src/triggers.ts) ---
+  goal_fund: def({
+    description: "Fund the goal of your current invest task with a model-call budget. A worker then does it within that budget; when the budget is spent the goal comes back to you.",
+    parameters: Type.Object({ goal: Str("Goal ID of your invest task"), budget: Type.Integer({ minimum: 1, maximum: 200, description: "Model calls the work may use in total" }), rationale: Str("Why it should pay back, and what you expect") }),
+    run(c, a) {
+      const task = requireInvest(c, a.goal);
+      c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `funded ${a.budget}: ${a.rationale}`, task.id);
+      emit(c.store, c.agent.id, "goal_funded", { goal: a.goal, budget: a.budget, rationale: a.rationale });
+      return `Funded ${a.goal} with ${a.budget} model calls`;
+    },
+  }),
+  goal_decline: def({
+    description: `Decline the goal of your current invest task; it is dropped and its owner decides again. At most ${MAX_DECLINES} subgoals of the same goal can be declined.`,
+    parameters: Type.Object({ goal: Str("Goal ID of your invest task"), reason: Str("Why it is not worth funding") }),
+    run(c, a) {
+      const task = requireInvest(c, a.goal), goal = c.store.goal(a.goal)!;
+      const declined = c.store.get<{ n: number }>("select count(*) n from goals where parent = ? and feedback like 'declined%'", goal.parent)!.n;
+      if (declined >= MAX_DECLINES) fail(`${declined} subgoals of ${goal.parent} were already declined; fund this one with a small budget instead`);
+      c.store.run("update goals set status = 'dropped', feedback = ?, rev = rev + 1 where id = ?", `declined: ${a.reason}`, goal.id);
+      c.store.run("update tasks set status = 'failed', feedback = 'goal declined' where goal = ? and status = 'open'", goal.id);
+      c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `declined: ${a.reason}`, task.id);
+      emit(c.store, c.agent.id, "goal_declined", { goal: goal.id, reason: a.reason });
+      return `Declined ${goal.id}`;
+    },
+  }),
+
   // --- DeLM: tasks ---
   task_list: def({
     description: "List tasks, optionally filtered by goal and status.",
@@ -270,7 +303,17 @@ export const tools: Record<string, Def<TSchema>> = {
     run(c, a) {
       const task = requireCurrent(c);
       c.store.tx(() => {
-        if (task.kind === "verify") {
+        if (task.kind === "invest") fail("Decide an invest task with goal_fund or goal_decline");
+        if (task.kind === "critique" || task.kind === "judge") {
+          if (!a.verdict) fail(`${task.kind} tasks need a verdict`);
+          c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `${a.verdict}: ${a.result}`, task.id);
+          // A critique that passes, and every ruling, decides the work; objections go to the evaluator first.
+          if (task.kind === "critique" && a.verdict === "fail") emit(c.store, c.agent.id, "objections_raised", { critique: task.id, target: task.target, objections: a.result });
+          else {
+            applyVerdict(c.store, c.agent.id, task.target!, a.verdict === "pass", a.result);
+            c.store.log(c.agent.id, "verified", { target: task.target, verdict: a.verdict, by: task.kind });
+          }
+        } else if (task.kind === "verify") {
           if (!a.verdict) fail("Verify tasks need a verdict");
           applyVerdict(c.store, c.agent.id, task.target!, a.verdict === "pass", a.result);
           c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `${a.verdict}: ${a.result}`, task.id);

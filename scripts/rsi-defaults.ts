@@ -32,7 +32,7 @@ export function resolveSettings(prev: Partial<RsiSettings> | undefined, started:
   }
   next.parallel = given.parallel as string | undefined;
   next.generations = given.generations as string | undefined;
-  if (!["single", "fixed", "dynamic"].includes(next.mode!)) throw new Error("--mode must be single, fixed, or dynamic");
+  if (!["single", "fixed", "dynamic", "market"].includes(next.mode!)) throw new Error("--mode must be single, fixed, dynamic, or market");
   if (!(HARNESS_ARMS as readonly string[]).includes(next.arm!)) throw new Error(`--arm must be one of ${HARNESS_ARMS.join(", ")}`);
   if (!["on", "off"].includes(next.judges!)) throw new Error("--judges must be on or off");
   for (const key of ["calls", "evalCalls", "perCategory", "parallel", "generations"])

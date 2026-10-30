@@ -4,7 +4,9 @@ import { Database } from "bun:sqlite";
 // Every multi-row change runs inside a transaction; single-row ownership changes use conditional UPDATEs.
 
 export type Config = {
-  organization: "single" | "fixed" | "dynamic";
+  // market: lead only splits goals; an investor funds each subgoal with a call budget, workers do funded work,
+  // a critic objects to results and an evaluator rules (src/triggers.ts).
+  organization: "single" | "fixed" | "dynamic" | "market";
   maxAgents: number;
   maxConcurrency: number;
   maxModelCalls: number;
@@ -47,9 +49,10 @@ create table if not exists log(id integer primary key, at int not null, agent te
 export type Agent = { id: string; role: string; status: "active" | "dormant"; parent: string | null; idle: number };
 export type Goal = { id: string; parent: string | null; description: string; status: "open" | "review" | "done" | "dropped"; owner: string; deliverable: string | null; feedback: string | null; verified_by: string | null; rev: number };
 export type Task = {
-  id: string; goal: string; kind: "work" | "verify" | "steer"; description: string; status: "open" | "claimed" | "review" | "done" | "failed";
+  id: string; goal: string; kind: "work" | "verify" | "steer" | "invest" | "critique" | "judge"; description: string; status: "open" | "claimed" | "review" | "done" | "failed";
   author: string; assignee: string | null; exclude: string | null; target: string | null; claimed_by: string | null; lease_until: number | null;
   result: string | null; feedback: string | null; verified_by: string | null; rev: number;
+  budget: number | null; // model calls a funded task may use across all its episodes
 };
 
 export class Store {
@@ -61,6 +64,8 @@ export class Store {
     this.db.run("pragma journal_mode = wal");
     this.db.run("pragma busy_timeout = 5000");
     this.db.exec(schema);
+    // Added after the first release; older stores get the column here.
+    if (!this.all<{ name: string }>("pragma table_info(tasks)").some(c => c.name === "budget")) this.db.run("alter table tasks add column budget int");
   }
 
   tx<T>(fn: () => T): T { return this.db.transaction(fn)(); }
@@ -113,10 +118,10 @@ export class Store {
   task(id: string) { return this.get<Task>("select * from tasks where id = ?", id); }
   goal(id: string) { return this.get<Goal>("select * from goals where id = ?", id); }
 
-  addTask(t: { goal: string; kind: Task["kind"]; description: string; author: string; assignee?: string | null; exclude?: string | null; target?: string | null }) {
+  addTask(t: { goal: string; kind: Task["kind"]; description: string; author: string; assignee?: string | null; exclude?: string | null; target?: string | null; budget?: number | null }) {
     const id = this.id("T");
-    this.run("insert into tasks(id, goal, kind, description, status, author, assignee, exclude, target, created_at) values(?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)",
-      id, t.goal, t.kind, t.description, t.author, t.assignee ?? null, t.exclude ?? null, t.target ?? null, Date.now());
+    this.run("insert into tasks(id, goal, kind, description, status, author, assignee, exclude, target, budget, created_at) values(?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)",
+      id, t.goal, t.kind, t.description, t.author, t.assignee ?? null, t.exclude ?? null, t.target ?? null, t.budget ?? null, Date.now());
     if (t.assignee) this.run("update agents set status = 'active', idle = 0 where id = ? and status = 'dormant'", t.assignee);
     return id;
   }

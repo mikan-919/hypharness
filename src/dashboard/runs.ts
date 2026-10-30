@@ -38,7 +38,7 @@ export function harnessArgs(r: RunRequest, dir: string, resume: boolean) {
   if (r.kind !== "run" && r.kind !== "bench") throw new Error("kind must be run or bench");
   const purpose = typeof r.purpose === "string" ? r.purpose.trim() : "";
   if (!resume && !purpose) throw new Error("purpose is required");
-  if (r.mode !== undefined && !["single", "fixed", "dynamic"].includes(r.mode)) throw new Error("mode must be single, fixed, or dynamic");
+  if (r.mode !== undefined && !["single", "fixed", "dynamic", "market"].includes(r.mode)) throw new Error("mode must be single, fixed, dynamic, or market");
   const args = r.kind === "bench" ? ["bench", purpose] : resume ? [] : [purpose];
   const flags: [string, string | undefined][] = [
     ["--dir", dir], ["--calls", positive(r.calls, "calls")], ["--agents", positive(r.agents, "agents")],
@@ -91,7 +91,7 @@ export function startRsi(dir: string, r: RsiRequest) {
     args.push("--delta", String(r.delta));
   }
   // Left out, the loop keeps what the previous start used.
-  if (r.mode !== undefined && !["single", "fixed", "dynamic"].includes(r.mode)) throw new Error("mode must be single, fixed, or dynamic");
+  if (r.mode !== undefined && !["single", "fixed", "dynamic", "market"].includes(r.mode)) throw new Error("mode must be single, fixed, dynamic, or market");
   if (r.mode !== undefined) args.push("--mode", r.mode);
   if (r.arm !== undefined && !(HARNESS_ARMS as readonly string[]).includes(r.arm)) throw new Error(`arm must be one of ${HARNESS_ARMS.join(", ")}`);
   if (r.arm !== undefined) args.push("--arm", r.arm);

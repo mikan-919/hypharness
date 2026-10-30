@@ -46,7 +46,8 @@ function configFor(mode: string): Config {
   if (mode === "single") return { ...defaultConfig, organization: "single", maxAgents: 1, maxConcurrency: 1 };
   if (mode === "fixed") return { ...defaultConfig, organization: "fixed", maxAgents: 3 };
   if (mode === "dynamic") return { ...defaultConfig };
-  throw new Error("--mode must be single, fixed, or dynamic");
+  if (mode === "market") return { ...defaultConfig, organization: "market" };
+  throw new Error("--mode must be single, fixed, dynamic, or market");
 }
 
 // Host-side permissions and budgets come from this run's flags; the purpose and organization mode stay as stored.
@@ -114,7 +115,7 @@ if (command === "locomo") {
   const llm = await openModel();
   const root = join(opts.dir!, `bench-${Date.now()}`);
   const results: Record<string, unknown> = {};
-  for (const mode of ["single", "fixed", "dynamic"]) {
+  for (const mode of ["single", "fixed", "dynamic", "market"]) {
     const env = open(join(root, mode));
     env.store.init(purpose, opts.constraints!, configFor(mode));
     applyFlags(env.store, env.store.config);

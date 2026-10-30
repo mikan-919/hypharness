@@ -144,7 +144,7 @@ bun run src/index.ts chat
 bun run bench 'ToDo管理のCLIを書く' --calls 60 --allow-shell --check 'bun test'
 ```
 
-同じ目的・モデル・呼び出し上限で single、fixed、dynamic を別々のセッションで順に実行し、`.hyph/bench-<時刻>/report.json` に次の値を書きます。
+同じ目的・モデル・呼び出し上限で single、fixed、dynamic、market を別々のセッションで順に実行し、`.hyph/bench-<時刻>/report.json` に次の値を書きます。
 
 - 終わり方と、最上位目標が独立に検証されたか
 - 検査コマンドの終了コード
@@ -152,6 +152,15 @@ bun run bench 'ToDo管理のCLIを書く' --calls 60 --allow-shell --check 'bun 
 - エージェント数と組織の変更数
 
 モデルの応答は実行ごとに変わるため、結果も実行ごとに変わります。差を見るには複数回実行してください。
+
+market は、判断を lead に集めない組織です。エージェントは指示ではなくイベントで動きます。ツールがイベントを記録すると、`src/triggers.ts` の対応表に従って、そのイベントを扱う役にタスクができます。
+
+1. lead はゴールを部分ゴールに分けて提出するだけです。ファイルの書き込み、シェル、タスクの作成、エージェントの作成はできません。
+2. 部分ゴールができると（`goal_created`）、投資家役（investor）が `goal_fund` でモデル呼び出しの予算を付けるか、`goal_decline` で断ります。同じゴールの下で断れるのは3件までです。
+3. 出資された部分ゴールは、予算つきの作業タスクになります。作業役（worker）が予算の範囲で行い、使い切ると作業は失敗となって投資家役に戻ります（`budget_exhausted`）。予算は作業のやり直しをまたいで数えます。
+4. 終わった作業には批判役（critic）が異議を出します。異議がなければ合格です。異議があれば評価役（evaluator）が根拠を確かめて裁定し、認めた場合は作業が差し戻されます。批判役には、過去の異議が認められた数と退けられた数を毎回示します。
+
+各役は必要になったときに作られ、仕事がなければ休眠します。
 
 ### Web 検索を使わせる
 
@@ -197,7 +206,7 @@ bun run src/index.ts locomo --arms direct,dynamic --per-category 2
 | オプション | 意味 | 既定値 |
 | --- | --- | --- |
 | `--dir DIR` | セッションのディレクトリ | `.hyph` |
-| `--mode single\|fixed\|dynamic` | 組織の形。最初の起動時に固定される | `dynamic` |
+| `--mode single\|fixed\|dynamic\|market` | 組織の形。最初の起動時に固定される | `dynamic` |
 | `--constraints TEXT` | 目的とともにシステムプロンプトに入る制約 | なし |
 | `--calls N` | モデル呼び出し回数の累計上限。状態に保存され、再開時に指定すると上書きされる | なし |
 | `--agents N` | エージェント数の上限（single では常に1） | なし（fixed は `3`） |

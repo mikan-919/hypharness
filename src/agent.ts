@@ -2,6 +2,7 @@ import { validateToolCall, type Api, type AssistantMessage, type Message, type M
 import type { createModels } from "@earendil-works/pi-ai/models";
 import type { Agent, Store, Task } from "./db.ts";
 import { mirror, toolSchemas, tools, type ToolContext } from "./tools.ts";
+import { emit, isMarket, withheldTools } from "./triggers.ts";
 
 export type Runtime = {
   store: Store;
@@ -43,7 +44,9 @@ Organization: ${c.organization} mode, ${Number.isFinite(c.maxAgents) ? `at most 
 
 How you work:
 - You handle one claimed task at a time. Shared goals, tasks, knowledge, domains, and other agents are visible only through tools; look up only what the task needs.
-- Progress means real, checkable artifacts in the workspace (file_write, shell when granted). Planning alone is not progress. Doing the work directly is often best; split it with goal_create/task_create only when that helps.
+${isMarket(store)
+    ? "- Work flows by events (market): lead splits goals into subgoals and submits them; an investor funds each subgoal with a model-call budget or declines it; workers do funded tasks within their budget; a critic objects to finished work and an evaluator rules on the objections. Do what your role and current task call for, nothing else.\n- Progress means real, checkable artifacts in the workspace (file_write, shell when granted). Planning alone is not progress."
+    : "- Progress means real, checkable artifacts in the workspace (file_write, shell when granted). Planning alone is not progress. Doing the work directly is often best; split it with goal_create/task_create only when that helps."}
 - Deliverables go in files; facts with their sources go in knowledge. web_search results are recorded as knowledge automatically (their IDs are shown), so run knowledge_search before searching the web again, and cite knowledge IDs for the claims your deliverables rely on. Record other findings worth reusing with knowledge_add, citing the source. New knowledge is a hypothesis until verified; never state unverified claims as fact.
 - Your working memory is the only thing you carry between tasks. Before finishing, update it if something should carry over: memory_edit changes a part, memory_write replaces it all. Keep it short and point to knowledge IDs and files instead of copying them.
 - Another agent verifies your results. When you verify, inspect the artifacts yourself and fail anything that is not demonstrated.
@@ -108,7 +111,8 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
   const end = (outcome: string) => { store.run("update episodes set status = ? where id = ?", outcome, id); mirror(rt, agent.id); return outcome; };
   const ctx: ToolContext = { store, agent, task, workspace: rt.workspace, contextDir: rt.contextDir, episode: id, messages };
   const system = systemPrompt(store, agent);
-  const schemas = toolSchemas();
+  const withheld = withheldTools(store, agent);
+  const schemas = toolSchemas().filter(s => !withheld.has(s.name));
   const { maxSteps } = store.config;
   let nudged = false;
 
@@ -145,6 +149,14 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
     }
     if (steps === maxSteps - 2) messages.push({ role: "user", content: "Two steps remain. Save progress with memory_write, then task_finish or task_release.", timestamp: Date.now() });
 
+    // A funded task's budget counts every episode that worked on it, so releasing and claiming again does not refill it.
+    if (task.budget !== null && task.budget !== undefined && store.get<{ n: number }>("select count(*) n from usage where task = ?", task.id)!.n >= task.budget) {
+      store.tx(() => {
+        store.run("update tasks set status = 'failed', claimed_by = null, lease_until = null, feedback = 'budget exhausted', rev = rev + 1 where id = ?", task.id);
+        emit(store, agent.id, "budget_exhausted", { task: task.id, goal: task.goal, budget: task.budget, note: store.memory(agent.id)?.memory.slice(0, 300) });
+      });
+      return end("budget");
+    }
     if (!store.takeModelCall()) throw new BudgetExhausted("Model call budget exhausted");
     store.renew(task.id, agent.id);
     const started = performance.now();
