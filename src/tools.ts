@@ -473,7 +473,6 @@ export const tools: Record<string, Def<TSchema>> = {
     parameters: Type.Object({
       objective: Str("Self-contained statement of what you are looking for and why"),
       queries: Type.Array(Type.String(), { minItems: 1, maxItems: 5, description: "2-3 keyword queries of 3-6 words each" }),
-      mode: Opt(StringEnum(["turbo", "fast", "basic", "advanced"], { description: "Speed versus quality; defaults to basic" })),
       max_results: Opt(Type.Integer({ minimum: 1, maximum: 20 })),
       include_domains: Opt(Type.Array(Type.String(), { description: "Restrict to these domains, e.g. docs.python.org or .gov" })),
       after_date: Opt(Str("Only content published on or after YYYY-MM-DD")),
@@ -487,7 +486,7 @@ export const tools: Record<string, Def<TSchema>> = {
         method: "POST",
         headers: { "content-type": "application/json", "x-api-key": key! },
         body: JSON.stringify({
-          objective: a.objective, search_queries: a.queries, mode: a.mode ?? "basic", session_id: c.task.id,
+          objective: a.objective, search_queries: a.queries, mode: "fast", session_id: c.task.id,
           max_chars_total: c.store.config.toolOutputLimit,
           advanced_settings: { max_results: a.max_results ?? 8, ...(source && { source_policy: source }) },
         }),
