@@ -35,11 +35,11 @@ function overview(d: Database) {
   const config = JSON.parse(meta(d, "config") ?? "{}");
   return {
     purpose: meta(d, "purpose"), constraints: meta(d, "constraints"), config, modelCalls: Number(meta(d, "model_calls") ?? 0),
-    totals: d.query("select count(*) calls, coalesce(sum(input),0) input, coalesce(sum(output),0) output, coalesce(sum(cache_read),0) cacheRead, coalesce(sum(cache_write),0) cacheWrite, coalesce(max(prompt_chars),0) maxPromptChars, coalesce(sum(ms),0) ms, min(at) firstAt, max(at) lastAt from usage").get(),
+    totals: d.query("select count(*) calls, coalesce(sum(input),0) input, coalesce(sum(output),0) output, coalesce(sum(cache_read),0) cacheRead, coalesce(sum(cache_write),0) cacheWrite, coalesce(max(input + cache_read + cache_write),0) maxPromptTokens, coalesce(sum(ms),0) ms, min(at) firstAt, max(at) lastAt from usage").get(),
     agents: all(d, `select a.*, c.version memoryVersion, length(c.memory) memoryChars,
         (select count(*) from usage u where u.agent = a.id) calls, (select coalesce(sum(input),0) from usage u where u.agent = a.id) input,
         (select coalesce(sum(output),0) from usage u where u.agent = a.id) output, (select coalesce(sum(cache_read),0) from usage u where u.agent = a.id) cacheRead, (select coalesce(sum(cache_write),0) from usage u where u.agent = a.id) cacheWrite,
-        (select coalesce(max(prompt_chars),0) from usage u where u.agent = a.id) maxPromptChars, (select max(at) from usage u where u.agent = a.id) lastAt,
+        (select coalesce(max(input + cache_read + cache_write),0) from usage u where u.agent = a.id) maxPromptTokens, (select max(at) from usage u where u.agent = a.id) lastAt,
         (select t.id from tasks t where t.claimed_by = a.id and t.status = 'claimed') currentTask,
         (select count(*) from tasks t where t.claimed_by = a.id and t.status = 'done') tasksDone
       from agents a join context c on c.agent = a.id order by a.created_at`),
@@ -47,7 +47,7 @@ function overview(d: Database) {
     tasks: all(d, "select id, goal, kind, description, status, author, assignee, exclude, target, claimed_by, result, feedback, verified_by, created_at from tasks order by created_at desc limit 500"),
     knowledge: all(d, "select id, gist, source, status, author, verified_by, created_at from knowledge order by created_at desc limit 500"),
     domains: all(d, "select d.*, (select count(*) from domain_knowledge where domain = d.id) knowledge from domains d"),
-    usage: all(d, "select id, agent, task, input, output, cache_read cacheRead, cache_write cacheWrite, prompt_chars promptChars, ms, at from usage order by id desc limit 2000").reverse(),
+    usage: all(d, "select id, agent, task, input, output, cache_read cacheRead, cache_write cacheWrite, ms, at from usage order by id desc limit 2000").reverse(),
     log: all(d, "select * from log order by id desc limit 500"),
   };
 }
