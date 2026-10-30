@@ -145,7 +145,7 @@ test("web_search sends the query to Parallel and returns ranked excerpts", async
     const out = await tools.web_search!.run(c, args);
     expect(sent!.url).toBe("https://api.parallel.ai/v1/search");
     expect((sent!.init.headers as Record<string, string>)["x-api-key"]).toBe("test-key");
-    expect(JSON.parse(sent!.init.body as string)).toMatchObject({ search_queries: ["bun sqlite api"], session_id: "T-1", advanced_settings: { source_policy: { include_domains: ["bun.com"] } } });
+    expect(JSON.parse(sent!.init.body as string)).toMatchObject({ search_queries: ["bun sqlite api"], mode: "fast", session_id: "T-1", advanced_settings: { source_policy: { include_domains: ["bun.com"] } } });
     expect(out).toContain("[1] SQLite\nhttps://bun.com/docs/api/sqlite\nbun:sqlite is built in");
   } finally {
     globalThis.fetch = original;
