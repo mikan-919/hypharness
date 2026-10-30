@@ -504,6 +504,7 @@ type Generation = {
   accepted?: boolean; reason?: string; error?: string;
   grant?: { direction: string; rationale: string; expected: string; calls: number }; direction?: string; spent?: number;
   review?: { objections: { claim: string; evidence: string; upheld?: boolean; ruling?: string }[]; veto: boolean; reason: string };
+  judgeCalls?: number;
 };
 type EvalTotals = Row & { expected: number; judged: number; calls: number; judgeCalls: number; ms: number; byCategory: Record<string, { avg: number; count: number }> };
 type GenStats = Record<number, { improver: Row | null; eval: EvalTotals | null }>;
@@ -619,7 +620,7 @@ function RsiDetail({ gens, gen, onGen, stats }: { gens: Generation[]; gen?: numb
                 <div><span className="text-muted-foreground">方向: </span>{g.grant.direction}</div>
                 <div><span className="text-muted-foreground">理由: </span>{g.grant.rationale || "-"}</div>
                 <div><span className="text-muted-foreground">予測: </span>{g.grant.expected || "-"}</div>
-                <div><span className="text-muted-foreground">予算: </span>{num.format(g.grant.calls)} 回{g.spent !== undefined && `（使った呼び出し: 改善と評価で ${num.format(g.spent)} 回）`}</div>
+                <div><span className="text-muted-foreground">予算: </span>{num.format(g.grant.calls)} 回{g.spent !== undefined && `（使った呼び出し: 改善・評価・投資と審査で ${num.format(g.spent)} 回、うち投資と審査 ${num.format(g.judgeCalls ?? 0)} 回）`}</div>
                 {g.direction && <div><span className="text-muted-foreground">変更したファイル: </span>{g.direction}</div>}
               </div>
             )}
@@ -764,7 +765,8 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
     t.tokens += (s.improver ? promptTokens(s.improver) : 0) + (s.eval ? promptTokens(s.eval) : 0);
     return t;
   }, { improver: 0, eval: 0, judge: 0, tokens: 0, calls: 0 });
-  totals.calls = totals.improver + totals.eval + totals.judge;
+  const judges = gens.reduce((n, g) => n + (g.judgeCalls ?? 0), 0);
+  totals.calls = totals.improver + totals.eval + totals.judge + judges;
 
   return (
     <div className="grid gap-6">
@@ -853,7 +855,7 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
         <Kpi label="採用中の点数" value={incGen?.eval?.score != null ? incGen.eval.score.toFixed(3) : "-"} note="0〜1（正解1・部分0.5）" />
         <Kpi label="採用中のピーク平均" value={incGen?.eval?.context ? num.format(incGen.eval.context.meanPeakTokens) : "-"} note="1問ごとの最大入力トークンの平均" />
         <Kpi label="採用 / 評価済み" value={`${gens.filter(g => g.gen > 0 && g.accepted).length} / ${gens.filter(g => g.gen > 0 && g.phase === "done").length}`} />
-        <Kpi label="総モデル呼び出し" value={num.format(totals.calls)} note={`改善 ${num.format(totals.improver)}・解答 ${num.format(totals.eval)}・採点 ${num.format(totals.judge)}`} />
+        <Kpi label="総モデル呼び出し" value={num.format(totals.calls)} note={`改善 ${num.format(totals.improver)}・解答 ${num.format(totals.eval)}・採点 ${num.format(totals.judge)}・投資と審査 ${num.format(judges)}`} />
         <Kpi label="総入力トークン" value={num.format(totals.tokens)} note="改善と解答（キャッシュ分を含む）" />
       </div>
       {current?.error && <Card><CardContent className="text-sm text-destructive">世代 {current.gen} のエラー: {current.error}</CardContent></Card>}

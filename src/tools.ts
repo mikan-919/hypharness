@@ -69,6 +69,11 @@ export function safePath(workspace: string, path: string) {
   return full;
 }
 
+// Words of a query. Text without spaces (Japanese, Chinese) is matched by its overlapping character pairs.
+const CJK = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/;
+export const searchTerms = (query: string) => query.toLowerCase().replace(/[、。，．！？!?,.「」『』（）()"']/g, " ").split(/\s+/).filter(Boolean)
+  .flatMap(w => CJK.test(w) && w.length > 2 ? Array.from({ length: w.length - 1 }, (_, i) => w.slice(i, i + 2)) : [w]);
+
 const line = (t: Task) => `${t.id} [${t.kind}/${t.status}] goal=${t.goal}${t.assignee ? ` assignee=${t.assignee}` : ""}${t.claimed_by ? ` by=${t.claimed_by}` : ""}: ${t.description.slice(0, 160)}`;
 
 export const tools: Record<string, Def<TSchema>> = {
@@ -366,13 +371,17 @@ export const tools: Record<string, Def<TSchema>> = {
     description: "Search knowledge; returns gists only. Expand with knowledge_get.",
     parameters: Type.Object({ query: Str("Words to match"), domain: Opt(Type.String()), status: Opt(StringEnum(["hypothesis", "verified", "rejected"])) }),
     run(c, a) {
-      const words = a.query.toLowerCase().split(/\s+/).filter(Boolean);
+      const words = searchTerms(a.query);
       const rows = c.store.all<{ id: string; gist: string; summary: string; status: string }>(
         "select k.* from knowledge k where (?1 is null or k.id in (select knowledge from domain_knowledge where domain = ?1)) and (?2 is null or k.status = ?2)",
         a.domain ?? null, a.status ?? null);
+      // A match in the gist counts double: items that share a summary (sentences of one turn) then rank by their own words,
+      // and only the best of them is listed, so one long turn cannot fill the results.
       // ponytail: linear scan with word counting; switch to SQLite FTS5 when knowledge grows past a few thousand rows
-      return rows.map(k => ({ k, score: words.filter(w => `${k.gist} ${k.summary}`.toLowerCase().includes(w)).length }))
-        .filter(r => r.score > 0 || !words.length).sort((x, y) => y.score - x.score).slice(0, 12)
+      const shown = new Set<string>();
+      return rows.map(k => ({ k, score: words.reduce((n, w) => n + (k.gist.toLowerCase().includes(w) ? 2 : 0) + (k.summary.toLowerCase().includes(w) ? 1 : 0), 0) }))
+        .filter(r => r.score > 0 || !words.length).sort((x, y) => y.score - x.score)
+        .filter(({ k }) => !shown.has(k.summary) && shown.add(k.summary)).slice(0, 12)
         .map(({ k }) => `${k.id} [${k.status}] ${k.gist}`).join("\n") || "No matches";
     },
   }),

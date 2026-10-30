@@ -6,7 +6,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Me
 import { openChat, organize, rememberOld } from "./chat.ts";
 import { defaultConfig, Store } from "./db.ts";
 import { ingestConversation, stewardOf } from "./memory.ts";
-import { tools, type ToolContext } from "./tools.ts";
+import { searchTerms, tools, type ToolContext } from "./tools.ts";
 import { eligible, ORGANIZE_EVERY } from "./triggers.ts";
 
 const ctxFor = (store: Store, agent: string, task: string) => ({ store, agent: store.agent(agent)!, task: store.task(task)!, workspace: "", contextDir: "", episode: "e", messages: [] }) as ToolContext;
@@ -73,4 +73,15 @@ test("stewards merge across domains by asking for a transfer and merging what th
   const merged = store.get<{ id: string; steward: string }>("select id, steward from domains where status = 'active'")!;
   expect(merged.steward).toBe(a);
   expect(store.get<{ n: number }>("select count(*) n from domain_knowledge where domain = ?", merged.id)!.n).toBe(2);
+});
+
+test("knowledge_search finds Japanese without spaces, and lists one sentence per turn, the one that matches", () => {
+  const store = new Store(":memory:");
+  store.init("p", "", defaultConfig);
+  ingestConversation(store, "DATE: 1 May\nCONVERSATION:\nUser said, \"うちの猫はモチという名前です。来週は京都に行きます。\"\nBob said, \"I like cats. Cats are calm. My cat sleeps a lot.\"");
+  const search = (query: string) => String(tools.knowledge_search!.run({ store } as ToolContext, { query }));
+  expect(searchTerms("猫の名前は？")).toEqual(["猫の", "の名", "名前", "前は"]);
+  expect(search("猫の名前は？").split("\n")[0]).toContain("うちの猫はモチという名前です。");
+  const cats = search("sleeps cat").split("\n");
+  expect(cats.filter(l => l.includes("Bob:"))).toEqual([expect.stringContaining("My cat sleeps a lot.")]);
 });
