@@ -102,3 +102,24 @@ test("the RSI view reads the loop's state and log, and per-question evaluation s
     proc.kill();
   }
 });
+
+test("the RSI view totals each generation's evaluation from its per-question records", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyph-rsi-stats-"));
+  const out = join(dir, ".hyph", "rsi", "gen-0", "eval", "locomo");
+  mkdirSync(out, { recursive: true });
+  await Bun.write(join(dir, ".hyph", "rsi", "state.json"), JSON.stringify({ settings: { perCategory: "1" }, generations: [{ gen: 0, base: null, phase: "evaluate" }] }));
+  const usage = { calls: 3, input: 10, output: 2, cacheRead: 5, cacheWrite: 0 };
+  await Bun.write(join(out, "predictions.jsonl"), `${JSON.stringify({ id: "q1", category: "temporal", outcome: "done", ms: 1000, usage })}\n`);
+  await Bun.write(join(out, "judgments.jsonl"), `${JSON.stringify({ id: "q1", category: "temporal", label: "correct", score: 1, usage: { ...usage, calls: 1 } })}\n`);
+  const { proc, base } = await serve(dir);
+  try {
+    const rsi = await (await fetch(`${base}/api/rsi`)).json() as { stats: Record<string, { eval: { expected: number; judged: number; calls: number; judgeCalls: number; byCategory: unknown } }> };
+    const e = rsi.stats["0"]!.eval;
+    expect([e.expected, e.judged, e.calls, e.judgeCalls, e.byCategory]).toEqual([6, 1, 3, 1, { temporal: { avg: 1, count: 1 } }]);
+    const gen = await (await fetch(`${base}/api/rsi/gen?n=0`)).json() as { samples: { id: string; score: number; calls: number }[] };
+    expect(gen.samples.map(s => [s.id, s.score, s.calls])).toEqual([["q1", 1, 3]]);
+    expect((await fetch(`${base}/api/rsi/gen?n=7`)).status).toBe(404);
+  } finally {
+    proc.kill();
+  }
+});

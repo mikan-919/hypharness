@@ -122,8 +122,67 @@ async function rsi() {
     const f = Bun.file(join(rsiDir, name));
     return await f.exists() ? (await f.text()).trimEnd().split("\n").slice(-n) : [];
   };
-  const state = Bun.file(join(rsiDir, "state.json"));
-  return { dir: rsiDir, pid: rsiPid(), state: await state.exists() ? await state.json() : null, lines: await tail("rsi.log", 300), launcher: await tail("launcher.log", 40) };
+  const file = Bun.file(join(rsiDir, "state.json"));
+  const state = await file.exists() ? await file.json() as { settings: { perCategory?: string }; generations: { gen: number }[] } : null;
+  // Six LoCoMo-Plus categories, perCategory questions each; the loop fixes perCategory at its first start.
+  const expected = 6 * Number(state?.settings.perCategory ?? 3);
+  const stats = Object.fromEntries(await Promise.all((state?.generations ?? []).map(async g =>
+    [g.gen, { improver: improverTotals(genDir(g.gen)), eval: await evalTotals(genDir(g.gen), expected) }] as const)));
+  return { dir: rsiDir, pid: rsiPid(), state, stats, lines: await tail("rsi.log", 300), launcher: await tail("launcher.log", 40) };
+}
+
+const genDir = (gen: number) => join(rsiDir, `gen-${gen}`);
+// These files are written by the loop while the dashboard reads them, so each read opens and closes its own handle.
+function withDb<T>(path: string, fn: (d: Database) => T) {
+  if (!existsSync(path)) return null;
+  const d = new Database(path, { readonly: true });
+  try { return fn(d); } finally { d.close(); }
+}
+const usageTotals = "select count(*) calls, coalesce(sum(input),0) input, coalesce(sum(output),0) output, coalesce(sum(cache_read),0) cacheRead, coalesce(sum(cache_write),0) cacheWrite, coalesce(max(input + cache_read + cache_write),0) maxPromptTokens, coalesce(sum(ms),0) ms, min(at) firstAt, max(at) lastAt from usage";
+const improverTotals = (dir: string) => withDb(join(dir, "state.sqlite"), d => d.query(usageTotals).get());
+
+async function jsonl(path: string) {
+  const f = Bun.file(path);
+  if (!await f.exists()) return [];
+  return (await f.text()).split("\n").filter(Boolean).flatMap(l => { try { return [JSON.parse(l) as Row]; } catch { return []; } });
+}
+type Row = Record<string, any>;
+const sum = (rows: Row[], key: string) => rows.reduce((n, r) => n + (r.usage?.[key] ?? 0), 0);
+
+// Read from the benchmark's per-question records, so an evaluation in progress is shown too.
+async function evalTotals(dir: string, expected: number) {
+  const out = join(dir, "eval", "locomo");
+  const preds = await jsonl(join(out, "predictions.jsonl")), judged = await jsonl(join(out, "judgments.jsonl"));
+  if (!preds.length && !judged.length) return null;
+  const byCategory: Record<string, { score: number; count: number }> = {};
+  for (const j of judged) { const c = byCategory[j.category] ??= { score: 0, count: 0 }; c.score += j.score; c.count++; }
+  return {
+    expected, predicted: preds.length, judged: judged.length, ms: preds.reduce((n, p) => n + p.ms, 0),
+    calls: sum(preds, "calls"), input: sum(preds, "input"), output: sum(preds, "output"), cacheRead: sum(preds, "cacheRead"), cacheWrite: sum(preds, "cacheWrite"),
+    judgeCalls: sum(judged, "calls"), judgeInput: sum(judged, "input") + sum(judged, "cacheRead") + sum(judged, "cacheWrite"),
+    outcomes: preds.reduce<Record<string, number>>((o, p) => (o[p.outcome] = (o[p.outcome] ?? 0) + 1, o), {}),
+    byCategory: Object.fromEntries(Object.entries(byCategory).map(([c, v]) => [c, { avg: v.score / v.count, count: v.count }])),
+  };
+}
+
+// One generation in detail: the improver's calls and every evaluated question with its score and context size.
+async function rsiGeneration(gen: number) {
+  const dir = genDir(gen);
+  if (!existsSync(dir)) return undefined;
+  const out = join(dir, "eval", "locomo");
+  const preds = new Map((await jsonl(join(out, "predictions.jsonl"))).map(p => [p.id, p]));
+  const samples = (await jsonl(join(out, "judgments.jsonl"))).map(j => {
+    const p = preds.get(j.id);
+    const sizes = withDb(join(out, "dynamic", String(j.id).replaceAll(":", "-"), "state.sqlite"),
+      d => d.query("select input + cache_read + cache_write n from usage").all().map(r => (r as { n: number }).n)) ?? [];
+    return {
+      id: j.id, category: j.category, label: j.label, score: j.score, outcome: p?.outcome, calls: p?.usage.calls ?? 0, ms: p?.ms ?? 0,
+      peakTokens: sizes.length ? Math.max(...sizes) : 0, meanTokens: sizes.length ? Math.round(sizes.reduce((a, b) => a + b, 0) / sizes.length) : 0,
+    };
+  });
+  const usage = withDb(join(dir, "state.sqlite"), d => d.query("select id, agent, input, output, cache_read cacheRead, cache_write cacheWrite, ms, at from usage order by id desc limit 2000").all().reverse()) ?? [];
+  const agents = withDb(join(dir, "state.sqlite"), d => d.query("select id from agents order by created_at").all()) ?? [];
+  return { gen, usage, agents, samples };
 }
 
 // ponytail: bound to loopback with no user auth; add authentication before exposing it beyond localhost
@@ -164,6 +223,10 @@ const server = Bun.serve({
     },
     "/api/runs/stop": { POST: guard(async req => Response.json(runs.stop(String((await req.json() as { dir?: string }).dir)))) },
     "/api/rsi": guard(async () => Response.json(await rsi())),
+    "/api/rsi/gen": guard(async req => {
+      const n = Number(params(req).get("n"));
+      return json(Number.isSafeInteger(n) && n >= 0 ? await rsiGeneration(n) : undefined);
+    }),
     "/api/rsi/start": { POST: guard(async req => Response.json(runs.startRsi(rsiDir, await req.json() as runs.RsiRequest))) },
     "/api/rsi/stop": {
       POST: guard(() => {
