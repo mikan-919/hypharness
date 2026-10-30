@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { defaultConfig, Store, type Config } from "./db.ts";
-import { runScheduler } from "./scheduler.ts";
+import { runScheduler, steer } from "./scheduler.ts";
 import { safePath, toolSchemas, tools, type ToolContext } from "./tools.ts";
 import type { Runtime } from "./agent.ts";
 
@@ -151,4 +151,36 @@ test("web_search sends the query to Parallel and returns ranked excerpts", async
     globalThis.fetch = original;
     if (key === undefined) delete process.env.PARALLEL_API_KEY; else process.env.PARALLEL_API_KEY = key;
   }
+});
+
+test("file_search finds lines across workspace files and stays inside the workspace", async () => {
+  const { store, rt } = setup({});
+  await Bun.write(join(rt.workspace, "conversation", "part-001.txt"), "Ann said hi\nBob moved to OSLO\n");
+  await Bun.write(join(rt.workspace, "notes.txt"), "oslo trip\n");
+  const c = { store, agent: store.agent("lead")!, task: { id: "T-1" }, workspace: rt.workspace, contextDir: rt.contextDir, episode: "e", messages: [] } as unknown as ToolContext;
+  expect(await tools.file_search!.run(c, { query: "oslo" })).toBe("conversation/part-001.txt:2: Bob moved to OSLO\nnotes.txt:1: oslo trip");
+  expect(await tools.file_search!.run(c, { query: "oslo", path: "notes.txt" })).toBe("notes.txt:1: oslo trip");
+  await expect(tools.file_search!.run(c, { query: "x", path: "../" })).rejects.toThrow("outside the workspace");
+});
+
+test("a steer task cannot be finished while its goal stays open with nothing pending", async () => {
+  const { store, rt } = setup({});
+  steer(store);
+  const task = store.all<{ id: string }>("select id from tasks where kind = 'steer'")[0]!;
+  expect(store.claim(task.id, "lead")).toBe(true);
+  const c = { store, agent: store.agent("lead")!, task: store.task(task.id)!, workspace: rt.workspace, contextDir: rt.contextDir, episode: "e", messages: [] } as unknown as ToolContext;
+  expect(() => tools.task_finish!.run(c, { result: "answered" })).toThrow("goal_complete");
+  tools.task_create!.run(c, { goal: "G0", description: "more work" });
+  expect(tools.task_finish!.run(c, { result: "planned" })).toBe(`Finished ${task.id}`);
+});
+
+test("a model call that never answers times out instead of holding the run", async () => {
+  const { rt } = setup({});
+  const faux = fauxProvider();
+  rt.models.setProvider(faux.provider);
+  faux.setResponses(Array(10).fill(() => new Promise(() => {})));
+  const started = Date.now();
+  const r = await runScheduler({ ...rt, model: faux.getModel(), modelTimeoutMs: 50 });
+  expect(r.status).toBe("error");
+  expect(Date.now() - started).toBeLessThan(5000);
 });
