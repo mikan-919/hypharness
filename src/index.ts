@@ -1,10 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import type { ThinkingLevel } from "@earendil-works/pi-ai";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { FileCredentialStore } from "./auth.ts";
+import { openModel } from "./auth.ts";
 import { defaultConfig, Store, type Config } from "./db.ts";
 import { report, runScheduler } from "./scheduler.ts";
 import type { Runtime } from "./agent.ts";
@@ -38,14 +35,6 @@ const int = (v: string | undefined, name: string) => {
   if (!Number.isSafeInteger(n) || n < 1) throw new Error(`--${name} must be a positive integer`);
   return n;
 };
-
-async function openModel(modelId = process.env.OPENAI_MODEL ?? "gpt-6-sol") {
-  const models = createModels({ credentials: await FileCredentialStore.open() });
-  models.setProvider(openaiProvider());
-  if (!(await models.getAuth("openai"))) throw new Error("ChatGPTでのログインが必要です");
-  const model = models.getModel("openai", modelId) ?? (() => { throw new Error(`未対応のモデル: ${modelId}`); })();
-  return { models, model, reasoning: (process.env.REASONING ?? "medium") as ThinkingLevel };
-}
 
 function open(dir: string) {
   mkdirSync(join(dir, "workspace"), { recursive: true });

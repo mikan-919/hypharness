@@ -8,6 +8,10 @@ import { parseArgs } from "node:util";
 import { $, type Subprocess } from "bun";
 import type { Eval } from "./rsi-eval.ts";
 import { resolveSettings, type RsiSettings } from "./rsi-defaults.ts";
+import { brief, closed, comparison, criticRecord, directionOf, invest, ledger, review, type Ask, type Grant, type Review } from "./rsi-judges.ts";
+import { MODEL_TIMEOUT_MS, withTimeout } from "../src/agent.ts";
+import { openModel } from "../src/auth.ts";
+import { Database } from "bun:sqlite";
 
 const { values: opts } = parseArgs({
   options: {
@@ -28,12 +32,16 @@ const { values: opts } = parseArgs({
     // Not carried over: questions solved at once in an evaluation (defaults to all of them) and the generation limit.
     parallel: { type: "string" },
     generations: { type: "string" },
+    // on: an investor funds each generation and critics with an evaluator review accepted candidates (scripts/rsi-judges.ts).
+    judges: { type: "string" },
   },
 });
 
 export type Generation = {
   gen: number; base: number | null; phase: "improve" | "evaluate" | "done"; startedAt: number; endedAt?: number;
   commit?: string; status?: string; note?: string; eval?: Omit<Eval, "perSample" | "sampleIds">; accepted?: boolean; reason?: string; error?: string;
+  // Investment and review: the grant made before improving, the files changed, model calls spent, and the critics' review.
+  grant?: Grant; direction?: string; spent?: number; review?: Review;
 };
 export type State = {
   incumbent?: { gen: number; commit: string; tree: string; eval: string };
@@ -86,6 +94,26 @@ async function writeTraces(state: State, workspace: string) {
   await Bun.write(join(dst, "history.md"), `# Earlier generations\n\n${history(state)}\n`);
 }
 
+// The judges call the model directly from this checkout; the candidate never runs them.
+let llm: Awaited<ReturnType<typeof openModel>> | undefined;
+const ask: Ask = async prompt => {
+  llm ??= await openModel();
+  const m = llm;
+  const reply = await withTimeout(MODEL_TIMEOUT_MS, signal =>
+    m.models.completeSimple(m.model, { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, { reasoning: m.reasoning, signal }));
+  if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(`judge model error: ${reply.errorMessage}`);
+  return reply.content.filter(b => b.type === "text").map(b => b.text).join("");
+};
+
+const improverCalls = (gen: number) => {
+  const path = join(genDir(gen), "state.sqlite");
+  if (!existsSync(path)) return 0;
+  const db = new Database(path, { readonly: true });
+  try { return Number((db.query("select value from meta where key = 'model_calls'").get() as { value: string } | null)?.value ?? 0); } finally { db.close(); }
+};
+const spentOn = (g: Generation) => improverCalls(g.gen) + (g.eval?.context?.calls ?? 0);
+const evalSummary = (path: string) => { const { perSample: _, sampleIds: __, ...rest } = JSON.parse(readFileSync(path, "utf8")) as Eval; return JSON.stringify(rest); };
+
 async function improve(state: State, g: Generation) {
   const dir = genDir(g.gen), workspace = join(dir, "workspace");
   if (!existsSync(workspace)) await $`git -C ${repo} worktree add -f -B rsi/gen-${g.gen} ${workspace} ${state.incumbent!.commit}`.quiet();
@@ -95,9 +123,11 @@ async function improve(state: State, g: Generation) {
   // A resumed session keeps the traces it started with, including the note the improver already wrote.
   if (fresh) await writeTraces(state, workspace);
   // Purpose, constraints and organization belong to a new session; a resumed one keeps those it started with.
-  const { purpose, constraints, mode, calls } = state.settings;
-  const code = await run(["bun", join(state.incumbent!.tree, "src", "index.ts"), ...(fresh ? [purpose, `--constraints=${constraints}`, "--mode", mode] : []),
-    "--dir", dir, "--allow-shell", "--calls", calls], join(dir, "run.log"));
+  const { purpose, constraints, mode, calls, judges } = state.settings;
+  const shut = closed(ledger(state.generations));
+  if (fresh && judges === "on") g.grant ??= await invest(ask, { history: history(state), incumbent: evalSummary(state.incumbent!.eval), ledger: ledger(state.generations), maxCalls: Number(calls) });
+  const code = await run(["bun", join(state.incumbent!.tree, "src", "index.ts"), ...(fresh ? [purpose + (g.grant ? brief(g.grant, shut) : ""), `--constraints=${constraints}`, "--mode", mode] : []),
+    "--dir", dir, "--allow-shell", "--calls", String(g.grant?.calls ?? calls)], join(dir, "run.log"));
   const status = [...readFileSync(join(dir, "run.log"), "utf8").matchAll(/"status": "(\w+)"/g)].at(-1)?.[1];
   if (code !== 0 || !status || status === "error") throw new Error(`improver session ended with exit ${code}, status ${status ?? "unknown"}`);
   g.status = status;
@@ -112,6 +142,12 @@ async function improve(state: State, g: Generation) {
   const subject = g.note?.split("\n").find(l => l.trim())?.replace(/^#+\s*/, "").slice(0, 72) || "candidate";
   await $`git -C ${workspace} commit -q -m ${`rsi gen ${g.gen}: ${subject}`} -m ${g.note ?? ""}`;
   g.commit = (await $`git -C ${workspace} rev-parse HEAD`.text()).trim();
+  g.direction = directionOf((await $`git -C ${workspace} diff --name-only ${state.incumbent!.commit} HEAD`.text()).split("\n"));
+  // A closed direction gets no evaluation: its changes kept losing, and evaluating is the larger cost.
+  if (judges === "on" && shut.includes(g.direction)) {
+    Object.assign(g, { phase: "done", accepted: false, reason: `direction closed: ${g.direction}`, spent: spentOn(g), endedAt: Date.now() });
+    return;
+  }
   g.phase = "evaluate";
 }
 
@@ -128,7 +164,16 @@ async function evaluate(state: State, g: Generation) {
   if (!e || e.transient) throw new Error(`evaluation did not finish: ${e?.reason ?? "no eval.json (see eval.log)"}`);
   if (!state.incumbent && !e.accepted) throw new Error(`the starting harness fails its own checks: ${e.reason}`);
   const { perSample: _, sampleIds: __, ...summary } = e;
-  Object.assign(g, { eval: summary, accepted: e.accepted, reason: e.reason, phase: "done", endedAt: Date.now() });
+  // The mechanical rule is the floor: the review can only turn an acceptance into a rejection.
+  if (e.accepted && state.incumbent && state.settings.judges === "on") {
+    g.review ??= await review(ask, {
+      diff: await $`git -C ${workspace} diff ${state.incumbent.commit} HEAD`.text(), note: g.note ?? "", result: e.reason ?? "",
+      comparison: comparison((JSON.parse(readFileSync(state.incumbent.eval, "utf8")) as Eval).perSample ?? {}, e.perSample ?? {}),
+      record: criticRecord(state.generations.map(x => x.review)),
+    });
+    if (g.review.veto) { e.accepted = false; e.reason = `vetoed: ${g.review.reason} (mechanical: ${e.reason})`; }
+  }
+  Object.assign(g, { eval: summary, accepted: e.accepted, reason: e.reason, phase: "done", spent: spentOn({ ...g, eval: summary }), endedAt: Date.now() });
   if (e.accepted) state.incumbent = { gen: g.gen, commit: g.commit!, tree: join(out, "tree"), eval: evalPath };
 }
 

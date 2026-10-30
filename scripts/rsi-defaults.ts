@@ -7,12 +7,12 @@ Before finishing, write rsi-traces/note.md: what you changed, why, and the effec
 export const CONSTRAINTS = "Edit only files inside the workspace. Do not modify src/locomo.ts, delete tests, or encode LoCoMo questions or answers. Never read or print auth.json or .env.";
 
 export type RsiSettings = {
-  purpose: string; constraints: string; mode: string; arm: string; calls: string; evalCalls: string;
+  purpose: string; constraints: string; mode: string; arm: string; judges: string; calls: string; evalCalls: string;
   perCategory: string; seed: string; delta: string; parallel?: string; generations?: string;
 };
 
 export const DEFAULTS: RsiSettings = {
-  purpose: PURPOSE, constraints: CONSTRAINTS, mode: "dynamic", arm: "dynamic", calls: "150", evalCalls: "40", perCategory: "3", seed: "1", delta: "0.05",
+  purpose: PURPOSE, constraints: CONSTRAINTS, mode: "dynamic", arm: "dynamic", judges: "on", calls: "150", evalCalls: "40", perCategory: "3", seed: "1", delta: "0.05",
 };
 
 // Every generation is compared with the incumbent on the same questions under the same budget, so these are fixed by the first start.
@@ -33,6 +33,7 @@ export function resolveSettings(prev: Partial<RsiSettings> | undefined, started:
   next.generations = given.generations as string | undefined;
   if (!["single", "fixed", "dynamic"].includes(next.mode!)) throw new Error("--mode must be single, fixed, or dynamic");
   if (!["dynamic", "memory"].includes(next.arm!)) throw new Error("--arm must be dynamic or memory");
+  if (!["on", "off"].includes(next.judges!)) throw new Error("--judges must be on or off");
   for (const key of ["calls", "evalCalls", "perCategory", "parallel", "generations"])
     if (next[key] !== undefined && !/^[1-9]\d*$/.test(next[key]!)) throw new Error(`--${flag(key)} must be a positive integer`);
   if (!/^(0(\.\d+)?|1(\.0+)?)$/.test(next.delta!)) throw new Error("--delta must be between 0 and 1");

@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 // the harness state lives in that directory, so a stopped run resumes from the same state.
 
 export type RsiRequest = {
-  purpose?: string; constraints?: string; mode?: string; arm?: string;
+  purpose?: string; constraints?: string; mode?: string; arm?: string; judges?: boolean;
   calls?: number; evalCalls?: number; generations?: number; perCategory?: number; parallel?: number; seed?: number; delta?: number;
 };
 
@@ -94,6 +94,7 @@ export function startRsi(dir: string, r: RsiRequest) {
   if (r.mode !== undefined) args.push("--mode", r.mode);
   if (r.arm !== undefined && !["dynamic", "memory"].includes(r.arm)) throw new Error("arm must be dynamic or memory");
   if (r.arm !== undefined) args.push("--arm", r.arm);
+  if (r.judges !== undefined) args.push("--judges", r.judges === true ? "on" : "off");
   for (const [flag, value] of [["--purpose", r.purpose], ["--constraints", r.constraints]] as const) {
     if (value === undefined) continue;
     if (typeof value !== "string" || (flag === "--purpose" && !value.trim())) throw new Error(`${flag.slice(2)} must be a non-empty string`);

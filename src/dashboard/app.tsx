@@ -501,6 +501,8 @@ type Generation = {
   gen: number; base: number | null; phase: string; startedAt: number; endedAt?: number; commit?: string; status?: string; note?: string;
   eval?: { ok: boolean; score?: number; reason?: string; context?: { calls: number; maxTokens: number; meanTokens: number; meanPeakTokens: number } };
   accepted?: boolean; reason?: string; error?: string;
+  grant?: { direction: string; rationale: string; expected: string; calls: number }; direction?: string; spent?: number;
+  review?: { objections: { claim: string; evidence: string; upheld?: boolean; ruling?: string }[]; veto: boolean; reason: string };
 };
 type EvalTotals = Row & { expected: number; judged: number; calls: number; judgeCalls: number; ms: number; byCategory: Record<string, { avg: number; count: number }> };
 type GenStats = Record<number, { improver: Row | null; eval: EvalTotals | null }>;
@@ -509,7 +511,7 @@ type RsiInfo = {
   state: { incumbent?: { gen: number; commit: string }; settings: Row; generations: Generation[] } | null;
 };
 type RsiForm = {
-  purpose: string; constraints: string; mode: string; arm: string; calls: string; evalCalls: string;
+  purpose: string; constraints: string; mode: string; arm: string; judges: string; calls: string; evalCalls: string;
   perCategory: string; seed: string; delta: string; parallel?: string; generations?: string;
 };
 type RsiGen = { gen: number; usage: Row[]; agents: Row[]; samples: Row[] };
@@ -607,6 +609,34 @@ function RsiDetail({ gens, gen, onGen, stats }: { gens: Generation[]; gen?: numb
         </Select>
         <span className="text-sm text-muted-foreground">{g.base === null ? "ベースライン" : `世代 ${g.base} と比較`}・{g.reason ?? g.error ?? "評価前"}</span>
       </div>
+      {(g.grant || g.review) && (
+        <Card>
+          <CardHeader><CardTitle>投資と審査</CardTitle><CardDescription>改善の前に投資家役が決めた方向と予算、評価の後に批判役が出した異議と評価役の裁定</CardDescription></CardHeader>
+          <CardContent className="grid gap-3 text-sm">
+            {g.grant && (
+              <div className="grid gap-1">
+                <div><span className="text-muted-foreground">方向: </span>{g.grant.direction}</div>
+                <div><span className="text-muted-foreground">理由: </span>{g.grant.rationale || "-"}</div>
+                <div><span className="text-muted-foreground">予測: </span>{g.grant.expected || "-"}</div>
+                <div><span className="text-muted-foreground">予算: </span>{num.format(g.grant.calls)} 回{g.spent !== undefined && `（使った呼び出し: 改善と評価で ${num.format(g.spent)} 回）`}</div>
+                {g.direction && <div><span className="text-muted-foreground">変更したファイル: </span>{g.direction}</div>}
+              </div>
+            )}
+            {g.review && (
+              <div className="grid gap-2">
+                <div><span className="text-muted-foreground">審査: </span>{g.review.veto ? "却下" : "通過"}・{g.review.reason}</div>
+                {g.review.objections.map((o, i) => (
+                  <div key={i} className="rounded-md border p-2">
+                    <div className="flex items-center gap-2"><Badge variant={o.upheld ? "destructive" : "outline"}>{o.upheld === true ? "認める" : o.upheld === false ? "退ける" : "裁定なし"}</Badge><span>{o.claim}</span></div>
+                    <div className="text-xs text-muted-foreground">根拠: {o.evidence}</div>
+                    {o.ruling && <div className="text-xs">裁定: {o.ruling}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
       {g.note && (
         <Card>
           <CardHeader><CardTitle>改善役のメモ</CardTitle><CardDescription>変更内容と予測（rsi-traces/note.md）</CardDescription></CardHeader>
@@ -685,7 +715,7 @@ function GenerationChart({ title, description, rows, field, format }: { title: s
 // While the loop runs its settings cannot change; they are shown as they were given to it.
 function RsiSettingsView({ settings: s }: { settings: Partial<RsiForm> }) {
   const items: [string, string | undefined][] = [
-    ["改善役の組織", s.mode], ["評価する方式", s.arm ?? "dynamic"], ["改善の呼び出し上限", s.calls], ["解答の呼び出し上限", s.evalCalls], ["世代数", s.generations ?? "無制限"],
+    ["改善役の組織", s.mode], ["評価する方式", s.arm ?? "dynamic"], ["投資と審査", s.judges === "off" ? "使わない" : "使う"], ["改善の呼び出し上限", s.calls], ["解答の呼び出し上限", s.evalCalls], ["世代数", s.generations ?? "無制限"],
     ["分類ごとの問題数", s.perCategory], ["種", s.seed], ["評価の並列数", s.parallel ?? "全問"], ["許容幅 δ", s.delta],
   ];
   return (
@@ -754,7 +784,7 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
               // The questions and per-question budget are fixed by the first start; a resume keeps them.
               const sample = started ? {} : { perCategory: toInt(form.perCategory), seed: toInt(form.seed), evalCalls: toInt(form.evalCalls), arm: form.arm };
               act(() => post("/api/rsi/start", {
-                purpose: form.purpose, constraints: form.constraints, mode: form.mode, calls: toInt(form.calls), ...sample,
+                purpose: form.purpose, constraints: form.constraints, mode: form.mode, judges: form.judges !== "off", calls: toInt(form.calls), ...sample,
                 generations: toInt(form.generations ?? ""), parallel: toInt(form.parallel ?? ""), delta: form.delta.trim() ? Number(form.delta) : undefined,
               }));
             }}>
@@ -781,6 +811,15 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
                     <SelectContent>
                       <SelectItem value="dynamic">dynamic</SelectItem>
                       <SelectItem value="memory">memory</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field id="rsi-judges" label="投資と審査" hint="投資家役が方向と予算を決め、批判役と評価役が採用候補を審査する">
+                  <Select value={form.judges ?? "on"} onValueChange={v => setForm({ ...form, judges: v })}>
+                    <SelectTrigger id="rsi-judges"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="on">使う</SelectItem>
+                      <SelectItem value="off">使わない</SelectItem>
                     </SelectContent>
                   </Select>
                 </Field>
@@ -836,6 +875,7 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
                 { key: "score", label: "点数", render: r => r.eval?.score?.toFixed(3) ?? "-", className: "text-right tabular-nums" },
                 { key: "peak", label: "ピーク平均", render: r => r.eval?.context ? num.format(r.eval.context.meanPeakTokens) : "-", className: "text-right tabular-nums" },
                 { key: "max", label: "最大", render: r => r.eval?.context ? num.format(r.eval.context.maxTokens) : "-", className: "text-right tabular-nums" },
+                { key: "direction", label: "方向", render: r => <Clip text={r.direction} width="max-w-[12rem]" /> },
                 { key: "reason", label: "判定・エラー", render: r => <Clip text={r.error ?? r.reason} width="max-w-xs" /> },
                 { key: "note", label: "メモ", render: r => <Clip text={r.note} width="max-w-sm" /> },
                 { key: "commit", label: "コミット", render: r => r.commit?.slice(0, 8) ?? "-" },
