@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { defaultConfig, Store, type Config } from "./db.ts";
 import { runScheduler } from "./scheduler.ts";
-import { safePath, tools, type ToolContext } from "./tools.ts";
+import { safePath, toolSchemas, tools, type ToolContext } from "./tools.ts";
 import type { Runtime } from "./agent.ts";
 
 // A scripted agent: reads its opening message and the tools it already used, and returns the next tool call.
@@ -133,8 +133,10 @@ test("web_search sends the query to Parallel and returns ranked excerpts", async
   const original = globalThis.fetch, key = process.env.PARALLEL_API_KEY;
   try {
     delete process.env.PARALLEL_API_KEY;
+    expect(toolSchemas().map(t => t.name)).not.toContain("web_search");
     await expect(tools.web_search!.run(c, args)).rejects.toThrow("not configured");
     process.env.PARALLEL_API_KEY = "test-key";
+    expect(toolSchemas().map(t => t.name)).toContain("web_search");
     let sent: { url: string; init: RequestInit } | undefined;
     globalThis.fetch = (async (url: string, init: RequestInit) => {
       sent = { url, init };

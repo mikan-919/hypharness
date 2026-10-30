@@ -1,4 +1,4 @@
-import { validateToolCall, type Api, type AssistantMessage, type Message, type Model, type ThinkingLevel, type ToolCall } from "@earendil-works/pi-ai";
+import { validateToolCall, type Api, type AssistantMessage, type Message, type Model, type ThinkingLevel, type Tool, type ToolCall } from "@earendil-works/pi-ai";
 import type { createModels } from "@earendil-works/pi-ai/models";
 import type { Agent, Store, Task } from "./db.ts";
 import { mirror, toolSchemas, tools, type ToolContext } from "./tools.ts";
@@ -52,7 +52,7 @@ Unread updates from other agents: ${unread} (see news)`;
 
 const toolCalls = (m: Message) => m.role === "assistant" ? m.content.filter((b): b is ToolCall => b.type === "toolCall") : [];
 
-async function execute(rt: Runtime, ctx: ToolContext, episode: string, call: ToolCall) {
+async function execute(rt: Runtime, ctx: ToolContext, episode: string, call: ToolCall, schemas: Tool[]) {
   const { store } = rt;
   // A tool call that already ran (before a crash) returns its recorded result instead of running again.
   const prior = store.get<{ result: string; is_error: number }>("select result, is_error from ops where episode = ? and call_id = ?", episode, call.id);
@@ -60,8 +60,8 @@ async function execute(rt: Runtime, ctx: ToolContext, episode: string, call: Too
   let text: string, isError = false;
   try {
     const def = tools[call.name];
-    if (!def) throw new Error(`Unknown tool ${call.name}`);
-    const args = validateToolCall(toolSchemas, call);
+    if (!def || !schemas.some(s => s.name === call.name)) throw new Error(`Unknown tool ${call.name}`);
+    const args = validateToolCall(schemas, call);
     // Database tools commit together with their op record; file and shell tools run outside the transaction.
     const value = store.tx(() => {
       const v = def.run(ctx, args);
@@ -91,6 +91,7 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
   const end = (outcome: string) => { store.run("update episodes set status = ? where id = ?", outcome, id); mirror(rt, agent.id); return outcome; };
   const ctx: ToolContext = { store, agent, task, workspace: rt.workspace, contextDir: rt.contextDir, episode: id, messages };
   const system = systemPrompt(store, agent);
+  const schemas = toolSchemas();
   const { maxSteps } = store.config;
   let nudged = false;
 
@@ -98,7 +99,7 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
     const last = messages.at(-1)!;
     const answered = new Set(messages.filter(m => m.role === "toolResult").map(m => m.toolCallId));
     for (const call of toolCalls(last).filter(c => !answered.has(c.id))) {
-      const r = await execute(rt, ctx, id, call);
+      const r = await execute(rt, ctx, id, call, schemas);
       rt.log?.(`[${agent.id}] ${call.name}${r.isError ? " ✗" : ""} ${r.text.split("\n")[0]!.slice(0, 120)}`);
       messages.push({ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: r.text }], isError: r.isError, timestamp: Date.now() });
       save();
@@ -124,7 +125,7 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
     if (!store.takeModelCall()) throw new BudgetExhausted("Model call budget exhausted");
     store.renew(task.id, agent.id);
     const started = performance.now();
-    const reply: AssistantMessage = await rt.models.completeSimple(rt.model, { systemPrompt: system, messages, tools: toolSchemas }, { reasoning: rt.reasoning, sessionId: agent.id });
+    const reply: AssistantMessage = await rt.models.completeSimple(rt.model, { systemPrompt: system, messages, tools: schemas }, { reasoning: rt.reasoning, sessionId: agent.id });
     const u = reply.usage;
     store.run("insert into usage(agent, task, input, output, cache_read, cache_write, prompt_chars, ms, at) values(?, ?, ?, ?, ?, ?, ?, ?, ?)",
       agent.id, task.id, u.input, u.output, u.cacheRead, u.cacheWrite, system.length + JSON.stringify(messages).length, Math.round(performance.now() - started), Date.now());

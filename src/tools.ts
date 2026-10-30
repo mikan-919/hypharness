@@ -543,7 +543,12 @@ export const tools: Record<string, Def<TSchema>> = {
   }),
 };
 
-export const toolSchemas: Tool[] = Object.entries(tools).map(([name, t]) => ({ name, description: t.description, parameters: t.parameters }));
+// Tools that need host configuration are left out of the model's tool list when it is missing.
+export function toolSchemas(): Tool[] {
+  return Object.entries(tools)
+    .filter(([name]) => name !== "web_search" || process.env.PARALLEL_API_KEY)
+    .map(([name, t]) => ({ name, description: t.description, parameters: t.parameters }));
+}
 
 export function liveMessages(store: Store, agent: string) {
   const row = store.get<{ messages: string }>("select messages from episodes where agent = ? and status = 'running'", agent);
