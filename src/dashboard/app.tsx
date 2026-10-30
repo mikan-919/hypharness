@@ -682,7 +682,9 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
   const info = usePoll<RsiInfo>("/api/rsi", 3000);
   const [form, setForm] = useState({ calls: "150", generations: "", perCategory: "3", parallel: "", seed: "1", delta: "0.05" });
   const [error, setError] = useState<string>();
-  const [tab, setTab] = useState("overview");
+  // The tab is kept in the URL (#rsi/<tab>) so a view of the loop can be linked and reopened.
+  const [tab, setTab] = useState(() => location.hash.match(/^#rsi\/(\w+)/)?.[1] ?? "overview");
+  useEffect(() => { history.replaceState(null, "", `#rsi/${tab}`); }, [tab]);
   const [detailGen, setDetailGen] = useState<number>();
   const logRef = useRef<HTMLPreElement>(null);
   useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight); }, [info?.lines.length, tab]);
@@ -802,7 +804,9 @@ function App() {
   const list = usePoll<Session[]>("/api/sessions");
   const [session, setSession] = useState<string>();
   const [creating, setCreating] = useState(false);
-  const [rsi, setRsi] = useState(() => location.hash === "#rsi");
+  const [rsi, setRsi] = useState(() => location.hash.startsWith("#rsi"));
+  // The session view reads its tab from the hash, so leaving the RSI view must not hand it "rsi/<tab>".
+  const leaveRsi = (id: string) => { history.replaceState(null, "", "#agents"); setRsi(false); setSession(id); };
   // A just-started run may not have a state file yet; keep it selected, and move into a bench run's first session once it appears.
   useEffect(() => {
     if (!list?.length || (session && list.some(s => s.id === session))) return;
@@ -818,7 +822,7 @@ function App() {
         <Button variant={creating ? "secondary" : "default"} onClick={() => setCreating(!creating)}>新規実行</Button>
         <Button variant={rsi ? "secondary" : "outline"} onClick={() => { setRsi(!rsi); history.replaceState(null, "", rsi ? "#agents" : "#rsi"); }}>自己改善</Button>
         {list && list.length > 0 && (
-          <Select value={session} onValueChange={id => { setRsi(false); setSession(id); }}>
+          <Select value={session} onValueChange={leaveRsi}>
             <SelectTrigger className="w-full sm:w-[28rem]" aria-label="セッション"><SelectValue placeholder="セッション" /></SelectTrigger>
             <SelectContent>
               {list.map(s => <SelectItem key={s.id} value={s.id}>{s.id} · {s.mode} · {s.rootStatus} · {s.modelCalls} 回</SelectItem>)}
@@ -828,7 +832,7 @@ function App() {
         </div>
       </header>
       {creating && <NewRun onClose={() => setCreating(false)} onStarted={dir => { setCreating(false); setSession(dir); }} />}
-      {rsi ? <Rsi sessions={list ?? []} onOpen={id => { setRsi(false); setSession(id); }} /> : <>
+      {rsi ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
         {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
         {session && <Dashboard session={session} />}
       </>}
