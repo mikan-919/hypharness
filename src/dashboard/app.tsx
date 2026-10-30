@@ -17,7 +17,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 type Row = Record<string, any>;
 type Session = { id: string; purpose: string; mode: string; modelCalls: number; rootStatus: string; lastAt: number | null };
 type Overview = {
-  purpose: string; constraints: string; config: Row; modelCalls: number; totals: Row;
+  purpose: string; constraints: string; config: Row; modelCalls: number; totals: Row; organization?: { leadShare: number; agents: number; maxDomainsPerSteward: number };
   agents: Row[]; goals: Row[]; tasks: Row[]; knowledge: Row[]; domains: Row[]; usage: Row[]; log: Row[];
 };
 type AgentDetail = { memory: { memory: string; version: number }; episodes: Row[]; history: Row[]; live: { episode: string; text: string } | null };
@@ -362,7 +362,7 @@ function Dashboard({ session }: { session: string }) {
         <Kpi label="キャッシュ読み取り" value={pct(t.cacheRead, promptTokens(t))} note={`${num.format(t.cacheRead)} トークン`} />
         <Kpi label="最大入力トークン" value={num.format(t.maxPromptTokens)} note="1回の呼び出しの入力（キャッシュ分を含む）" />
         <Kpi label="モデル待ち時間" value={`${num.format(Math.round(t.ms / 1000))} 秒`} />
-        <Kpi label="エージェント" value={`${o.agents.filter(a => a.status === "active").length} / ${o.agents.length}`} note="稼働 / 全体" />
+        <Kpi label="エージェント" value={`${o.agents.filter(a => a.status === "active").length} / ${o.agents.length}`} note={o.organization ? `稼働 / 全体・lead の呼び出し ${Math.round(o.organization.leadShare * 100)}%` : "稼働 / 全体"} />
         <Kpi label="作業タスク" value={`${work.filter(x => x.status === "done").length} / ${work.length}`} note="検証済み / 全体" />
       </div>
 
@@ -500,7 +500,7 @@ function Dashboard({ session }: { session: string }) {
 
 type Generation = {
   gen: number; base: number | null; phase: string; startedAt: number; endedAt?: number; commit?: string; status?: string; note?: string;
-  eval?: { ok: boolean; score?: number; reason?: string; context?: { calls: number; maxTokens: number; meanTokens: number; meanPeakTokens: number } };
+  eval?: { ok: boolean; score?: number; reason?: string; context?: { calls: number; maxTokens: number; meanTokens: number; meanPeakTokens: number }; organization?: { leadShare: number; agents: number; maxDomainsPerSteward: number } };
   accepted?: boolean; reason?: string; error?: string;
   grant?: { direction: string; rationale: string; expected: string; calls: number }; direction?: string; spent?: number;
   review?: { objections: { claim: string; evidence: string; upheld?: boolean; ruling?: string }[]; veto: boolean; reason: string };
@@ -670,6 +670,8 @@ function RsiDetail({ gens, gen, onGen, stats }: { gens: Generation[]; gen?: numb
             { key: "baseScoreText", label: "比較元", className: "text-right tabular-nums" },
             { key: "scoreDiff", label: "差", render: r => signed(r.scoreDiff, v => String(v)), className: "text-right tabular-nums" },
             { key: "peakTokens", label: "ピーク", render: r => num.format(r.peakTokens), className: "text-right tabular-nums" },
+            { key: "leadShare", label: "lead 比率", render: r => r.leadShare === undefined ? "-" : `${Math.round(r.leadShare * 100)}%`, className: "text-right tabular-nums" },
+            { key: "agents", label: "エージェント", render: r => r.agents ?? "-", className: "text-right tabular-nums" },
             { key: "peakDiff", label: "ピーク差", render: r => signed(r.peakDiff, v => num.format(v)), className: "text-right tabular-nums" },
             { key: "meanTokens", label: "平均入力", render: r => num.format(r.meanTokens), className: "text-right tabular-nums" },
             { key: "calls", label: "呼出", className: "text-right tabular-nums" },
@@ -878,6 +880,8 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
                 { key: "phase", label: "段階", render: r => <Status value={r.phase === "done" ? (r.gen === 0 ? "done" : r.accepted ? "accepted" : "rejected") : "running"} /> },
                 { key: "score", label: "点数", render: r => r.eval?.score?.toFixed(3) ?? "-", className: "text-right tabular-nums" },
                 { key: "peak", label: "ピーク平均", render: r => r.eval?.context ? num.format(r.eval.context.meanPeakTokens) : "-", className: "text-right tabular-nums" },
+                { key: "lead", label: "lead 比率", render: r => r.eval?.organization ? `${Math.round(r.eval.organization.leadShare * 100)}%` : "-", className: "text-right tabular-nums" },
+                { key: "agents", label: "エージェント", render: r => r.eval?.organization?.agents ?? "-", className: "text-right tabular-nums" },
                 { key: "max", label: "最大", render: r => r.eval?.context ? num.format(r.eval.context.maxTokens) : "-", className: "text-right tabular-nums" },
                 { key: "direction", label: "方向", render: r => <Clip text={r.direction} width="max-w-[12rem]" /> },
                 { key: "reason", label: "判定・エラー", render: r => <Clip text={r.error ?? r.reason} width="max-w-xs" /> },

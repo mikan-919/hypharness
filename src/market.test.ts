@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import type { Runtime } from "./agent.ts";
-import { defaultConfig, Store } from "./db.ts";
+import { centralization, defaultConfig, Store } from "./db.ts";
 import { runScheduler } from "./scheduler.ts";
 import { tools, type ToolContext } from "./tools.ts";
 import { emit, MAX_DECLINES, withheldTools } from "./triggers.ts";
@@ -123,4 +123,12 @@ test("market: an objection goes to the evaluator, whose ruling decides the work 
   expect(store.get<{ description: string }>("select description from tasks where kind = 'critique' and status = 'open'")!.description).toContain("Your record: 1 upheld, 0 overruled");
   finish("critic", "critique", "pass");
   expect(store.task(work)!.status).toBe("done");
+});
+
+test("centralization shows lead's share of calls, the agents, and the most domains one steward holds", () => {
+  const store = new Store(":memory:");
+  store.init("p", "", defaultConfig);
+  for (const agent of ["lead", "lead", "lead", "worker"]) store.run("insert into usage(agent, task, input, output, cache_read, cache_write, prompt_chars, ms, at) values(?, 't', 1, 1, 0, 0, 0, 0, 0)", agent);
+  store.run("insert into domains(id, name, description, steward, status) values('D1', 'a', 'a', 'lead', 'active'), ('D2', 'b', 'b', 'lead', 'active'), ('D3', 'c', 'c', 'x', 'retired')");
+  expect(centralization(store.db)).toEqual({ leadShare: 0.75, agents: 1, maxDomainsPerSteward: 2 });
 });

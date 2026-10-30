@@ -46,6 +46,14 @@ create table if not exists usage(id integer primary key, agent text not null, ta
 create table if not exists log(id integer primary key, at int not null, agent text, event text not null, detail text not null);
 `;
 
+// How concentrated the work was: lead's share of model calls, the number of agents, and the most active domains one steward holds.
+export function centralization(db: Database) {
+  const calls = db.query("select count(*) n, coalesce(sum(agent = 'lead'), 0) lead from usage").get() as { n: number; lead: number };
+  const agents = (db.query("select count(*) n from agents").get() as { n: number }).n;
+  const maxDomainsPerSteward = (db.query("select coalesce(max(n), 0) n from (select count(*) n from domains where status = 'active' group by steward)").get() as { n: number }).n;
+  return { leadShare: calls.n ? Math.round((calls.lead / calls.n) * 1000) / 1000 : 0, agents, maxDomainsPerSteward };
+}
+
 export type Agent = { id: string; role: string; status: "active" | "dormant"; parent: string | null; idle: number };
 export type Goal = { id: string; parent: string | null; description: string; status: "open" | "review" | "done" | "dropped"; owner: string; deliverable: string | null; feedback: string | null; verified_by: string | null; rev: number };
 export type Task = {

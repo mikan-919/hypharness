@@ -1,5 +1,5 @@
 import { BudgetExhausted, runEpisode, type Runtime } from "./agent.ts";
-import type { Agent, Goal, Store, Task } from "./db.ts";
+import { centralization, type Agent, type Goal, type Store, type Task } from "./db.ts";
 import { mirror } from "./tools.ts";
 import { eligible, scan } from "./triggers.ts";
 
@@ -38,6 +38,7 @@ export type Report = {
   rounds: number; modelCalls: number; elapsedMs: number;
   input: number; output: number; cacheRead: number; cacheWrite: number; maxPromptChars: number;
   agents: number; activeAgents: number; tasksDone: number; organizationChanges: number;
+  leadShare: number; maxDomainsPerSteward: number;
 };
 
 export function report(store: Store, status: Report["status"], rounds: number, elapsedMs: number): Report {
@@ -46,6 +47,7 @@ export function report(store: Store, status: Report["status"], rounds: number, e
     status, rounds, modelCalls: Number(store.meta("model_calls")), elapsedMs,
     input: u.input!, output: u.output!, cacheRead: u.cacheRead!, cacheWrite: u.cacheWrite!, maxPromptChars: u.maxPromptChars!,
     agents: store.agents().length, activeAgents: store.agents("active").length,
+    leadShare: centralization(store.db).leadShare, maxDomainsPerSteward: centralization(store.db).maxDomainsPerSteward,
     tasksDone: store.get<{ n: number }>("select count(*) n from tasks where status = 'done' and kind = 'work'")!.n,
     organizationChanges: store.get<{ n: number }>("select count(*) n from log where event in ('agent_created', 'agent_dormant', 'agent_woken', 'goal_transferred', 'domain_split', 'domain_merged', 'domain_transferred')")!.n,
   };

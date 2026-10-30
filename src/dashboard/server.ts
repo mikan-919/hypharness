@@ -6,7 +6,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { render, safePath } from "../tools.ts";
 import { openModel } from "../auth.ts";
 import { history, openChat, organize, reply, WINDOW } from "../chat.ts";
-import type { Store } from "../db.ts";
+import { centralization, type Store } from "../db.ts";
 import type { Llm } from "../locomo.ts";
 import { DEFAULTS } from "../../scripts/rsi-defaults.ts";
 import * as runs from "./runs.ts";
@@ -40,7 +40,7 @@ const all = (d: Database, sql: string, ...params: any[]) => d.query(sql).all(...
 function overview(d: Database) {
   const config = JSON.parse(meta(d, "config") ?? "{}");
   return {
-    purpose: meta(d, "purpose"), constraints: meta(d, "constraints"), config, modelCalls: Number(meta(d, "model_calls") ?? 0),
+    purpose: meta(d, "purpose"), constraints: meta(d, "constraints"), config, modelCalls: Number(meta(d, "model_calls") ?? 0), organization: centralization(d),
     totals: d.query("select count(*) calls, coalesce(sum(input),0) input, coalesce(sum(output),0) output, coalesce(sum(cache_read),0) cacheRead, coalesce(sum(cache_write),0) cacheWrite, coalesce(max(input + cache_read + cache_write),0) maxPromptTokens, coalesce(sum(ms),0) ms, min(at) firstAt, max(at) lastAt from usage").get(),
     agents: all(d, `select a.*, c.version memoryVersion, length(c.memory) memoryChars,
         (select count(*) from usage u where u.agent = a.id) calls, (select coalesce(sum(input),0) from usage u where u.agent = a.id) input,
@@ -188,9 +188,11 @@ async function rsiGeneration(gen: number) {
   const preds = new Map((await jsonl(join(out, "predictions.jsonl"))).map(p => [p.id, p]));
   const samples = (await jsonl(join(out, "judgments.jsonl"))).map(j => {
     const p = preds.get(j.id);
-    const sizes = withDb(join(out, String(j.arm), String(j.id).replaceAll(":", "-"), "state.sqlite"),
-      d => d.query("select input + cache_read + cache_write n from usage").all().map(r => (r as { n: number }).n)) ?? [];
+    const db = join(out, String(j.arm), String(j.id).replaceAll(":", "-"), "state.sqlite");
+    const sizes = withDb(db, d => d.query("select input + cache_read + cache_write n from usage").all().map(r => (r as { n: number }).n)) ?? [];
+    const org = withDb(db, centralization);
     return {
+      leadShare: org?.leadShare, agents: org?.agents,
       id: j.id, category: j.category, label: j.label, score: j.score, outcome: p?.outcome, calls: p?.usage.calls ?? 0, ms: p?.ms ?? 0,
       peakTokens: sizes.length ? Math.max(...sizes) : 0, meanTokens: sizes.length ? Math.round(sizes.reduce((a, b) => a + b, 0) / sizes.length) : 0,
     };
