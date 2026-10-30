@@ -29,8 +29,8 @@ export async function withTimeout<T>(ms: number, call: (signal: AbortSignal) => 
 
 export class BudgetExhausted extends Error {}
 
-// Live context size (characters) above which tool results ask the agent to compact.
-const COMPACT_AT = 60_000;
+// Live context size (tokens) above which tool results ask the agent to compact; the CLM paper's runs used a 32K limit.
+const COMPACT_AT = 32_000;
 
 // Stable per agent: no clocks, counters, or shared state, so the provider can reuse the cached prefix.
 export function systemPrompt(store: Store, agent: Agent) {
@@ -119,8 +119,11 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
       const r = await execute(rt, ctx, id, call, schemas);
       rt.log?.(`[${agent.id}] ${call.name}${r.isError ? " ✗" : ""} ${r.text.split("\n")[0]!.slice(0, 120)}`);
       // As in the CLM reference harness, every result shows where it sits and how large the context is, and asks for compaction past a threshold.
-      const size = system.length + JSON.stringify(messages).length + r.text.length;
-      const readout = `[#${messages.length} · live context: ~${size} chars${size > COMPACT_AT ? ` — over ${COMPACT_AT}; replace digested steps with context_edit now` : ""}]`;
+      // Measured from the provider's count for the call that requested this tool, plus this result at ~4 chars per token.
+      // Character counts of the stored messages are not used: encrypted reasoning makes them several times larger than the tokens.
+      const u = (messages.findLast(m => m.role === "assistant") as AssistantMessage | undefined)?.usage;
+      const size = (u ? u.input + u.cacheRead + u.cacheWrite + u.output : 0) + Math.ceil(r.text.length / 4);
+      const readout = `[#${messages.length} · live context: ~${size} tokens${size > COMPACT_AT ? ` — over ${COMPACT_AT}; replace digested steps with context_edit now` : ""}]`;
       messages.push({ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: `${r.text}\n${readout}` }], isError: r.isError, timestamp: Date.now() });
       save();
     }

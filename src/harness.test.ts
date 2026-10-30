@@ -55,7 +55,7 @@ test("A: a purpose alone leads to planned, executed, independently verified work
   for (const t of store.all<{ verified_by: string; claimed_by: string }>("select * from tasks where kind = 'work'")) expect(t.verified_by).not.toBe(t.claimed_by);
   // Each tool result names its own position, so a range can be given to context_edit without an outline.
   const msgs = JSON.parse(store.get<{ messages: string }>("select messages from episodes limit 1")!.messages) as Message[];
-  msgs.forEach((m, i) => { if (m.role === "toolResult") expect((m.content[0] as { text: string }).text).toMatch(new RegExp(`\\[#${i} · live context: ~\\d+ chars\\]$`)); });
+  msgs.forEach((m, i) => { if (m.role === "toolResult") expect((m.content[0] as { text: string }).text).toMatch(new RegExp(`\\[#${i} · live context: ~\\d+ tokens\\]$`)); });
 });
 
 test("B: the organization grows only when verification needs another agent", async () => {
