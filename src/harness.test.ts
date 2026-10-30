@@ -184,3 +184,11 @@ test("a model call that never answers times out instead of holding the run", asy
   expect(r.status).toBe("error");
   expect(Date.now() - started).toBeLessThan(5000);
 });
+
+test("unlimited defaults stay unlimited after the config is stored and read back", () => {
+  const store = new Store(join(mkdtempSync(join(tmpdir(), "hyph-")), "state.sqlite"));
+  store.init("p", "", defaultConfig);
+  expect(store.config).toMatchObject({ maxAgents: Infinity, maxConcurrency: Infinity, maxModelCalls: Infinity, maxSteps: 16 });
+  expect(store.takeModelCall()).toBe(true);
+  expect(JSON.parse(store.meta("config")!).maxModelCalls).toBeNull(); // what the dashboard reads
+});

@@ -36,7 +36,7 @@ export function systemPrompt(store: Store, agent: Agent) {
 Role: ${agent.role}
 Top-level purpose (fixed; you may reinterpret how to reach it, never what it is): ${store.purpose}
 Constraints: ${store.meta("constraints") || "none"}
-Organization: ${c.organization} mode, at most ${c.maxAgents} agents. Shell access: ${c.allowShell ? "granted" : "not granted"}.
+Organization: ${c.organization} mode, ${Number.isFinite(c.maxAgents) ? `at most ${c.maxAgents}` : "no limit on the number of"} agents. Shell access: ${c.allowShell ? "granted" : "not granted"}.
 
 How you work:
 - You handle one claimed task at a time. Shared goals, tasks, knowledge, domains, and other agents are visible only through tools; look up only what the task needs.

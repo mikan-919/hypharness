@@ -19,7 +19,7 @@ const { values: opts, positionals } = parseArgs({
     calls: { type: "string" },
     agents: { type: "string" },
     concurrency: { type: "string" },
-    rounds: { type: "string", default: "100" },
+    rounds: { type: "string" },
     "allow-shell": { type: "boolean", default: false },
     check: { type: "string" },
     arms: { type: "string", default: "direct,dynamic" },

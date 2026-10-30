@@ -17,7 +17,7 @@ export type Config = {
 };
 
 export const defaultConfig: Config = {
-  organization: "dynamic", maxAgents: 6, maxConcurrency: 3, maxModelCalls: 200, maxSteps: 16,
+  organization: "dynamic", maxAgents: Infinity, maxConcurrency: Infinity, maxModelCalls: Infinity, maxSteps: 16,
   memoryLimit: 6000, toolOutputLimit: 4000, leaseMs: 10 * 60_000, idleRounds: 3, allowShell: false,
 };
 
@@ -73,7 +73,8 @@ export class Store {
 
   meta(key: string) { return this.get<{ value: string }>("select value from meta where key = ?", key)?.value; }
   setMeta(key: string, value: string) { this.run("insert into meta(key, value) values(?, ?) on conflict(key) do update set value = excluded.value", key, value); }
-  get config(): Config { return JSON.parse(this.meta("config") ?? "null") ?? defaultConfig; }
+  // JSON has no Infinity: an unlimited value is stored as null and read back as Infinity.
+  get config(): Config { const raw = this.meta("config"); return raw ? JSON.parse(raw, (_, v) => v === null ? Infinity : v) : defaultConfig; }
   get purpose() { return this.meta("purpose"); }
 
   log(agent: string | null, event: string, detail: unknown) {
