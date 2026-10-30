@@ -1,0 +1,93 @@
+// Scores a candidate hypharness tree on a fixed LoCoMo-Plus subset and, given a baseline, decides whether it is accepted.
+// The candidate is copied, its src/locomo.ts (sample selection and judge) is replaced with this tree's copy, and its
+// own type check and tests must pass. Accuracy comes from the judge; context length from every model call's input tokens.
+import { Database } from "bun:sqlite";
+import { existsSync, mkdirSync, readdirSync, symlinkSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { parseArgs } from "node:util";
+import { $ } from "bun";
+
+const { values: opts, positionals: [candidateArg] } = parseArgs({
+  allowPositionals: true,
+  options: {
+    baseline: { type: "string" },
+    out: { type: "string" },
+    "per-category": { type: "string", default: "3" },
+    seed: { type: "string", default: "1" },
+    calls: { type: "string", default: "40" },
+    "harness-concurrency": { type: "string", default: "4" },
+  },
+});
+if (!candidateArg) throw new Error("usage: bun scripts/rsi-eval.ts <candidate-dir> [--baseline eval.json] [--out DIR]");
+
+const pinned = resolve(import.meta.dir, "..");
+const candidate = resolve(candidateArg);
+const out = resolve(opts.out ?? join(pinned, ".hyph", "rsi", `eval-${Date.now()}`));
+const copy = join(out, "tree");
+mkdirSync(out, { recursive: true });
+
+type Eval = {
+  ok: boolean; reason?: string; commit?: string; sampleIds?: string[]; score?: number; perSample?: Record<string, number>;
+  context?: { calls: number; maxTokens: number; meanTokens: number; meanPeakTokens: number };
+};
+const finish = async (e: Eval, accepted = e.ok) => {
+  await Bun.write(join(out, "eval.json"), JSON.stringify(e, null, 2));
+  console.log(JSON.stringify({ ...e, perSample: undefined, sampleIds: undefined, accepted }, null, 2));
+  process.exit(accepted ? 0 : 1);
+};
+
+await $`rsync -a --exclude node_modules --exclude .hyph --exclude auth.json --exclude .env ${candidate}/ ${copy}/`.quiet();
+const commit = (await $`git -C ${candidate} rev-parse HEAD`.nothrow().quiet().text()).trim() || undefined;
+
+// Deleting a test must not be a way to pass.
+const tests = (dir: string) => new Set(readdirSync(join(dir, "src"), { recursive: true }).map(String).filter(f => f.endsWith(".test.ts")));
+const removed = [...tests(pinned)].filter(t => !tests(copy).has(t));
+if (removed.length) await finish({ ok: false, commit, reason: `tests removed: ${removed.join(", ")}` });
+
+await $`cp ${join(pinned, "src", "locomo.ts")} ${join(copy, "src", "locomo.ts")}`;
+await $`bun install`.cwd(copy).quiet();
+for (const cmd of [["bun", "run", "check"], ["bun", "test"]]) {
+  const r = Bun.spawnSync(cmd, { cwd: copy, stdout: "inherit", stderr: "inherit" });
+  if (r.exitCode !== 0) await finish({ ok: false, commit, reason: `${cmd.join(" ")} exited ${r.exitCode}` });
+}
+
+// auth.json is read from cwd; the link stays outside the candidate's workspace.
+if (!existsSync(join(copy, "auth.json"))) symlinkSync(join(pinned, "auth.json"), join(copy, "auth.json"));
+const locomoOut = join(out, "locomo");
+const run = Bun.spawnSync(["bun", "src/index.ts", "locomo", "--arms", "dynamic", "--per-category", opts["per-category"]!, "--seed", opts.seed!,
+  "--calls", opts.calls!, "--harness-concurrency", opts["harness-concurrency"]!, "--dir", join(pinned, ".hyph"), "--out", locomoOut],
+{ cwd: copy, stdout: "inherit", stderr: "inherit" });
+if (run.exitCode !== 0) await finish({ ok: false, commit, reason: `locomo exited ${run.exitCode}` });
+
+const report = await Bun.file(join(locomoOut, "report.json")).json();
+const perSample: Record<string, number> = {};
+for (const line of (await Bun.file(join(locomoOut, "judgments.jsonl")).text()).split("\n").filter(Boolean)) {
+  const j = JSON.parse(line);
+  if (j.arm === "dynamic") perSample[j.id] = j.score;
+}
+
+// Prompt size per call as the provider reported it (fresh + cached input); stored message chars overcount reasoning data.
+const all: number[] = [], peaks: number[] = [];
+const armDir = join(locomoOut, "dynamic");
+for (const sample of existsSync(armDir) ? readdirSync(armDir) : []) {
+  const path = join(armDir, sample, "state.sqlite");
+  if (!existsSync(path)) continue;
+  const db = new Database(path, { readonly: true });
+  const sizes = db.query("select input + cache_read + cache_write n from usage").all().map(r => (r as { n: number }).n);
+  db.close();
+  if (!sizes.length) continue;
+  all.push(...sizes);
+  peaks.push(Math.max(...sizes));
+}
+const mean = (xs: number[]) => xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : 0;
+const result: Eval = {
+  ok: true, commit, sampleIds: report.sampleIds, score: report.results.dynamic.overallAvg, perSample,
+  context: { calls: all.length, maxTokens: all.length ? Math.max(...all) : 0, meanTokens: mean(all), meanPeakTokens: mean(peaks) },
+};
+
+if (!opts.baseline) await finish(result);
+const base: Eval = await Bun.file(opts.baseline!).json();
+if (JSON.stringify(base.sampleIds) !== JSON.stringify(result.sampleIds)) throw new Error("baseline was scored on different samples; use the same --per-category and --seed");
+// ponytail: strict comparison on a small subset, so noise can flip it; add repeats or a paired test when decisions start to oscillate
+const s = result.score!, bs = base.score!, c = result.context!.meanPeakTokens, bc = base.context!.meanPeakTokens;
+await finish(result, s >= bs && c <= bc && (s > bs || c < bc));
