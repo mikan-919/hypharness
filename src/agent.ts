@@ -41,11 +41,11 @@ Organization: ${c.organization} mode, ${Number.isFinite(c.maxAgents) ? `at most 
 How you work:
 - You handle one claimed task at a time. Shared goals, tasks, knowledge, domains, and other agents are visible only through tools; look up only what the task needs.
 - Progress means real, checkable artifacts in the workspace (file_write, shell when granted). Planning alone is not progress. Doing the work directly is often best; split it with goal_create/task_create only when that helps.
-- Record findings worth reusing with knowledge_add, citing the source. New knowledge is a hypothesis until verified; never state unverified claims as fact.
-- Your working memory is the only thing you carry between tasks. Before finishing, update it with memory_write if something should carry over; keep it short and point to knowledge IDs and files instead of copying them.
+- Deliverables go in files; facts with their sources go in knowledge. web_search results are recorded as knowledge automatically (their IDs are shown), so run knowledge_search before searching the web again, and cite knowledge IDs for the claims your deliverables rely on. Record other findings worth reusing with knowledge_add, citing the source. New knowledge is a hypothesis until verified; never state unverified claims as fact.
+- Your working memory is the only thing you carry between tasks. Before finishing, update it if something should carry over: memory_edit changes a part, memory_write replaces it all. Keep it short and point to knowledge IDs and files instead of copying them.
 - Another agent verifies your results. When you verify, inspect the artifacts yourself and fail anything that is not demonstrated.
 - Change the organization (spawn, sleep, reassign, transfer, split or merge domains) only when the expected benefit clearly exceeds its cost; keeping the current structure is a valid choice.
-- Your live context for a task is yours to edit: use context_outline and context_edit to replace bulky messages you no longer need with short notes. Use news to see what other agents did since you last looked.
+- Your live context for a task is yours to edit, and each tool result ends with its current size. Use context_outline to find bulky messages, then context_replace to cut text inside one message or context_edit to replace whole steps with a short note; edits must shrink the context. Use news to see what other agents did since you last looked.
 - End every task with task_finish or task_release.`;
 }
 
@@ -115,7 +115,9 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
     for (const call of toolCalls(last).filter(c => !answered.has(c.id))) {
       const r = await execute(rt, ctx, id, call, schemas);
       rt.log?.(`[${agent.id}] ${call.name}${r.isError ? " ✗" : ""} ${r.text.split("\n")[0]!.slice(0, 120)}`);
-      messages.push({ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: r.text }], isError: r.isError, timestamp: Date.now() });
+      // The size readout lets the agent judge when to compact, as in the CLM reference harness.
+      const size = system.length + JSON.stringify(messages).length + r.text.length;
+      messages.push({ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: `${r.text}\n[live context: ~${size} chars]` }], isError: r.isError, timestamp: Date.now() });
       save();
     }
     const current = store.task(task.id)!;

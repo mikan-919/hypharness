@@ -146,7 +146,11 @@ test("web_search sends the query to Parallel and returns ranked excerpts", async
     expect(sent!.url).toBe("https://api.parallel.ai/v1/search");
     expect((sent!.init.headers as Record<string, string>)["x-api-key"]).toBe("test-key");
     expect(JSON.parse(sent!.init.body as string)).toMatchObject({ search_queries: ["bun sqlite api"], mode: "fast", session_id: "T-1", advanced_settings: { source_policy: { include_domains: ["bun.com"] } } });
-    expect(out).toContain("[1] SQLite\nhttps://bun.com/docs/api/sqlite\nbun:sqlite is built in");
+    expect(out).toMatch(/^\[1\] K-\S+ SQLite\nhttps:\/\/bun.com\/docs\/api\/sqlite\nbun:sqlite is built in$/);
+    // Results become hypotheses with the URL as source, once per URL.
+    await tools.web_search!.run(c, args);
+    expect(store.all("select gist, source, status from knowledge")).toEqual([{ gist: "SQLite", source: "https://bun.com/docs/api/sqlite", status: "hypothesis" }]);
+    expect(out).toContain(store.get<{ id: string }>("select id from knowledge")!.id);
   } finally {
     globalThis.fetch = original;
     if (key === undefined) delete process.env.PARALLEL_API_KEY; else process.env.PARALLEL_API_KEY = key;
@@ -191,4 +195,30 @@ test("unlimited defaults stay unlimited after the config is stored and read back
   expect(store.config).toMatchObject({ maxAgents: Infinity, maxConcurrency: Infinity, maxModelCalls: Infinity, maxSteps: 16 });
   expect(store.takeModelCall()).toBe(true);
   expect(JSON.parse(store.meta("config")!).maxModelCalls).toBeNull(); // what the dashboard reads
+});
+
+test("working memory and live context can be edited in part, and edits must shrink the live context", () => {
+  const { store, rt } = setup({});
+  const messages: Message[] = [
+    { role: "user", content: "opening", timestamp: 0 },
+    { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "file_read", arguments: { path: "big.txt" } }], api: "x", provider: "x", model: "x", usage: {} as never, stopReason: "toolUse", timestamp: 0 } as Message,
+    { role: "toolResult", toolCallId: "c1", toolName: "file_read", content: [{ type: "text", text: "line A\nnoise noise noise\nline B" }], isError: false, timestamp: 0 },
+    { role: "assistant", content: [{ type: "toolCall", id: "c2", name: "context_replace", arguments: {} }], api: "x", provider: "x", model: "x", usage: {} as never, stopReason: "toolUse", timestamp: 0 } as Message,
+  ];
+  store.run("insert into episodes(id, agent, task, messages, status) values('e', 'lead', 'T-1', ?, 'running')", JSON.stringify(messages));
+  const c = { store, agent: store.agent("lead")!, task: { id: "T-1" }, workspace: rt.workspace, contextDir: rt.contextDir, episode: "e", messages } as unknown as ToolContext;
+
+  tools.memory_write!.run(c, { content: "plan: A\nstatus: todo" });
+  tools.memory_edit!.run(c, { old: "todo", new: "done" });
+  expect(store.memory("lead")).toEqual({ memory: "plan: A\nstatus: done", version: 2 });
+  expect(() => tools.memory_edit!.run(c, { old: "missing", new: "x" })).toThrow("does not occur");
+
+  expect(() => tools.context_replace!.run(c, { at: 2, old: "noise", new: "" })).toThrow("occurs 3 times");
+  expect(() => tools.context_replace!.run(c, { at: 2, old: "line A", new: "line A plus more" })).toThrow("must shrink");
+  expect(() => tools.context_replace!.run(c, { at: 3, old: "x", new: "" })).toThrow("within #1..#2");
+  tools.context_replace!.run(c, { at: 2, old: "\nnoise noise noise", new: "" });
+  expect(messages[2]).toMatchObject({ role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "line A\nline B" }] });
+  expect(JSON.parse(store.get<{ messages: string }>("select messages from episodes where id = 'e'")!.messages)[2].content[0].text).toBe("line A\nline B");
+  expect(store.get<{ n: number }>("select count(*) n from episode_history where episode = 'e'")!.n).toBe(1);
+  expect(() => tools.context_edit!.run(c, { from: 1, to: 2, note: "x".repeat(1000) })).toThrow("must shrink");
 });

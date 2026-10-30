@@ -80,6 +80,21 @@ export const tools: Record<string, Def<TSchema>> = {
       return `Saved working memory version ${version}`;
     },
   }),
+  memory_edit: def({
+    description: "Change part of your own working memory: replace text that occurs exactly once with new text (empty to delete). Cheaper than rewriting it with memory_write; earlier versions remain restorable.",
+    parameters: Type.Object({ old: Type.String({ minLength: 1, description: "Exact text to replace; must occur once" }), new: Str("Replacement text") }),
+    run(c, a) {
+      const current = c.store.memory(c.agent.id)!.memory;
+      const hits = current.split(a.old).length - 1;
+      if (hits !== 1) fail(hits ? `The text occurs ${hits} times; include more surrounding text` : "The text does not occur in your working memory");
+      const next = current.replace(a.old, () => a.new);
+      const limit = c.store.config.memoryLimit;
+      if (next.length > limit) fail(`Working memory is limited to ${limit} characters (would be ${next.length}); compact it and move details into knowledge_add`);
+      const version = c.store.writeMemory(c.agent.id, next);
+      mirror(c, c.agent.id);
+      return `Saved working memory version ${version}`;
+    },
+  }),
   context_read: def({
     description: "Read part of an agent's context (yours or another's, read-only): its working memory (optionally an earlier version) or its live context for the task it is working on.",
     parameters: Type.Object({ agent: Opt(Str("Agent ID; defaults to you")), part: StringEnum(["memory", "live"]), version: Opt(Type.Integer()), offset: Opt(Type.Integer({ minimum: 0 })), limit: Opt(Type.Integer({ minimum: 1, maximum: 4000 })) }),
@@ -113,10 +128,33 @@ export const tools: Record<string, Def<TSchema>> = {
       const lastAssistant = m.findLastIndex(x => x.role === "assistant");
       if (a.from > a.to || a.to >= lastAssistant) fail(`Range must be within #1..#${lastAssistant - 1}`);
       if (m[a.from]!.role === "toolResult" || m[a.to + 1]?.role === "toolResult") fail("The range must not separate a tool call from its result; include whole steps");
+      const replaced = JSON.stringify(m.slice(a.from, a.to + 1)).length;
+      if (a.note.length >= replaced) fail(`An edit must shrink the context: the note (${a.note.length} chars) is not shorter than #${a.from}-#${a.to} (${replaced} chars)`);
       c.store.run("insert into episode_history(episode, at, messages) values(?, ?, ?)", c.episode, Date.now(), JSON.stringify(m));
       m.splice(a.from, a.to - a.from + 1, { role: "user", content: `[context note replacing #${a.from}-#${a.to}] ${a.note}`, timestamp: Date.now() });
       c.store.run("update episodes set messages = ? where id = ?", JSON.stringify(m), c.episode);
       return `Replaced #${a.from}-#${a.to}; live context now has ${m.length} messages`;
+    },
+  }),
+  context_replace: def({
+    description: "Replace a piece of text inside one message of your live context, for example cutting a tool output down to the lines you still need. The text must occur exactly once in that message and the replacement must be shorter. Takes effect from your next step; the original is kept in history.",
+    parameters: Type.Object({ at: Type.Integer({ minimum: 1, description: "Message index from context_outline" }), old: Type.String({ minLength: 1, description: "Exact text to replace" }), new: Str("Shorter replacement; empty to delete") }),
+    run(c, a) {
+      const m = c.messages;
+      const lastAssistant = m.findLastIndex(x => x.role === "assistant");
+      if (a.at >= lastAssistant) fail(`Index must be within #1..#${lastAssistant - 1}`);
+      if (a.new.length >= a.old.length) fail("An edit must shrink the context: replace stale text with a shorter note");
+      const msg = m[a.at]!;
+      // Only text is editable; tool calls and their pairing with results stay intact.
+      const blocks = typeof msg.content === "string" ? undefined : (msg.content as { type: string; text?: string }[]).filter(b => b.type === "text");
+      const texts = blocks ? blocks.map(b => b.text!) : [msg.content as string];
+      const hits = texts.reduce((n, t) => n + t.split(a.old).length - 1, 0);
+      if (hits !== 1) fail(hits ? `The text occurs ${hits} times in #${a.at}; include more surrounding text` : `The text does not occur in #${a.at}`);
+      c.store.run("insert into episode_history(episode, at, messages) values(?, ?, ?)", c.episode, Date.now(), JSON.stringify(m));
+      if (blocks) { const b = blocks.find(b => b.text!.includes(a.old))!; b.text = b.text!.replace(a.old, () => a.new); }
+      else (msg as { content: string }).content = (msg.content as string).replace(a.old, () => a.new);
+      c.store.run("update episodes set messages = ? where id = ?", JSON.stringify(m), c.episode);
+      return `Replaced ${a.old.length} chars with ${a.new.length} in #${a.at}`;
     },
   }),
   news: def({
@@ -469,7 +507,7 @@ export const tools: Record<string, Def<TSchema>> = {
 
   // --- External information ---
   web_search: def({
-    description: "Search the web with Parallel. Returns ranked URLs with excerpts. Record what you rely on with knowledge_add, citing the URL as source.",
+    description: "Search the web with Parallel. Returns ranked URLs with excerpts. Each result is recorded as unverified knowledge with the URL as source (one item per URL; its ID is shown), so check knowledge_search before searching again.",
     parameters: Type.Object({
       objective: Str("Self-contained statement of what you are looking for and why"),
       queries: Type.Array(Type.String(), { minItems: 1, maxItems: 5, description: "2-3 keyword queries of 3-6 words each" }),
@@ -498,8 +536,18 @@ export const tools: Record<string, Def<TSchema>> = {
       };
       if (!res.ok) fail(`Parallel search failed (${res.status}): ${body.error?.message ?? JSON.stringify(body).slice(0, 300)}`);
       const warnings = body.warnings?.map(w => `warning: ${w.message}`) ?? [];
-      const results = (body.results ?? []).map((r, i) =>
-        `[${i + 1}] ${r.title ?? "(untitled)"}${r.publish_date ? ` (${r.publish_date})` : ""}\n${r.url}\n${(r.excerpts ?? []).join("\n…\n")}`);
+      // The host records what was found, so sources stay reusable without a knowledge_add call per result.
+      const found = (body.results ?? []).map(r => ({ ...r, title: r.title ?? "(untitled)", excerpt: (r.excerpts ?? []).join("\n…\n") }));
+      const ids = c.store.tx(() => found.map(r => {
+        const known = c.store.get<{ id: string }>("select id from knowledge where source = ?", r.url);
+        if (known) return known.id;
+        const id = c.store.id("K");
+        c.store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, ?, ?, ?, 'hypothesis', ?, ?)",
+          id, r.title, r.excerpt.slice(0, 500), r.excerpt, r.url, c.agent.id, Date.now());
+        c.store.log(c.agent.id, "knowledge_added", { id, gist: r.title, from: "web_search" });
+        return id;
+      }));
+      const results = found.map((r, i) => `[${i + 1}] ${ids[i]} ${r.title}${r.publish_date ? ` (${r.publish_date})` : ""}\n${r.url}\n${r.excerpt}`);
       return [...warnings, ...results].join("\n\n") || "No results";
     },
   }),

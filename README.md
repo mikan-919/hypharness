@@ -91,7 +91,7 @@
 | 作業記憶 | エージェントがタスクをまたいで持ち続ける唯一の文脈。本人だけが書き換えられ、他者は読むだけ |
 | 組織の形 | `single`（1体）、`fixed`（lead・worker・reviewer の3体で固定）、`dynamic`（エージェントが生成と休眠を判断する。既定値） |
 
-各エージェントは1回に1つのタスクを取り、ツールを呼びながら処理します。他のエージェントの動きは自動では入力に入らず、必要なときに `news` で差分を取ります。詳しくは [仕組み](docs/architecture.md)、エージェントが使える36個のツールは [ツール一覧](docs/tools.md) にまとめています。
+各エージェントは1回に1つのタスクを取り、ツールを呼びながら処理します。他のエージェントの動きは自動では入力に入らず、必要なときに `news` で差分を取ります。詳しくは [仕組み](docs/architecture.md)、エージェントが使える38個のツールは [ツール一覧](docs/tools.md) にまとめています。
 
 ## 使い方
 
@@ -147,7 +147,7 @@ bun run bench 'ToDo管理のCLIを書く' --calls 60 --allow-shell --check 'bun 
 
 ### Web 検索を使わせる
 
-`.env` などで `PARALLEL_API_KEY` を設定すると、エージェントは `web_search` ツールで Parallel Search API（`https://api.parallel.ai/v1/search`）に検索語を fast モード（速度を優先する検索の設定）で送り、関連順の URL と抜粋を受け取ります。キーがない起動では、このツールはモデルに渡すツールの一覧から外れます。検索で得た内容は `knowledge_add` で出典付きの知識として残すよう、ツールの説明で指示しています。
+`.env` などで `PARALLEL_API_KEY` を設定すると、エージェントは `web_search` ツールで Parallel Search API（`https://api.parallel.ai/v1/search`）に検索語を fast モード（速度を優先する検索の設定）で送り、関連順の URL と抜粋を受け取ります。キーがない起動では、このツールはモデルに渡すツールの一覧から外れます。検索結果はホストが URL を出典とする未検証の知識として自動で登録するため、エージェントは同じ内容を検索し直さずに `knowledge_search` で引けます。
 
 ### LoCoMo-Plus で測る
 
