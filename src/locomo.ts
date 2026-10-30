@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Api, AssistantMessage, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import type { createModels } from "@earendil-works/pi-ai/models";
@@ -413,9 +413,11 @@ export function summarize(judgments: Judgment[], predictions: Prediction[]) {
   }));
 }
 
-const readJsonl = async <T>(path: string) => await Bun.file(path).exists() ? (await Bun.file(path).text()).split("\n").filter(Boolean).map(l => JSON.parse(l) as T) : [];
+// A line cut off when the process was killed is skipped; that sample is simply done again.
+const readJsonl = async <T>(path: string) => !await Bun.file(path).exists() ? [] : (await Bun.file(path).text()).split("\n").filter(Boolean)
+  .flatMap(l => { try { return [JSON.parse(l) as T]; } catch { return []; } });
 
-export type BenchOptions = { out: string; cacheDir: string; arms: string[]; categories?: string[]; perCategory: number | "all"; seed: number; calls: number; concurrency: number; log?: (line: string) => void };
+export type BenchOptions = { out: string; cacheDir: string; arms: string[]; categories?: string[]; perCategory: number | "all"; seed: number; calls: number; concurrency: number; harnessConcurrency?: number; log?: (line: string) => void };
 
 // Resumable: predictions and judgments are appended per (arm, sample) and skipped on a rerun.
 export async function runLocomo(llm: Llm, judgeLlm: Llm, opts: BenchOptions) {
@@ -437,11 +439,11 @@ export async function runLocomo(llm: Llm, judgeLlm: Llm, opts: BenchOptions) {
   const record = async (s: Sample, p: Prediction) => {
     if (!predicted.has(key(p.arm, s.id))) {
       predicted.set(key(p.arm, s.id), p); predictions.push(p);
-      await Bun.write(predPath, predictions.map(x => JSON.stringify(x)).join("\n") + "\n");
+      appendFileSync(predPath, `${JSON.stringify(p)}\n`);
     }
     const j = await judge(judgeLlm, s, p);
     judgments.push(j); judged.add(key(p.arm, s.id));
-    await Bun.write(judgePath, judgments.map(x => JSON.stringify(x)).join("\n") + "\n");
+    appendFileSync(judgePath, `${JSON.stringify(j)}\n`);
     opts.log?.(`${p.arm} ${s.id} [${s.category}] ${j.label || "?"} (${p.outcome})`);
   };
   for (const arm of opts.arms) {
@@ -452,9 +454,10 @@ export async function runLocomo(llm: Llm, judgeLlm: Llm, opts: BenchOptions) {
       if (!p) throw new ProviderError("harness run stopped on provider errors");
       await record(s, p);
     });
-    // ponytail: direct predictions run in a small pool; harness samples run one at a time since each run has its own concurrency
-    const width = arm === "direct" ? Math.max(1, opts.concurrency) : 1;
-    for (let i = 0; i < todo.length; i += width) await Promise.all(todo.slice(i, i + width).map(work));
+    // A worker pool: each sample is independent (harness samples run in their own directories), and appends are synchronous lines.
+    const width = Math.max(1, arm === "direct" ? opts.concurrency : opts.harnessConcurrency ?? 1);
+    let next = 0;
+    await Promise.all(Array.from({ length: width }, async () => { while (next < todo.length) await work(todo[next++]!); }));
   }
   const report = {
     source: { ...SOURCE, sha256 }, model: llm.model.id, judgeModel: judgeLlm.model.id, arms: opts.arms, categories: opts.categories ?? CATEGORIES,

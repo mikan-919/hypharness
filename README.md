@@ -50,6 +50,7 @@ bun run src/index.ts locomo --out .hyph/locomo-1234   # 中断した実行を同
 | `--seed N` | 問題の選び方を決める乱数の種。同じ種なら全方式が同じ問題を解く（既定値 1） |
 | `--calls N` | ハーネス方式の1問あたりの呼び出し上限（既定値 40） |
 | `--concurrency N` | `direct` の同時実行数（既定値 2） |
+| `--harness-concurrency N` | ハーネス方式で同時に解く問題数（既定値 1）。問題ごとに別のセッションで動く |
 | `--judge-model ID` | 採点に使うモデル（既定値は `OPENAI_MODEL`） |
 | `--out DIR` | 出力先（既定値 `.hyph/locomo-<時刻>`） |
 

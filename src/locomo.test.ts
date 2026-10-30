@@ -83,6 +83,7 @@ async function cachedData() {
 test("provider errors are never scored, and a rerun completes without duplicates", async () => {
   const dir = await cachedData();
   const opts = { out: join(dir, "out"), cacheDir: join(dir, "data"), arms: ["direct"], perCategory: "all" as const, seed: 1, calls: 5, concurrency: 1 };
+  const parallel = { ...opts, concurrency: 3 };
   const error = fauxAssistantMessage("", { stopReason: "error", errorMessage: "usage limit" });
   const judgeOk = fauxAssistantMessage('{"label": "correct", "reason": "ok"}');
   // First sample answers and is judged; then the provider fails three times in a row.
@@ -91,7 +92,7 @@ test("provider errors are never scored, and a rerun completes without duplicates
   // One provider answers both roles: judge prompts get a verdict, everything else an answer.
   const second = llmWith(Array(20).fill((ctx: { messages: Message[] }) =>
     JSON.stringify(ctx.messages).includes("Judge") ? judgeOk : fauxAssistantMessage("answer")));
-  const report = await runLocomo(second, second, opts);
+  const report = await runLocomo(second, second, parallel);
   const preds = (await Bun.file(join(opts.out, "predictions.jsonl")).text()).trim().split("\n").map(l => JSON.parse(l));
   expect(preds.map(p => p.id)).toEqual([...new Set(preds.map(p => p.id))]);
   expect(preds.some(p => /usage limit/.test(p.prediction))).toBe(false);

@@ -24,6 +24,7 @@ const { values: opts, positionals } = parseArgs({
     check: { type: "string" },
     arms: { type: "string", default: "direct,dynamic" },
     "per-category": { type: "string", default: "2" },
+    "harness-concurrency": { type: "string", default: "1" },
     categories: { type: "string" },
     seed: { type: "string", default: "1" },
     "judge-model": { type: "string" },
@@ -89,7 +90,7 @@ if (command === "locomo") {
   log(`results: ${out}`);
   const report = await runLocomo(llm, judgeLlm, {
     out, cacheDir: join(opts.dir!, "locomo-data"), arms, categories, perCategory, seed: Number.isSafeInteger(Number(opts.seed)) ? Number(opts.seed) : (() => { throw new Error("--seed must be an integer"); })(), log,
-    calls: int(opts.calls, "calls") ?? 40, concurrency: int(opts.concurrency, "concurrency") ?? 2,
+    calls: int(opts.calls, "calls") ?? 40, concurrency: int(opts.concurrency, "concurrency") ?? 2, harnessConcurrency: int(opts["harness-concurrency"], "harness-concurrency"),
   });
   console.table(Object.fromEntries(Object.entries(report.results).map(([arm, r]) => [arm, {
     avg: r.overallAvg, judged: r.judged, ...Object.fromEntries(Object.entries(r.byCategory).map(([c, v]) => [c, v.avg])),
