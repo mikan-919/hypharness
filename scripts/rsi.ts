@@ -7,17 +7,25 @@ import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { $, type Subprocess } from "bun";
 import type { Eval } from "./rsi-eval.ts";
+import { resolveSettings, type RsiSettings } from "./rsi-defaults.ts";
 
 const { values: opts } = parseArgs({
   options: {
     dir: { type: "string", default: ".hyph/rsi" },
-    calls: { type: "string", default: "150" },
-    generations: { type: "string" },
+    // Settings left out keep the value of the previous start (state.json), then the defaults in rsi-defaults.ts.
+    purpose: { type: "string" },
+    constraints: { type: "string" },
+    // Organization of the improver session.
+    mode: { type: "string" },
+    // Model-call budget of one improver session, and of one question in an evaluation.
+    calls: { type: "string" },
+    "eval-calls": { type: "string" },
     "per-category": { type: "string" },
-    // Questions solved at once in an evaluation; each runs its own session. Defaults to all of them.
-    parallel: { type: "string" },
     seed: { type: "string" },
-    delta: { type: "string", default: "0.05" },
+    delta: { type: "string" },
+    // Not carried over: questions solved at once in an evaluation (defaults to all of them) and the generation limit.
+    parallel: { type: "string" },
+    generations: { type: "string" },
   },
 });
 
@@ -27,15 +35,9 @@ export type Generation = {
 };
 export type State = {
   incumbent?: { gen: number; commit: string; tree: string; eval: string };
-  settings: Record<string, string | undefined>; generations: Generation[];
+  settings: RsiSettings; generations: Generation[];
 };
 
-const PURPOSE = `Improve the hypharness agent harness whose source is this workspace (a git checkout of the harness that is running you).
-Objective: when the harness's dynamic organization answers a fixed LoCoMo-Plus subset, raise the judge score and lower the peak prompt tokens per question.
-rsi-traces/ holds evidence from the current harness: eval.json (score, per-sample scores, context sizes), locomo/judgments.jsonl and predictions.jsonl, locomo/dynamic/<sample>/contexts/*.md (each agent's working memory and live context), and history.md (earlier generations, their predicted and measured effects).
-Read the raw traces to find a cause, then make one focused change to the harness source. bun run check and bun test must pass.
-Before finishing, write rsi-traces/note.md: what you changed, why, and the effect you predict on score and peak tokens.`;
-const CONSTRAINTS = "Edit only files inside the workspace. Do not modify src/locomo.ts, delete tests, or encode LoCoMo questions or answers. Never read or print auth.json or .env.";
 const RETRY_MS = 10 * 60_000;
 
 const repo = resolve(import.meta.dir, "..");
@@ -90,8 +92,10 @@ async function improve(state: State, g: Generation) {
   const fresh = !existsSync(join(dir, "state.sqlite"));
   // A resumed session keeps the traces it started with, including the note the improver already wrote.
   if (fresh) await writeTraces(state, workspace);
-  const code = await run(["bun", join(state.incumbent!.tree, "src", "index.ts"), ...(fresh ? [PURPOSE, "--constraints", CONSTRAINTS] : []),
-    "--dir", dir, "--allow-shell", "--calls", opts.calls!], join(dir, "run.log"));
+  // Purpose, constraints and organization belong to a new session; a resumed one keeps those it started with.
+  const { purpose, constraints, mode, calls } = state.settings;
+  const code = await run(["bun", join(state.incumbent!.tree, "src", "index.ts"), ...(fresh ? [purpose, `--constraints=${constraints}`, "--mode", mode] : []),
+    "--dir", dir, "--allow-shell", "--calls", calls], join(dir, "run.log"));
   const status = [...readFileSync(join(dir, "run.log"), "utf8").matchAll(/"status": "(\w+)"/g)].at(-1)?.[1];
   if (code !== 0 || !status || status === "error") throw new Error(`improver session ended with exit ${code}, status ${status ?? "unknown"}`);
   g.status = status;
@@ -114,8 +118,9 @@ async function evaluate(state: State, g: Generation) {
   if (!existsSync(workspace)) await $`git -C ${repo} worktree add -f --detach ${workspace} HEAD`.quiet();
   g.commit ??= (await $`git -C ${workspace} rev-parse HEAD`.text()).trim();
   rmSync(join(out, "eval.json"), { force: true });
-  await run(["bun", join(repo, "scripts", "rsi-eval.ts"), workspace, "--out", out, "--per-category", opts["per-category"]!, "--seed", opts.seed!,
-    "--delta", opts.delta!, "--harness-concurrency", opts.parallel ?? String(6 * Number(opts["per-category"])), ...(state.incumbent ? ["--baseline", state.incumbent.eval] : [])], join(dir, "eval.log"));
+  const { perCategory, seed, delta, evalCalls, parallel } = state.settings;
+  await run(["bun", join(repo, "scripts", "rsi-eval.ts"), workspace, "--out", out, "--per-category", perCategory, "--seed", seed, "--calls", evalCalls,
+    "--delta", delta, "--harness-concurrency", parallel ?? String(6 * Number(perCategory)), ...(state.incumbent ? ["--baseline", state.incumbent.eval] : [])], join(dir, "eval.log"));
   const evalPath = join(out, "eval.json");
   const e: Eval | undefined = existsSync(evalPath) ? JSON.parse(readFileSync(evalPath, "utf8")) : undefined;
   if (!e || e.transient) throw new Error(`evaluation did not finish: ${e?.reason ?? "no eval.json (see eval.log)"}`);
@@ -137,17 +142,9 @@ async function main() {
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => { child?.kill("SIGTERM"); releasePid(); process.exit(0); });
 
   const state: State = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { settings: {}, generations: [] };
-  // Every generation is compared with the incumbent on the same samples, so the sample set is fixed by the first start.
-  const fixed = { perCategory: state.settings.perCategory ?? "3", seed: state.settings.seed ?? "1" };
-  if (state.generations.length) {
-    for (const [key, flag] of [["perCategory", "per-category"], ["seed", "seed"]] as const)
-      if (opts[flag] !== undefined && opts[flag] !== fixed[key]) throw new Error(`--${flag} is fixed at ${fixed[key]} for ${root}; start a new --dir to change it`);
-  } else Object.assign(fixed, { perCategory: opts["per-category"] ?? fixed.perCategory, seed: opts.seed ?? fixed.seed });
-  opts["per-category"] = fixed.perCategory;
-  opts.seed = fixed.seed;
-  state.settings = { calls: opts.calls, perCategory: fixed.perCategory, seed: fixed.seed, delta: opts.delta, parallel: opts.parallel, generations: opts.generations };
+  state.settings = resolveSettings(state.settings, state.generations.length > 0, opts);
   const save = () => writeFileSync(statePath, JSON.stringify(state, null, 2));
-  const limit = opts.generations ? Number(opts.generations) : Infinity;
+  const limit = state.settings.generations ? Number(state.settings.generations) : Infinity;
   log(`loop started (pid ${process.pid}); incumbent ${state.incumbent ? `gen ${state.incumbent.gen}` : "none yet"}`);
 
   for (;;) {

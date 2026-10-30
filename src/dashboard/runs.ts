@@ -4,7 +4,10 @@ import { join, resolve } from "node:path";
 // Harness runs started from the dashboard. Each run is a child process of `src/index.ts` with its own --dir;
 // the harness state lives in that directory, so a stopped run resumes from the same state.
 
-export type RsiRequest = { calls?: number; generations?: number; perCategory?: number; parallel?: number; seed?: number; delta?: number };
+export type RsiRequest = {
+  purpose?: string; constraints?: string; mode?: string;
+  calls?: number; evalCalls?: number; generations?: number; perCategory?: number; parallel?: number; seed?: number; delta?: number;
+};
 
 export type RunRequest = {
   kind: "run" | "bench";
@@ -74,7 +77,7 @@ export function start(dir: string, request: RunRequest, resume: boolean) {
 export function startRsi(dir: string, r: RsiRequest) {
   if (runs.get(dir)?.endedAt === null) throw new Error(`${dir} is already running`);
   const args = ["--dir", dir];
-  for (const [flag, value] of [["--calls", r.calls], ["--generations", r.generations], ["--per-category", r.perCategory], ["--parallel", r.parallel]] as const) {
+  for (const [flag, value] of [["--calls", r.calls], ["--eval-calls", r.evalCalls], ["--generations", r.generations], ["--per-category", r.perCategory], ["--parallel", r.parallel]] as const) {
     const v = positive(value, flag.slice(2));
     if (v !== undefined) args.push(flag, v);
   }
@@ -85,6 +88,15 @@ export function startRsi(dir: string, r: RsiRequest) {
   if (r.delta !== undefined && r.delta !== null) {
     if (typeof r.delta !== "number" || !(r.delta >= 0 && r.delta <= 1)) throw new Error("delta must be between 0 and 1");
     args.push("--delta", String(r.delta));
+  }
+  // Left out, the loop keeps what the previous start used.
+  if (r.mode !== undefined && !["single", "fixed", "dynamic"].includes(r.mode)) throw new Error("mode must be single, fixed, or dynamic");
+  if (r.mode !== undefined) args.push("--mode", r.mode);
+  for (const [flag, value] of [["--purpose", r.purpose], ["--constraints", r.constraints]] as const) {
+    if (value === undefined) continue;
+    if (typeof value !== "string" || (flag === "--purpose" && !value.trim())) throw new Error(`${flag.slice(2)} must be a non-empty string`);
+    // The = form keeps a value that starts with "-" from being read as a flag.
+    args.push(`${flag}=${value.trim()}`);
   }
   return spawn(dir, "rsi", rsiEntry, args, "launcher.log");
 }

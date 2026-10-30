@@ -505,8 +505,12 @@ type Generation = {
 type EvalTotals = Row & { expected: number; judged: number; calls: number; judgeCalls: number; ms: number; byCategory: Record<string, { avg: number; count: number }> };
 type GenStats = Record<number, { improver: Row | null; eval: EvalTotals | null }>;
 type RsiInfo = {
-  dir: string; pid: number | null; lines: string[]; launcher: string[]; stats: GenStats;
+  dir: string; pid: number | null; lines: string[]; launcher: string[]; stats: GenStats; defaults: RsiForm;
   state: { incumbent?: { gen: number; commit: string }; settings: Row; generations: Generation[] } | null;
+};
+type RsiForm = {
+  purpose: string; constraints: string; mode: string; calls: string; evalCalls: string;
+  perCategory: string; seed: string; delta: string; parallel?: string; generations?: string;
 };
 type RsiGen = { gen: number; usage: Row[]; agents: Row[]; samples: Row[] };
 
@@ -678,9 +682,33 @@ function GenerationChart({ title, description, rows, field, format }: { title: s
   );
 }
 
+// While the loop runs its settings cannot change; they are shown as they were given to it.
+function RsiSettingsView({ settings: s }: { settings: Partial<RsiForm> }) {
+  const items: [string, string | undefined][] = [
+    ["改善役の組織", s.mode], ["改善の呼び出し上限", s.calls], ["解答の呼び出し上限", s.evalCalls], ["世代数", s.generations ?? "無制限"],
+    ["分類ごとの問題数", s.perCategory], ["種", s.seed], ["評価の並列数", s.parallel ?? "全問"], ["許容幅 δ", s.delta],
+  ];
+  return (
+    <div className="grid gap-3">
+      <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+        {items.map(([k, v]) => <div key={k}><dt className="text-xs text-muted-foreground">{k}</dt><dd className="tabular-nums">{v ?? "-"}</dd></div>)}
+      </dl>
+      <div className="grid gap-3 md:grid-cols-2">
+        {([["改善役への目的", s.purpose], ["制約", s.constraints]] as const).map(([k, v]) => (
+          <div key={k} className="grid gap-1"><div className="text-xs text-muted-foreground">{k}</div>
+            <pre className="max-h-48 overflow-auto rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap">{v ?? "（既定）"}</pre></div>
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">設定を変えるには、停止してから変更して再開します</p>
+    </div>
+  );
+}
+
 function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) => void }) {
   const info = usePoll<RsiInfo>("/api/rsi", 3000);
-  const [form, setForm] = useState({ calls: "150", generations: "", perCategory: "3", parallel: "", seed: "1", delta: "0.05" });
+  const [form, setForm] = useState<RsiForm>();
+  // The form starts from the previous start's settings, or the loop's defaults before the first start.
+  useEffect(() => { if (info && !form) setForm({ ...info.defaults, ...info.state?.settings, parallel: "", generations: "" } as RsiForm); }, [info, form]);
   const [error, setError] = useState<string>();
   // The tab is kept in the URL (#rsi/<tab>) so a view of the loop can be linked and reopened.
   const [tab, setTab] = useState(() => location.hash.match(/^#rsi\/(\w+)/)?.[1] ?? "overview");
@@ -689,11 +717,12 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
   const logRef = useRef<HTMLPreElement>(null);
   useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight); }, [info?.lines.length, tab]);
   const act = async (fn: () => Promise<unknown>) => { setError(undefined); try { await fn(); } catch (e) { setError(String((e as Error).message)); } };
-  if (!info) return <div className="text-muted-foreground">RSI の状態を読み込み中…</div>;
+  if (!info || !form) return <div className="text-muted-foreground">RSI の状態を読み込み中…</div>;
   const gens = info.state?.generations ?? [];
   const inc = info.state?.incumbent, incGen = gens.find(g => g.gen === inc?.gen);
   const current = gens.at(-1);
-  const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
+  const set = (k: keyof RsiForm) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
+  const started = gens.length > 0, settings = (info.state?.settings ?? {}) as Partial<RsiForm>;
   const sessionOf = (g: Generation) => `${info.dir}/gen-${g.gen}`;
   const phase: Record<string, string> = { improve: "改善中", evaluate: "評価中", done: "完了" };
   const curEval = current && info.stats[current.gen]?.eval;
@@ -714,26 +743,53 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
               採用中のハーネスが自分のソースの worktree を改善し、LoCoMo-Plus のサブセットで点数と1問あたりのピーク入力トークンを測ります。採用された候補が次の世代を動かします。状態は {info.dir} にあります
             </CardDescription>
           </div>
-          {info.pid ? (
-            <Button variant="destructive" onClick={() => act(() => post("/api/rsi/stop", {}))}>停止する</Button>
-          ) : (
-            <form className="flex flex-wrap items-end gap-3" onSubmit={e => {
+          {info.pid
+            ? <Button variant="destructive" onClick={() => act(() => post("/api/rsi/stop", {}))}>停止する</Button>
+            : <Button type="submit" form="rsi-form">{started ? "再開する" : "開始する"}</Button>}
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          {info.pid ? <RsiSettingsView settings={settings} /> : (
+            <form id="rsi-form" className="grid items-start gap-4 md:grid-cols-2" onSubmit={e => {
               e.preventDefault();
-              // The sample set is fixed by the first start; a resume keeps it.
-              const sample = gens.length ? {} : { perCategory: toInt(form.perCategory), seed: toInt(form.seed) };
-              act(() => post("/api/rsi/start", { calls: toInt(form.calls), generations: toInt(form.generations), parallel: toInt(form.parallel), ...sample, delta: form.delta.trim() ? Number(form.delta) : undefined }));
+              // The questions and per-question budget are fixed by the first start; a resume keeps them.
+              const sample = started ? {} : { perCategory: toInt(form.perCategory), seed: toInt(form.seed), evalCalls: toInt(form.evalCalls) };
+              act(() => post("/api/rsi/start", {
+                purpose: form.purpose, constraints: form.constraints, mode: form.mode, calls: toInt(form.calls), ...sample,
+                generations: toInt(form.generations ?? ""), parallel: toInt(form.parallel ?? ""), delta: form.delta.trim() ? Number(form.delta) : undefined,
+              }));
             }}>
-              <Field id="rsi-calls" label="改善の呼び出し上限" hint="1世代あたり"><Input id="rsi-calls" className="w-28" type="number" min={1} value={form.calls} onChange={set("calls")} /></Field>
-              <Field id="rsi-gens" label="世代数" hint="空欄で止めるまで"><Input id="rsi-gens" className="w-24" type="number" min={1} value={form.generations} onChange={set("generations")} placeholder="無制限" /></Field>
-              <Field id="rsi-per" label="分類ごとの問題数"><Input id="rsi-per" className="w-24" type="number" min={1} disabled={gens.length > 0} value={gens.length ? info.state!.settings.perCategory : form.perCategory} onChange={set("perCategory")} /></Field>
-              <Field id="rsi-seed" label="種"><Input id="rsi-seed" className="w-20" type="number" disabled={gens.length > 0} value={gens.length ? info.state!.settings.seed : form.seed} onChange={set("seed")} /></Field>
-              <Field id="rsi-parallel" label="評価の並列数" hint="空欄で全問同時"><Input id="rsi-parallel" className="w-24" type="number" min={1} value={form.parallel} onChange={set("parallel")} placeholder="全問" /></Field>
-              <Field id="rsi-delta" label="許容幅 δ"><Input id="rsi-delta" className="w-20" type="number" step="0.01" min={0} max={1} value={form.delta} onChange={set("delta")} /></Field>
-              <Button type="submit">{gens.length ? "再開する" : "開始する"}</Button>
+              <Field id="rsi-purpose" label="改善役への目的" hint="各世代で改善役（採用中のハーネスのセッション）に渡す最上位目的。新しく始まる世代から反映されます">
+                <Textarea id="rsi-purpose" required rows={8} className="font-mono text-xs" value={form.purpose} onChange={set("purpose")} />
+              </Field>
+              <Field id="rsi-constraints" label="制約" hint="改善役が守る条件。ベンチマークの答えを埋め込まない、などの安全上の条件を含みます">
+                <Textarea id="rsi-constraints" rows={8} className="font-mono text-xs" value={form.constraints} onChange={set("constraints")} />
+              </Field>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 md:col-span-2">
+                <Field id="rsi-mode" label="改善役の組織">
+                  <Select value={form.mode} onValueChange={v => setForm({ ...form, mode: v })}>
+                    <SelectTrigger id="rsi-mode"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="dynamic">dynamic</SelectItem>
+                      <SelectItem value="fixed">fixed</SelectItem>
+                      <SelectItem value="single">single</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field id="rsi-calls" label="改善の呼び出し上限" hint="1世代の改善でのモデル呼び出し（ステップ）数"><Input id="rsi-calls" type="number" min={1} required value={form.calls} onChange={set("calls")} /></Field>
+                <Field id="rsi-eval-calls" label="解答の呼び出し上限" hint={started ? "1問あたり。初回の開始で固定" : "評価の1問あたり"}><Input id="rsi-eval-calls" type="number" min={1} disabled={started} value={started ? settings.evalCalls ?? info.defaults.evalCalls : form.evalCalls} onChange={set("evalCalls")} /></Field>
+                <Field id="rsi-gens" label="世代数" hint="空欄で止めるまで"><Input id="rsi-gens" type="number" min={1} value={form.generations} onChange={set("generations")} placeholder="無制限" /></Field>
+                <Field id="rsi-per" label="分類ごとの問題数" hint={started ? "初回の開始で固定" : "6分類それぞれから"}><Input id="rsi-per" type="number" min={1} disabled={started} value={started ? settings.perCategory : form.perCategory} onChange={set("perCategory")} /></Field>
+                <Field id="rsi-seed" label="種" hint={started ? "初回の開始で固定" : "問題の選び方を決める乱数の種"}><Input id="rsi-seed" type="number" disabled={started} value={started ? settings.seed : form.seed} onChange={set("seed")} /></Field>
+                <Field id="rsi-parallel" label="評価の並列数" hint="空欄で全問同時"><Input id="rsi-parallel" type="number" min={1} value={form.parallel} onChange={set("parallel")} placeholder="全問" /></Field>
+                <Field id="rsi-delta" label="許容幅 δ" hint="点数の差がこれ以下なら同点として扱う"><Input id="rsi-delta" type="number" step="0.01" min={0} max={1} value={form.delta} onChange={set("delta")} /></Field>
+              </div>
+              <div className="md:col-span-2">
+                <Button type="button" variant="outline" size="sm" onClick={() => setForm({ ...form, purpose: info.defaults.purpose, constraints: info.defaults.constraints })}>目的と制約を既定に戻す</Button>
+              </div>
             </form>
           )}
-        </CardHeader>
-        {error && <CardContent><div className="text-sm text-destructive">{error}</div></CardContent>}
+          {error && <div className="text-sm text-destructive">{error}</div>}
+        </CardContent>
       </Card>
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-8">

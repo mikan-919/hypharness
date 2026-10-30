@@ -4,6 +4,7 @@ import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
 import type { Message } from "@earendil-works/pi-ai";
 import { render, safePath } from "../tools.ts";
+import { DEFAULTS } from "../../scripts/rsi-defaults.ts";
 import * as runs from "./runs.ts";
 import index from "./index.html";
 
@@ -128,7 +129,7 @@ async function rsi() {
   const expected = 6 * Number(state?.settings.perCategory ?? 3);
   const stats = Object.fromEntries(await Promise.all((state?.generations ?? []).map(async g =>
     [g.gen, { improver: improverTotals(genDir(g.gen)), eval: await evalTotals(genDir(g.gen), expected) }] as const)));
-  return { dir: rsiDir, pid: rsiPid(), state, stats, lines: await tail("rsi.log", 300), launcher: await tail("launcher.log", 40) };
+  return { dir: rsiDir, pid: rsiPid(), state, defaults: DEFAULTS, stats, lines: await tail("rsi.log", 300), launcher: await tail("launcher.log", 40) };
 }
 
 const genDir = (gen: number) => join(rsiDir, `gen-${gen}`);

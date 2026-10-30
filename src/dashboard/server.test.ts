@@ -94,9 +94,12 @@ test("the RSI view reads the loop's state and log, and per-question evaluation s
   const { proc, base, post } = await serve(dir);
   try {
     expect(((await (await fetch(`${base}/api/sessions`)).json()) as { id: string }[]).map(s => s.id)).toEqual([".hyph/rsi/gen-1"]);
-    const rsi = await (await fetch(`${base}/api/rsi`)).json() as { dir: string; pid: number | null; lines: string[]; state: { generations: unknown[] } };
+    const rsi = await (await fetch(`${base}/api/rsi`)).json() as { dir: string; pid: number | null; lines: string[]; state: { generations: unknown[] }; defaults: { calls: string } };
     expect([rsi.dir, rsi.pid, rsi.lines, rsi.state.generations.length]).toEqual([".hyph/rsi", null, ["loop started"], 1]);
+    expect(rsi.defaults.calls).toBe("150");
     expect((await post("/api/rsi/start", { delta: 2 })).status).toBe(400);
+    expect((await post("/api/rsi/start", { mode: "solo" })).status).toBe(400);
+    expect((await post("/api/rsi/start", { purpose: " " })).status).toBe(400);
     expect((await post("/api/rsi/stop", {})).status).toBe(400);
   } finally {
     proc.kill();
