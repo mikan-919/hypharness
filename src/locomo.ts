@@ -460,7 +460,7 @@ export async function runLocomo(llm: Llm, judgeLlm: Llm, opts: BenchOptions) {
     source: { ...SOURCE, sha256 }, model: llm.model.id, judgeModel: judgeLlm.model.id, arms: opts.arms, categories: opts.categories ?? CATEGORIES,
     perCategory: opts.perCategory, seed: opts.seed, harnessCallsPerSample: opts.calls, sampleIds: samples.map(s => s.id),
     notes: [
-      "Scores: correct=1, partial=0.5, wrong=0 per the reference judge. The paper judged with gpt-4o-mini; scores from another judge model are not directly comparable.",
+      "Scores: correct=1, partial=0.5, wrong=0 per the reference judge. The paper does not state the judge model for its main results (its human-agreement study used gemini-2.5-flash; the repository example uses gpt-4o-mini), so scores from another judge model are not directly comparable.",
       "Temperatures 0.3 (prediction) and 0 (judge) are requested as in the reference; pi-ai omits temperature when signed in with ChatGPT.",
       "Harness arms read the same conversation split into files under the tool read limit; they answer through answer.txt.",
     ],
