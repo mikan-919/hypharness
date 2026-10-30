@@ -4,7 +4,7 @@
 
 ## 使い方
 
-`auth.json` に ChatGPT の認証情報がある状態で、目的を渡して起動します。モデルは `OPENAI_MODEL`（既定値 `gpt-6-sol`）、推論の強さは `REASONING`（既定値 `medium`）で指定します。Web 検索を使わせる場合は、Parallel の API キーを環境変数 `PARALLEL_API_KEY` に設定します（Bun は `.env` を自動で読み込みます）。設定すると、エージェントは `web_search` ツールで Parallel Search API（`https://api.parallel.ai/v1/search`）に検索語を送り、関連順の URL と抜粋を受け取ります。キーがない起動では、このツールはモデルに渡す道具の一覧から外れます。
+`auth.json` に ChatGPT の認証情報がある状態で、目的を渡して起動します。モデルは `OPENAI_MODEL`（既定値 `gpt-6-sol`）、推論の強さは `REASONING`（既定値 `medium`）で指定します。Web 検索を使わせる場合は、Parallel の API キーを環境変数 `PARALLEL_API_KEY` に設定します（`.env.example` を `.env` に写して書き込むと、プロジェクト直下で実行したときに Bun が自動で読み込みます）。設定すると、エージェントは `web_search` ツールで Parallel Search API（`https://api.parallel.ai/v1/search`）に検索語を送り、関連順の URL と抜粋を受け取ります。キーがない起動では、このツールはモデルに渡す道具の一覧から外れます。
 
 ```bash
 bun install
