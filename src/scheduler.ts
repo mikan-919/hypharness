@@ -1,18 +1,10 @@
 import { BudgetExhausted, runEpisode, type Runtime } from "./agent.ts";
 import type { Agent, Goal, Store, Task } from "./db.ts";
 import { mirror } from "./tools.ts";
+import { scan } from "./triggers.ts";
 
-// Any open goal with nothing pending goes back to its owner to decide the next step (plan, act, refine, drop, or submit).
-export function steer(store: Store) {
-  for (const g of store.all<Goal>("select * from goals where status = 'open'")) {
-    const busy = store.get("select 1 from goals where parent = ?1 and status in ('open', 'review') union all select 1 from tasks where goal = ?1 and status in ('open', 'claimed', 'review')", g.id);
-    if (busy) continue;
-    store.addTask({
-      goal: g.id, kind: "steer", author: "host", assignee: g.owner,
-      description: `Goal ${g.id} has no pending work.\nGoal: ${g.description}${g.feedback ? `\nIts last submission was rejected: ${g.feedback}` : ""}\nDecide the next step: do the work yourself, create tasks or subgoals, refine or drop the goal, or submit it with goal_complete.`,
-    });
-  }
-}
+// State triggers (src/triggers.ts), such as an idle goal going back to its owner.
+export const steer = scan;
 
 function claimable(store: Store, agent: Agent) {
   const candidates = store.all<Task>(
@@ -67,7 +59,7 @@ export async function runScheduler(rt: Runtime, maxRounds = Infinity): Promise<R
   let round = 0, failedRounds = 0;
   for (; round < maxRounds; round++) {
     store.reclaimExpired();
-    steer(store);
+    scan(store);
     if (store.goal("G0")!.status === "done") return report(store, "done", round, Date.now() - started);
     if (Number(store.meta("model_calls")) >= store.config.maxModelCalls) return report(store, "budget", round, Date.now() - started);
 

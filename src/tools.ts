@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "node
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { StringEnum, Type, type Message, type Static, type TSchema, type Tool } from "@earendil-works/pi-ai";
 import type { Agent, Goal, Store, Task } from "./db.ts";
+import { emit, requestVerification } from "./triggers.ts";
 
 // messages is the caller's live context for the current episode; context_edit changes it in place.
 export type ToolContext = { store: Store; agent: Agent; task: Task; workspace: string; contextDir: string; episode: string; messages: Message[] };
@@ -37,10 +38,6 @@ function dynamicOnly(store: Store) {
   if (store.config.organization !== "dynamic") fail(`Agent composition is fixed in ${store.config.organization} mode`);
 }
 
-// The verifier is always a different agent, except in single-agent mode where it is recorded as self-verification.
-export function requestVerification(store: Store, goal: string, author: string, target: string, description: string) {
-  return store.addTask({ goal, kind: "verify", author, exclude: store.config.maxAgents > 1 ? author : null, target, description });
-}
 
 function applyVerdict(store: Store, verifier: string, target: string, pass: boolean, reason: string) {
   if (target.startsWith("T-")) {
@@ -220,7 +217,7 @@ export const tools: Record<string, Def<TSchema>> = {
       if (pending.length) fail(`Pending tasks: ${pending.map(t => t.id).join(", ")}`);
       c.store.tx(() => {
         c.store.run("update goals set status = 'review', deliverable = ?, rev = rev + 1 where id = ?", a.deliverable, goal.id);
-        requestVerification(c.store, goal.id, c.agent.id, goal.id, `Verify that goal ${goal.id} is achieved.\nGoal: ${goal.description}\nClaimed deliverable: ${a.deliverable}\nInspect the actual artifacts; do not trust the claim.`);
+        emit(c.store, c.agent.id, "goal_submitted", { goal: goal.id, deliverable: a.deliverable });
       });
       return `Goal ${goal.id} submitted for verification`;
     },
@@ -280,7 +277,7 @@ export const tools: Record<string, Def<TSchema>> = {
           c.store.log(c.agent.id, "verified", { target: task.target, verdict: a.verdict, self: task.author === c.agent.id });
         } else if (task.kind === "work") {
           c.store.run("update tasks set status = 'review', result = ?, rev = rev + 1 where id = ?", a.result, task.id);
-          requestVerification(c.store, task.goal, c.agent.id, task.id, `Verify task ${task.id}.\nTask: ${task.description}\nClaimed result: ${a.result}\nInspect the actual artifacts; do not trust the claim.`);
+          emit(c.store, c.agent.id, "work_submitted", { task: task.id, result: a.result });
         } else {
           // A steer task exists because its goal had nothing pending; finishing it without a decision would only recreate it.
           const goal = c.store.goal(task.goal)!;
