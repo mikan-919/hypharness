@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "node
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { StringEnum, Type, type Message, type Static, type TSchema, type Tool } from "@earendil-works/pi-ai";
 import type { Agent, Goal, Store, Task } from "./db.ts";
+import { emit, MAX_DECLINES, requestVerification } from "./triggers.ts";
 
 // messages is the caller's live context for the current episode; context_edit changes it in place.
 export type ToolContext = { store: Store; agent: Agent; task: Task; workspace: string; contextDir: string; episode: string; messages: Message[] };
@@ -33,14 +34,17 @@ function requireSteward(store: Store, id: string, agent: Agent) {
   return domain;
 }
 
-function dynamicOnly(store: Store) {
-  if (store.config.organization !== "dynamic") fail(`Agent composition is fixed in ${store.config.organization} mode`);
+function requireInvest(c: ToolContext, goal: string) {
+  const task = requireCurrent(c);
+  if (task.kind !== "invest" || task.target !== goal) fail(`Your current task ${task.id} is not the invest task for ${goal}`);
+  if (c.store.goal(goal)?.status !== "open") fail(`Goal ${goal} is not open`);
+  return task;
 }
 
-// The verifier is always a different agent, except in single-agent mode where it is recorded as self-verification.
-export function requestVerification(store: Store, goal: string, author: string, target: string, description: string) {
-  return store.addTask({ goal, kind: "verify", author, exclude: store.config.maxAgents > 1 ? author : null, target, description });
+function dynamicOnly(store: Store) {
+  if (store.config.organization !== "dynamic" && store.config.organization !== "market") fail(`Agent composition is fixed in ${store.config.organization} mode`);
 }
+
 
 function applyVerdict(store: Store, verifier: string, target: string, pass: boolean, reason: string) {
   if (target.startsWith("T-")) {
@@ -64,6 +68,11 @@ export function safePath(workspace: string, path: string) {
   for (const p of [full, real]) if (p !== root && !p.startsWith(root + sep)) fail(`Path ${path} is outside the workspace`);
   return full;
 }
+
+// Words of a query. Text without spaces (Japanese, Chinese) is matched by its overlapping character pairs.
+const CJK = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/;
+export const searchTerms = (query: string) => query.toLowerCase().replace(/[、。，．！？!?,.「」『』（）()"']/g, " ").split(/\s+/).filter(Boolean)
+  .flatMap(w => CJK.test(w) && w.length > 2 ? Array.from({ length: w.length - 1 }, (_, i) => w.slice(i, i + 2)) : [w]);
 
 const line = (t: Task) => `${t.id} [${t.kind}/${t.status}] goal=${t.goal}${t.assignee ? ` assignee=${t.assignee}` : ""}${t.claimed_by ? ` by=${t.claimed_by}` : ""}: ${t.description.slice(0, 160)}`;
 
@@ -174,7 +183,7 @@ export const tools: Record<string, Def<TSchema>> = {
       if (parent.status !== "open") fail(`Goal ${parent.id} is ${parent.status}`);
       const id = c.store.id("G");
       c.store.run("insert into goals(id, parent, description, status, owner, created_at) values(?, ?, ?, 'open', ?, ?)", id, a.parent, a.description, c.agent.id, Date.now());
-      c.store.log(c.agent.id, "goal_created", { id, parent: a.parent });
+      emit(c.store, c.agent.id, "goal_created", { id, parent: a.parent });
       return `Created goal ${id}`;
     },
   }),
@@ -220,9 +229,35 @@ export const tools: Record<string, Def<TSchema>> = {
       if (pending.length) fail(`Pending tasks: ${pending.map(t => t.id).join(", ")}`);
       c.store.tx(() => {
         c.store.run("update goals set status = 'review', deliverable = ?, rev = rev + 1 where id = ?", a.deliverable, goal.id);
-        requestVerification(c.store, goal.id, c.agent.id, goal.id, `Verify that goal ${goal.id} is achieved.\nGoal: ${goal.description}\nClaimed deliverable: ${a.deliverable}\nInspect the actual artifacts; do not trust the claim.`);
+        emit(c.store, c.agent.id, "goal_submitted", { goal: goal.id, deliverable: a.deliverable });
       });
       return `Goal ${goal.id} submitted for verification`;
+    },
+  }),
+
+  // --- Market: the investor's decisions (src/triggers.ts) ---
+  goal_fund: def({
+    description: "Fund the goal of your current invest task with a model-call budget. A worker then does it within that budget; when the budget is spent the goal comes back to you.",
+    parameters: Type.Object({ goal: Str("Goal ID of your invest task"), budget: Type.Integer({ minimum: 1, maximum: 200, description: "Model calls the work may use in total" }), rationale: Str("Why it should pay back, and what you expect") }),
+    run(c, a) {
+      const task = requireInvest(c, a.goal);
+      c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `funded ${a.budget}: ${a.rationale}`, task.id);
+      emit(c.store, c.agent.id, "goal_funded", { goal: a.goal, budget: a.budget, rationale: a.rationale });
+      return `Funded ${a.goal} with ${a.budget} model calls`;
+    },
+  }),
+  goal_decline: def({
+    description: `Decline the goal of your current invest task; it is dropped and its owner decides again. At most ${MAX_DECLINES} subgoals of the same goal can be declined.`,
+    parameters: Type.Object({ goal: Str("Goal ID of your invest task"), reason: Str("Why it is not worth funding") }),
+    run(c, a) {
+      const task = requireInvest(c, a.goal), goal = c.store.goal(a.goal)!;
+      const declined = c.store.get<{ n: number }>("select count(*) n from goals where parent = ? and feedback like 'declined%'", goal.parent)!.n;
+      if (declined >= MAX_DECLINES) fail(`${declined} subgoals of ${goal.parent} were already declined; fund this one with a small budget instead`);
+      c.store.run("update goals set status = 'dropped', feedback = ?, rev = rev + 1 where id = ?", `declined: ${a.reason}`, goal.id);
+      c.store.run("update tasks set status = 'failed', feedback = 'goal declined' where goal = ? and status = 'open'", goal.id);
+      c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `declined: ${a.reason}`, task.id);
+      emit(c.store, c.agent.id, "goal_declined", { goal: goal.id, reason: a.reason });
+      return `Declined ${goal.id}`;
     },
   }),
 
@@ -273,14 +308,27 @@ export const tools: Record<string, Def<TSchema>> = {
     run(c, a) {
       const task = requireCurrent(c);
       c.store.tx(() => {
-        if (task.kind === "verify") {
+        if (task.kind === "invest") fail("Decide an invest task with goal_fund or goal_decline");
+        if (task.kind === "organize") {
+          c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", a.result, task.id);
+          c.store.setMeta(`organized:${task.target}`, String(c.store.get<{ n: number }>("select count(*) n from domain_knowledge where domain = ?", task.target)!.n));
+        } else if (task.kind === "critique" || task.kind === "judge") {
+          if (!a.verdict) fail(`${task.kind} tasks need a verdict`);
+          c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `${a.verdict}: ${a.result}`, task.id);
+          // A critique that passes, and every ruling, decides the work; objections go to the evaluator first.
+          if (task.kind === "critique" && a.verdict === "fail") emit(c.store, c.agent.id, "objections_raised", { critique: task.id, target: task.target, objections: a.result });
+          else {
+            applyVerdict(c.store, c.agent.id, task.target!, a.verdict === "pass", a.result);
+            c.store.log(c.agent.id, "verified", { target: task.target, verdict: a.verdict, by: task.kind });
+          }
+        } else if (task.kind === "verify") {
           if (!a.verdict) fail("Verify tasks need a verdict");
           applyVerdict(c.store, c.agent.id, task.target!, a.verdict === "pass", a.result);
           c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `${a.verdict}: ${a.result}`, task.id);
           c.store.log(c.agent.id, "verified", { target: task.target, verdict: a.verdict, self: task.author === c.agent.id });
         } else if (task.kind === "work") {
           c.store.run("update tasks set status = 'review', result = ?, rev = rev + 1 where id = ?", a.result, task.id);
-          requestVerification(c.store, task.goal, c.agent.id, task.id, `Verify task ${task.id}.\nTask: ${task.description}\nClaimed result: ${a.result}\nInspect the actual artifacts; do not trust the claim.`);
+          emit(c.store, c.agent.id, "work_submitted", { task: task.id, result: a.result });
         } else {
           // A steer task exists because its goal had nothing pending; finishing it without a decision would only recreate it.
           const goal = c.store.goal(task.goal)!;
@@ -323,13 +371,17 @@ export const tools: Record<string, Def<TSchema>> = {
     description: "Search knowledge; returns gists only. Expand with knowledge_get.",
     parameters: Type.Object({ query: Str("Words to match"), domain: Opt(Type.String()), status: Opt(StringEnum(["hypothesis", "verified", "rejected"])) }),
     run(c, a) {
-      const words = a.query.toLowerCase().split(/\s+/).filter(Boolean);
+      const words = searchTerms(a.query);
       const rows = c.store.all<{ id: string; gist: string; summary: string; status: string }>(
         "select k.* from knowledge k where (?1 is null or k.id in (select knowledge from domain_knowledge where domain = ?1)) and (?2 is null or k.status = ?2)",
         a.domain ?? null, a.status ?? null);
+      // A match in the gist counts double: items that share a summary (sentences of one turn) then rank by their own words,
+      // and only the best of them is listed, so one long turn cannot fill the results.
       // ponytail: linear scan with word counting; switch to SQLite FTS5 when knowledge grows past a few thousand rows
-      return rows.map(k => ({ k, score: words.filter(w => `${k.gist} ${k.summary}`.toLowerCase().includes(w)).length }))
-        .filter(r => r.score > 0 || !words.length).sort((x, y) => y.score - x.score).slice(0, 12)
+      const shown = new Set<string>();
+      return rows.map(k => ({ k, score: words.reduce((n, w) => n + (k.gist.toLowerCase().includes(w) ? 2 : 0) + (k.summary.toLowerCase().includes(w) ? 1 : 0), 0) }))
+        .filter(r => r.score > 0 || !words.length).sort((x, y) => y.score - x.score)
+        .filter(({ k }) => !shown.has(k.summary) && shown.add(k.summary)).slice(0, 12)
         .map(({ k }) => `${k.id} [${k.status}] ${k.gist}`).join("\n") || "No matches";
     },
   }),
@@ -435,9 +487,23 @@ export const tools: Record<string, Def<TSchema>> = {
     run(c, a) {
       requireSteward(c.store, a.id, c.agent);
       c.store.agent(a.to) ?? fail(`Unknown agent ${a.to}`);
-      c.store.run("update domains set steward = ?, rev = rev + 1 where id = ? and steward = ?", a.to, a.id, c.agent.id);
-      c.store.log(c.agent.id, "domain_transferred", { id: a.id, to: a.to });
+      c.store.tx(() => {
+        c.store.run("update domains set steward = ?, rev = rev + 1 where id = ? and steward = ?", a.to, a.id, c.agent.id);
+        emit(c.store, c.agent.id, "domain_transferred", { id: a.id, to: a.to });
+      });
       return `Domain ${a.id} now stewarded by ${a.to}`;
+    },
+  }),
+
+  domain_request: def({
+    description: "Ask the steward of another domain to transfer it to you, for example to merge it with a domain you steward. Its steward decides.",
+    parameters: Type.Object({ domain: Str("Domain ID"), reason: Str("What you would do with it and why that helps retrieval") }),
+    run(c, a) {
+      const d = c.store.get<{ steward: string; status: string }>("select steward, status from domains where id = ?", a.domain) ?? fail(`Unknown domain ${a.domain}`);
+      if (d.status !== "active") fail(`Domain ${a.domain} is ${d.status}`);
+      if (d.steward === c.agent.id) fail(`You already steward ${a.domain}`);
+      emit(c.store, c.agent.id, "transfer_requested", { domain: a.domain, steward: d.steward, reason: a.reason });
+      return `Asked ${d.steward} to transfer ${a.domain}`;
     },
   }),
 

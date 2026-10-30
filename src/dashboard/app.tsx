@@ -17,7 +17,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 type Row = Record<string, any>;
 type Session = { id: string; purpose: string; mode: string; modelCalls: number; rootStatus: string; lastAt: number | null };
 type Overview = {
-  purpose: string; constraints: string; config: Row; modelCalls: number; totals: Row;
+  purpose: string; constraints: string; config: Row; modelCalls: number; totals: Row; organization?: { leadShare: number; agents: number; maxDomainsPerSteward: number };
   agents: Row[]; goals: Row[]; tasks: Row[]; knowledge: Row[]; domains: Row[]; usage: Row[]; log: Row[];
 };
 type AgentDetail = { memory: { memory: string; version: number }; episodes: Row[]; history: Row[]; live: { episode: string; text: string } | null };
@@ -213,14 +213,15 @@ function NewRun({ onStarted, onClose }: { onStarted: (dir: string) => void; onCl
           <Field id="purpose" label="最上位目的"><Textarea id="purpose" required rows={3} value={form.purpose} onChange={set("purpose")} placeholder="例: CSV を集計する CLI を書き、テストを通す" /></Field>
           <Field id="constraints" label="制約" hint="任意"><Textarea id="constraints" rows={3} value={form.constraints} onChange={set("constraints")} placeholder="例: TypeScript のみ、外部パッケージを使わない" /></Field>
           <Field id="name" label="セッション名" hint="小文字・数字・- と _（.hyph/<名前> に保存）"><Input id="name" required pattern="[a-z0-9][a-z0-9_\-]{0,39}" value={form.name} onChange={set("name")} placeholder="csv-cli" /></Field>
-          <Field id="mode" label="組織" hint="bench は single・fixed・dynamic を同じ条件で順に実行して比較します">
+          <Field id="mode" label="組織" hint="bench は single・fixed・dynamic・market を同じ条件で順に実行して比較します">
             <Select value={form.mode} onValueChange={v => setForm({ ...form, mode: v })}>
               <SelectTrigger id="mode"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="dynamic">dynamic（エージェントが増減を判断）</SelectItem>
+                <SelectItem value="market">market（分割・出資・作業・批判をイベントで回す）</SelectItem>
                 <SelectItem value="fixed">fixed（3体で固定）</SelectItem>
                 <SelectItem value="single">single（1体）</SelectItem>
-                <SelectItem value="bench">bench（3方式を比較）</SelectItem>
+                <SelectItem value="bench">bench（4方式を比較）</SelectItem>
               </SelectContent>
             </Select>
           </Field>
@@ -361,7 +362,7 @@ function Dashboard({ session }: { session: string }) {
         <Kpi label="キャッシュ読み取り" value={pct(t.cacheRead, promptTokens(t))} note={`${num.format(t.cacheRead)} トークン`} />
         <Kpi label="最大入力トークン" value={num.format(t.maxPromptTokens)} note="1回の呼び出しの入力（キャッシュ分を含む）" />
         <Kpi label="モデル待ち時間" value={`${num.format(Math.round(t.ms / 1000))} 秒`} />
-        <Kpi label="エージェント" value={`${o.agents.filter(a => a.status === "active").length} / ${o.agents.length}`} note="稼働 / 全体" />
+        <Kpi label="エージェント" value={`${o.agents.filter(a => a.status === "active").length} / ${o.agents.length}`} note={o.organization ? `稼働 / 全体・lead の呼び出し ${Math.round(o.organization.leadShare * 100)}%` : "稼働 / 全体"} />
         <Kpi label="作業タスク" value={`${work.filter(x => x.status === "done").length} / ${work.length}`} note="検証済み / 全体" />
       </div>
 
@@ -373,6 +374,7 @@ function Dashboard({ session }: { session: string }) {
           <TabsTrigger value="tasks">タスク</TabsTrigger>
           <TabsTrigger value="goals">目標</TabsTrigger>
           <TabsTrigger value="knowledge">知識・領域</TabsTrigger>
+          <TabsTrigger value="diagnostics">診断</TabsTrigger>
           <TabsTrigger value="log">ログ</TabsTrigger>
         </TabsList>
 
@@ -480,6 +482,7 @@ function Dashboard({ session }: { session: string }) {
         </TabsContent>
 
         <TabsContent value="files"><Files session={session} /></TabsContent>
+        <TabsContent value="diagnostics"><SessionDiagnostics session={session} /></TabsContent>
 
         <TabsContent value="log">
           <Card>
@@ -499,14 +502,21 @@ function Dashboard({ session }: { session: string }) {
 
 type Generation = {
   gen: number; base: number | null; phase: string; startedAt: number; endedAt?: number; commit?: string; status?: string; note?: string;
-  eval?: { ok: boolean; score?: number; reason?: string; context?: { calls: number; maxTokens: number; meanTokens: number; meanPeakTokens: number } };
+  eval?: { ok: boolean; score?: number; reason?: string; context?: { calls: number; maxTokens: number; meanTokens: number; meanPeakTokens: number }; organization?: { leadShare: number; agents: number; maxDomainsPerSteward: number } };
   accepted?: boolean; reason?: string; error?: string;
+  grant?: { direction: string; rationale: string; expected: string; calls: number }; direction?: string; spent?: number;
+  review?: { objections: { claim: string; evidence: string; upheld?: boolean; ruling?: string }[]; veto: boolean; reason: string };
+  judgeCalls?: number;
 };
 type EvalTotals = Row & { expected: number; judged: number; calls: number; judgeCalls: number; ms: number; byCategory: Record<string, { avg: number; count: number }> };
 type GenStats = Record<number, { improver: Row | null; eval: EvalTotals | null }>;
 type RsiInfo = {
-  dir: string; pid: number | null; lines: string[]; launcher: string[]; stats: GenStats;
+  dir: string; pid: number | null; lines: string[]; launcher: string[]; stats: GenStats; defaults: RsiForm;
   state: { incumbent?: { gen: number; commit: string }; settings: Row; generations: Generation[] } | null;
+};
+type RsiForm = {
+  purpose: string; constraints: string; mode: string; arm: string; judges: string; calls: string; evalCalls: string;
+  perCategory: string; seed: string; delta: string; parallel?: string; generations?: string;
 };
 type RsiGen = { gen: number; usage: Row[]; agents: Row[]; samples: Row[] };
 
@@ -582,10 +592,89 @@ function RsiTelemetry({ gens, stats }: { gens: Generation[]; stats: GenStats }) 
 }
 
 // One generation against the harness it was built on: by category, by question, and the improver's calls.
+type Diagnosis = {
+  tools: { tool: string; calls: number; errors: number; meanChars: number; questions: number }[]; unused: string[];
+  errors: { sample: string; tool: string; error: string }[]; empty: { sample: string; tool: string; args: string }[];
+  repeats: { sample: string; task: string; times: number; call: string }[];
+  outcomes: Record<string, number>; nudged: number; episodes: number; contextEdits: number; memoryWrites: number;
+  questions: { sample: string; score?: number; agents: number; episodes: number; calls: number; peak: number; contextEdits: number; memoryWrites: number; memoryChars: number }[];
+};
+
+// What scripts/rsi-traces.ts gives the RSI improver: how tools were used and how agents managed their context.
+function Diagnostics({ d, sample, onSample, trace }: { d: Diagnosis; sample?: string; onSample?: (s: string) => void; trace?: string }) {
+  const problems = [
+    ...d.errors.map((e, i) => ({ id: `e${i}`, kind: "エラー", sample: e.sample, detail: `${e.tool}: ${e.error}` })),
+    ...d.empty.map((e, i) => ({ id: `n${i}`, kind: "空振り", sample: e.sample, detail: `${e.tool} ${e.args}` })),
+    ...d.repeats.map((r, i) => ({ id: `r${i}`, kind: `繰り返し ${r.times} 回`, sample: r.sample, detail: r.call })),
+  ];
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Card>
+          <CardHeader><CardTitle>ツールの使い方</CardTitle><CardDescription>一度も呼ばれなかったツール（役によって使えないものを含む）: {d.unused.join(", ") || "なし"}</CardDescription></CardHeader>
+          <CardContent>
+            <DataTable rows={d.tools.map(t => ({ ...t, id: t.tool }))} empty="呼び出しがありません" columns={[
+              { key: "tool", label: "ツール" },
+              { key: "calls", label: "回数", className: "text-right tabular-nums" },
+              { key: "errors", label: "エラー", className: "text-right tabular-nums" },
+              { key: "meanChars", label: "結果の平均文字数", render: r => num.format(r.meanChars), className: "text-right tabular-nums" },
+              { key: "questions", label: "使った問題", className: "text-right tabular-nums" },
+            ]} />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>コンテキストの扱い（CLM）</CardTitle>
+            <CardDescription>
+              エピソードの終わり方: {Object.entries(d.outcomes).map(([k, v]) => `${k} ${v}`).join("・") || "-"}。続行を促されたエピソード {d.nudged} / {d.episodes}。context_edit {d.contextEdits} 回、作業メモの更新 {d.memoryWrites} 回。{onSample && "行を選ぶと呼び出しの記録を表示します"}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <DataTable rows={d.questions.map(q => ({ ...q, id: q.sample }))} selected={sample} onSelect={onSample && (r => onSample(r.sample))} empty="記録がありません" columns={[
+              { key: "sample", label: "問題", render: r => <Clip text={r.sample} width="max-w-[14rem]" /> },
+              { key: "score", label: "点", render: r => r.score ?? "-", className: "text-right tabular-nums" },
+              { key: "calls", label: "呼出", className: "text-right tabular-nums" },
+              { key: "peak", label: "ピーク", render: r => num.format(r.peak), className: "text-right tabular-nums" },
+              { key: "contextEdits", label: "context_edit", className: "text-right tabular-nums" },
+              { key: "memoryWrites", label: "メモ更新", className: "text-right tabular-nums" },
+              { key: "memoryChars", label: "メモ文字数", render: r => num.format(r.memoryChars), className: "text-right tabular-nums" },
+            ]} />
+          </CardContent>
+        </Card>
+      </div>
+      <Card>
+        <CardHeader><CardTitle>問題のある呼び出し</CardTitle><CardDescription>エラー、何も見つからなかった検索、同じエピソードで同じ引数の呼び出しの繰り返し</CardDescription></CardHeader>
+        <CardContent>
+          <DataTable rows={problems} empty="見つかりません" columns={[
+            { key: "kind", label: "種類" },
+            { key: "sample", label: "問題", render: r => <Clip text={r.sample} width="max-w-[14rem]" /> },
+            { key: "detail", label: "内容", render: r => <Clip text={r.detail} width="max-w-xl" /> },
+          ]} />
+        </CardContent>
+      </Card>
+      {trace && (
+        <Card>
+          <CardHeader><CardTitle>呼び出しの記録</CardTitle><CardDescription>各エピソードのツール呼び出しを順に並べたもの（[ ] はその時点の入力トークン）。改善役に渡す trace.md と同じ内容です</CardDescription></CardHeader>
+          <CardContent><pre className="max-h-[32rem] overflow-auto rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap">{trace}</pre></CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function SessionDiagnostics({ session }: { session: string }) {
+  const d = usePoll<Diagnosis & { trace: string }>(`/api/diagnostics?s=${enc(session)}`, 10_000);
+  if (!d) return <div className="text-muted-foreground">診断を読み込み中…</div>;
+  return <Diagnostics d={d} trace={d.trace} />;
+}
+
 function RsiDetail({ gens, gen, onGen, stats }: { gens: Generation[]; gen?: number; onGen: (g: number) => void; stats: GenStats }) {
   const g = gens.find(x => x.gen === gen);
   const detail = usePoll<RsiGen>(g ? `/api/rsi/gen?n=${g.gen}` : null, 5000);
   const base = usePoll<RsiGen>(g && g.base !== null ? `/api/rsi/gen?n=${g.base}` : null, 60_000);
+  const diag = usePoll<Diagnosis>(g ? `/api/rsi/diagnostics?n=${g.gen}` : null, 15_000);
+  const [sample, setSample] = useState<string>();
+  const trace = usePoll<{ text: string }>(g && sample ? `/api/rsi/trace?n=${g.gen}&sample=${enc(sample)}` : null, 30_000);
   if (!g) return <div className="text-muted-foreground">まだ世代がありません</div>;
   const cats = stats[g.gen]?.eval?.byCategory ?? {}, baseCats = g.base !== null ? stats[g.base]?.eval?.byCategory ?? {} : {};
   const baseById = new Map((base?.samples ?? []).map(s => [s.id, s]));
@@ -603,6 +692,34 @@ function RsiDetail({ gens, gen, onGen, stats }: { gens: Generation[]; gen?: numb
         </Select>
         <span className="text-sm text-muted-foreground">{g.base === null ? "ベースライン" : `世代 ${g.base} と比較`}・{g.reason ?? g.error ?? "評価前"}</span>
       </div>
+      {(g.grant || g.review) && (
+        <Card>
+          <CardHeader><CardTitle>投資と審査</CardTitle><CardDescription>改善の前に投資家役が決めた方向と予算、評価の後に批判役が出した異議と評価役の裁定</CardDescription></CardHeader>
+          <CardContent className="grid gap-3 text-sm">
+            {g.grant && (
+              <div className="grid gap-1">
+                <div><span className="text-muted-foreground">方向: </span>{g.grant.direction}</div>
+                <div><span className="text-muted-foreground">理由: </span>{g.grant.rationale || "-"}</div>
+                <div><span className="text-muted-foreground">予測: </span>{g.grant.expected || "-"}</div>
+                <div><span className="text-muted-foreground">予算: </span>{num.format(g.grant.calls)} 回{g.spent !== undefined && `（使った呼び出し: 改善・評価・投資と審査で ${num.format(g.spent)} 回、うち投資と審査 ${num.format(g.judgeCalls ?? 0)} 回）`}</div>
+                {g.direction && <div><span className="text-muted-foreground">変更したファイル: </span>{g.direction}</div>}
+              </div>
+            )}
+            {g.review && (
+              <div className="grid gap-2">
+                <div><span className="text-muted-foreground">審査: </span>{g.review.veto ? "却下" : "通過"}・{g.review.reason}</div>
+                {g.review.objections.map((o, i) => (
+                  <div key={i} className="rounded-md border p-2">
+                    <div className="flex items-center gap-2"><Badge variant={o.upheld ? "destructive" : "outline"}>{o.upheld === true ? "認める" : o.upheld === false ? "退ける" : "裁定なし"}</Badge><span>{o.claim}</span></div>
+                    <div className="text-xs text-muted-foreground">根拠: {o.evidence}</div>
+                    {o.ruling && <div className="text-xs">裁定: {o.ruling}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
       {g.note && (
         <Card>
           <CardHeader><CardTitle>改善役のメモ</CardTitle><CardDescription>変更内容と予測（rsi-traces/note.md）</CardDescription></CardHeader>
@@ -635,6 +752,8 @@ function RsiDetail({ gens, gen, onGen, stats }: { gens: Generation[]; gen?: numb
             { key: "baseScoreText", label: "比較元", className: "text-right tabular-nums" },
             { key: "scoreDiff", label: "差", render: r => signed(r.scoreDiff, v => String(v)), className: "text-right tabular-nums" },
             { key: "peakTokens", label: "ピーク", render: r => num.format(r.peakTokens), className: "text-right tabular-nums" },
+            { key: "leadShare", label: "lead 比率", render: r => r.leadShare === undefined ? "-" : `${Math.round(r.leadShare * 100)}%`, className: "text-right tabular-nums" },
+            { key: "agents", label: "エージェント", render: r => r.agents ?? "-", className: "text-right tabular-nums" },
             { key: "peakDiff", label: "ピーク差", render: r => signed(r.peakDiff, v => num.format(v)), className: "text-right tabular-nums" },
             { key: "meanTokens", label: "平均入力", render: r => num.format(r.meanTokens), className: "text-right tabular-nums" },
             { key: "calls", label: "呼出", className: "text-right tabular-nums" },
@@ -643,6 +762,7 @@ function RsiDetail({ gens, gen, onGen, stats }: { gens: Generation[]; gen?: numb
           ]} />
         </CardContent>
       </Card>
+      {diag && <Diagnostics d={diag} sample={sample} onSample={setSample} trace={trace?.text} />}
     </div>
   );
 }
@@ -678,9 +798,33 @@ function GenerationChart({ title, description, rows, field, format }: { title: s
   );
 }
 
+// While the loop runs its settings cannot change; they are shown as they were given to it.
+function RsiSettingsView({ settings: s }: { settings: Partial<RsiForm> }) {
+  const items: [string, string | undefined][] = [
+    ["改善役の組織", s.mode], ["評価する方式", s.arm ?? "dynamic"], ["投資と審査", s.judges === "off" ? "使わない" : "使う"], ["改善の呼び出し上限", s.calls], ["解答の呼び出し上限", s.evalCalls], ["世代数", s.generations ?? "無制限"],
+    ["分類ごとの問題数", s.perCategory], ["種", s.seed], ["評価の並列数", s.parallel ?? "全問"], ["許容幅 δ", s.delta],
+  ];
+  return (
+    <div className="grid gap-3">
+      <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+        {items.map(([k, v]) => <div key={k}><dt className="text-xs text-muted-foreground">{k}</dt><dd className="tabular-nums">{v ?? "-"}</dd></div>)}
+      </dl>
+      <div className="grid gap-3 md:grid-cols-2">
+        {([["改善役への目的", s.purpose], ["制約", s.constraints]] as const).map(([k, v]) => (
+          <div key={k} className="grid gap-1"><div className="text-xs text-muted-foreground">{k}</div>
+            <pre className="max-h-48 overflow-auto rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap">{v ?? "（既定）"}</pre></div>
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">設定を変えるには、停止してから変更して再開します</p>
+    </div>
+  );
+}
+
 function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) => void }) {
   const info = usePoll<RsiInfo>("/api/rsi", 3000);
-  const [form, setForm] = useState({ calls: "150", generations: "", perCategory: "3", parallel: "", seed: "1", delta: "0.05" });
+  const [form, setForm] = useState<RsiForm>();
+  // The form starts from the previous start's settings, or the loop's defaults before the first start.
+  useEffect(() => { if (info && !form) setForm({ ...info.defaults, ...info.state?.settings, parallel: "", generations: "" } as RsiForm); }, [info, form]);
   const [error, setError] = useState<string>();
   // The tab is kept in the URL (#rsi/<tab>) so a view of the loop can be linked and reopened.
   const [tab, setTab] = useState(() => location.hash.match(/^#rsi\/(\w+)/)?.[1] ?? "overview");
@@ -689,11 +833,12 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
   const logRef = useRef<HTMLPreElement>(null);
   useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight); }, [info?.lines.length, tab]);
   const act = async (fn: () => Promise<unknown>) => { setError(undefined); try { await fn(); } catch (e) { setError(String((e as Error).message)); } };
-  if (!info) return <div className="text-muted-foreground">RSI の状態を読み込み中…</div>;
+  if (!info || !form) return <div className="text-muted-foreground">RSI の状態を読み込み中…</div>;
   const gens = info.state?.generations ?? [];
   const inc = info.state?.incumbent, incGen = gens.find(g => g.gen === inc?.gen);
   const current = gens.at(-1);
-  const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
+  const set = (k: keyof RsiForm) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
+  const started = gens.length > 0, settings = (info.state?.settings ?? {}) as Partial<RsiForm>;
   const sessionOf = (g: Generation) => `${info.dir}/gen-${g.gen}`;
   const phase: Record<string, string> = { improve: "改善中", evaluate: "評価中", done: "完了" };
   const curEval = current && info.stats[current.gen]?.eval;
@@ -702,7 +847,8 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
     t.tokens += (s.improver ? promptTokens(s.improver) : 0) + (s.eval ? promptTokens(s.eval) : 0);
     return t;
   }, { improver: 0, eval: 0, judge: 0, tokens: 0, calls: 0 });
-  totals.calls = totals.improver + totals.eval + totals.judge;
+  const judges = gens.reduce((n, g) => n + (g.judgeCalls ?? 0), 0);
+  totals.calls = totals.improver + totals.eval + totals.judge + judges;
 
   return (
     <div className="grid gap-6">
@@ -714,26 +860,74 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
               採用中のハーネスが自分のソースの worktree を改善し、LoCoMo-Plus のサブセットで点数と1問あたりのピーク入力トークンを測ります。採用された候補が次の世代を動かします。状態は {info.dir} にあります
             </CardDescription>
           </div>
-          {info.pid ? (
-            <Button variant="destructive" onClick={() => act(() => post("/api/rsi/stop", {}))}>停止する</Button>
-          ) : (
-            <form className="flex flex-wrap items-end gap-3" onSubmit={e => {
+          {info.pid
+            ? <Button variant="destructive" onClick={() => act(() => post("/api/rsi/stop", {}))}>停止する</Button>
+            : <Button type="submit" form="rsi-form">{started ? "再開する" : "開始する"}</Button>}
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          {info.pid ? <RsiSettingsView settings={settings} /> : (
+            <form id="rsi-form" className="grid items-start gap-4 md:grid-cols-2" onSubmit={e => {
               e.preventDefault();
-              // The sample set is fixed by the first start; a resume keeps it.
-              const sample = gens.length ? {} : { perCategory: toInt(form.perCategory), seed: toInt(form.seed) };
-              act(() => post("/api/rsi/start", { calls: toInt(form.calls), generations: toInt(form.generations), parallel: toInt(form.parallel), ...sample, delta: form.delta.trim() ? Number(form.delta) : undefined }));
+              // The questions and per-question budget are fixed by the first start; a resume keeps them.
+              const sample = started ? {} : { perCategory: toInt(form.perCategory), seed: toInt(form.seed), evalCalls: toInt(form.evalCalls), arm: form.arm };
+              act(() => post("/api/rsi/start", {
+                purpose: form.purpose, constraints: form.constraints, mode: form.mode, judges: form.judges !== "off", calls: toInt(form.calls), ...sample,
+                generations: toInt(form.generations ?? ""), parallel: toInt(form.parallel ?? ""), delta: form.delta.trim() ? Number(form.delta) : undefined,
+              }));
             }}>
-              <Field id="rsi-calls" label="改善の呼び出し上限" hint="1世代あたり"><Input id="rsi-calls" className="w-28" type="number" min={1} value={form.calls} onChange={set("calls")} /></Field>
-              <Field id="rsi-gens" label="世代数" hint="空欄で止めるまで"><Input id="rsi-gens" className="w-24" type="number" min={1} value={form.generations} onChange={set("generations")} placeholder="無制限" /></Field>
-              <Field id="rsi-per" label="分類ごとの問題数"><Input id="rsi-per" className="w-24" type="number" min={1} disabled={gens.length > 0} value={gens.length ? info.state!.settings.perCategory : form.perCategory} onChange={set("perCategory")} /></Field>
-              <Field id="rsi-seed" label="種"><Input id="rsi-seed" className="w-20" type="number" disabled={gens.length > 0} value={gens.length ? info.state!.settings.seed : form.seed} onChange={set("seed")} /></Field>
-              <Field id="rsi-parallel" label="評価の並列数" hint="空欄で全問同時"><Input id="rsi-parallel" className="w-24" type="number" min={1} value={form.parallel} onChange={set("parallel")} placeholder="全問" /></Field>
-              <Field id="rsi-delta" label="許容幅 δ"><Input id="rsi-delta" className="w-20" type="number" step="0.01" min={0} max={1} value={form.delta} onChange={set("delta")} /></Field>
-              <Button type="submit">{gens.length ? "再開する" : "開始する"}</Button>
+              <Field id="rsi-purpose" label="改善役への目的" hint="各世代で改善役（採用中のハーネスのセッション）に渡す最上位目的。新しく始まる世代から反映されます">
+                <Textarea id="rsi-purpose" required rows={8} className="font-mono text-xs" value={form.purpose} onChange={set("purpose")} />
+              </Field>
+              <Field id="rsi-constraints" label="制約" hint="改善役が守る条件。ベンチマークの答えを埋め込まない、などの安全上の条件を含みます">
+                <Textarea id="rsi-constraints" rows={8} className="font-mono text-xs" value={form.constraints} onChange={set("constraints")} />
+              </Field>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 md:col-span-2">
+                <Field id="rsi-mode" label="改善役の組織">
+                  <Select value={form.mode} onValueChange={v => setForm({ ...form, mode: v })}>
+                    <SelectTrigger id="rsi-mode"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="dynamic">dynamic</SelectItem>
+                      <SelectItem value="market">market</SelectItem>
+                      <SelectItem value="fixed">fixed</SelectItem>
+                      <SelectItem value="single">single</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field id="rsi-arm" label="評価する方式" hint={started ? "初回の開始で固定" : "dynamic は会話をファイルで、dynamic-memory は DeLM の記憶で読む"}>
+                  <Select value={started ? settings.arm ?? "dynamic" : form.arm} onValueChange={v => setForm({ ...form, arm: v })} disabled={started}>
+                    <SelectTrigger id="rsi-arm"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="dynamic">dynamic</SelectItem>
+                      <SelectItem value="dynamic-memory">dynamic-memory</SelectItem>
+                      <SelectItem value="market">market</SelectItem>
+                      <SelectItem value="market-memory">market-memory</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field id="rsi-judges" label="投資と審査" hint="投資家役が方向と予算を決め、批判役と評価役が採用候補を審査する">
+                  <Select value={form.judges ?? "on"} onValueChange={v => setForm({ ...form, judges: v })}>
+                    <SelectTrigger id="rsi-judges"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="on">使う</SelectItem>
+                      <SelectItem value="off">使わない</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field id="rsi-calls" label="改善の呼び出し上限" hint="1世代の改善でのモデル呼び出し（ステップ）数"><Input id="rsi-calls" type="number" min={1} required value={form.calls} onChange={set("calls")} /></Field>
+                <Field id="rsi-eval-calls" label="解答の呼び出し上限" hint={started ? "1問あたり。初回の開始で固定" : "評価の1問あたり"}><Input id="rsi-eval-calls" type="number" min={1} disabled={started} value={started ? settings.evalCalls ?? info.defaults.evalCalls : form.evalCalls} onChange={set("evalCalls")} /></Field>
+                <Field id="rsi-gens" label="世代数" hint="空欄で止めるまで"><Input id="rsi-gens" type="number" min={1} value={form.generations} onChange={set("generations")} placeholder="無制限" /></Field>
+                <Field id="rsi-per" label="分類ごとの問題数" hint={started ? "初回の開始で固定" : "6分類それぞれから"}><Input id="rsi-per" type="number" min={1} disabled={started} value={started ? settings.perCategory : form.perCategory} onChange={set("perCategory")} /></Field>
+                <Field id="rsi-seed" label="種" hint={started ? "初回の開始で固定" : "問題の選び方を決める乱数の種"}><Input id="rsi-seed" type="number" disabled={started} value={started ? settings.seed : form.seed} onChange={set("seed")} /></Field>
+                <Field id="rsi-parallel" label="評価の並列数" hint="空欄で全問同時"><Input id="rsi-parallel" type="number" min={1} value={form.parallel} onChange={set("parallel")} placeholder="全問" /></Field>
+                <Field id="rsi-delta" label="許容幅 δ" hint="点数の差がこれ以下なら同点として扱う"><Input id="rsi-delta" type="number" step="0.01" min={0} max={1} value={form.delta} onChange={set("delta")} /></Field>
+              </div>
+              <div className="md:col-span-2">
+                <Button type="button" variant="outline" size="sm" onClick={() => setForm({ ...form, purpose: info.defaults.purpose, constraints: info.defaults.constraints })}>目的と制約を既定に戻す</Button>
+              </div>
             </form>
           )}
-        </CardHeader>
-        {error && <CardContent><div className="text-sm text-destructive">{error}</div></CardContent>}
+          {error && <div className="text-sm text-destructive">{error}</div>}
+        </CardContent>
       </Card>
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-8">
@@ -743,7 +937,7 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
         <Kpi label="採用中の点数" value={incGen?.eval?.score != null ? incGen.eval.score.toFixed(3) : "-"} note="0〜1（正解1・部分0.5）" />
         <Kpi label="採用中のピーク平均" value={incGen?.eval?.context ? num.format(incGen.eval.context.meanPeakTokens) : "-"} note="1問ごとの最大入力トークンの平均" />
         <Kpi label="採用 / 評価済み" value={`${gens.filter(g => g.gen > 0 && g.accepted).length} / ${gens.filter(g => g.gen > 0 && g.phase === "done").length}`} />
-        <Kpi label="総モデル呼び出し" value={num.format(totals.calls)} note={`改善 ${num.format(totals.improver)}・解答 ${num.format(totals.eval)}・採点 ${num.format(totals.judge)}`} />
+        <Kpi label="総モデル呼び出し" value={num.format(totals.calls)} note={`改善 ${num.format(totals.improver)}・解答 ${num.format(totals.eval)}・採点 ${num.format(totals.judge)}・投資と審査 ${num.format(judges)}`} />
         <Kpi label="総入力トークン" value={num.format(totals.tokens)} note="改善と解答（キャッシュ分を含む）" />
       </div>
       {current?.error && <Card><CardContent className="text-sm text-destructive">世代 {current.gen} のエラー: {current.error}</CardContent></Card>}
@@ -770,7 +964,10 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
                 { key: "phase", label: "段階", render: r => <Status value={r.phase === "done" ? (r.gen === 0 ? "done" : r.accepted ? "accepted" : "rejected") : "running"} /> },
                 { key: "score", label: "点数", render: r => r.eval?.score?.toFixed(3) ?? "-", className: "text-right tabular-nums" },
                 { key: "peak", label: "ピーク平均", render: r => r.eval?.context ? num.format(r.eval.context.meanPeakTokens) : "-", className: "text-right tabular-nums" },
+                { key: "lead", label: "lead 比率", render: r => r.eval?.organization ? `${Math.round(r.eval.organization.leadShare * 100)}%` : "-", className: "text-right tabular-nums" },
+                { key: "agents", label: "エージェント", render: r => r.eval?.organization?.agents ?? "-", className: "text-right tabular-nums" },
                 { key: "max", label: "最大", render: r => r.eval?.context ? num.format(r.eval.context.maxTokens) : "-", className: "text-right tabular-nums" },
+                { key: "direction", label: "方向", render: r => <Clip text={r.direction} width="max-w-[12rem]" /> },
                 { key: "reason", label: "判定・エラー", render: r => <Clip text={r.error ?? r.reason} width="max-w-xs" /> },
                 { key: "note", label: "メモ", render: r => <Clip text={r.note} width="max-w-sm" /> },
                 { key: "commit", label: "コミット", render: r => r.commit?.slice(0, 8) ?? "-" },
@@ -800,13 +997,85 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
   );
 }
 
+type ChatInfo = {
+  dir: string; window: number; memory: { knowledge: number; domains: number; organizing: number };
+  messages: { id: number; role: "user" | "assistant"; text: string; at: number; remembered: number }[];
+};
+type ChatReply = { calls: number; lookups: number; peakTokens: number; remembered: number };
+
+// The front chat: only the last few messages stay in the model's context; older ones move into DeLM as knowledge.
+function Chat({ onOpen }: { onOpen: (id: string) => void }) {
+  const [info, setInfo] = useState<ChatInfo>();
+  const [text, setText] = useState("");
+  const [pending, setPending] = useState<string>();
+  const [last, setLast] = useState<ChatReply>();
+  const [error, setError] = useState<string>();
+  const endRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { fetch("/api/chat").then(r => r.json()).then(setInfo).catch(e => setError(String(e))); }, []);
+  useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [info?.messages.length, pending]);
+  const send = async () => {
+    const t = text.trim();
+    if (!t || pending) return;
+    setPending(t); setText(""); setError(undefined);
+    try { const r = await post("/api/chat", { text: t }); setInfo(r); setLast(r); }
+    catch (e) { setError(String((e as Error).message)); setText(t); fetch("/api/chat").then(r => r.json()).then(setInfo).catch(() => {}); }
+    finally { setPending(undefined); }
+  };
+  if (!info) return <div className="text-muted-foreground">チャットを読み込み中…</div>;
+  const n = info.messages.length;
+  const place = (i: number, remembered: number) => remembered ? "記憶" : i >= n - info.window ? "コンテキスト内" : "記憶へ移す前";
+  return (
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
+      <Card>
+        <CardHeader>
+          <CardTitle>フロントチャット</CardTitle>
+          <CardDescription>応答するモデルは直近 {info.window} 件だけをコンテキストに持ちます。それより前の発言は文ごとに DeLM の記憶へ移し、必要なときに検索して読みます</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3">
+          <div className="grid h-[60vh] content-start gap-3 overflow-auto rounded-md border bg-muted/30 p-3">
+            {n === 0 && !pending && <div className="text-sm text-muted-foreground">まだ発言がありません</div>}
+            {info.messages.map((m, i) => (
+              <div key={m.id} className={`grid max-w-[85%] gap-1 ${m.role === "user" ? "justify-self-end" : "justify-self-start"}`}>
+                <div className={`rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${m.role === "user" ? "bg-primary text-primary-foreground" : "border bg-background"}`}>{m.text}</div>
+                <div className={`flex gap-2 text-xs text-muted-foreground ${m.role === "user" ? "justify-end" : ""}`}>
+                  <span>{time(m.at)}</span><Badge variant={m.remembered ? "outline" : "secondary"}>{place(i, m.remembered)}</Badge>
+                </div>
+              </div>
+            ))}
+            {pending && <>
+              <div className="max-w-[85%] justify-self-end rounded-lg bg-primary px-3 py-2 text-sm whitespace-pre-wrap text-primary-foreground">{pending}</div>
+              <div className="text-sm text-muted-foreground">応答を作成中…</div>
+            </>}
+            <div ref={endRef} />
+          </div>
+          <form className="grid gap-2" onSubmit={e => { e.preventDefault(); send(); }}>
+            <Textarea aria-label="メッセージ" rows={3} value={text} onChange={e => setText(e.target.value)} placeholder="メッセージ（Ctrl+Enter で送信）"
+              onKeyDown={e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } }} />
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-sm text-destructive">{error}</span>
+              <Button type="submit" disabled={!!pending || !text.trim()}>送信する</Button>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+      <div className="grid content-start gap-4">
+        <Kpi label="記憶の件数" value={num.format(info.memory.knowledge)} note={`domain ${info.memory.domains} 件・整理待ち ${info.memory.organizing} 件`} />
+        <Kpi label="直前の応答" value={last ? `${last.calls} 回` : "-"} note={last ? `検索 ${last.lookups} 回・記憶へ移した発言 ${last.remembered} 件` : "モデル呼び出しの回数"} />
+        <Kpi label="直前のピーク入力" value={last ? num.format(last.peakTokens) : "-"} note="応答中の1回の呼び出しの最大入力トークン" />
+        {n > 0 && <Button variant="outline" onClick={() => onOpen(info.dir)}>記憶の中身を見る</Button>}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const list = usePoll<Session[]>("/api/sessions");
   const [session, setSession] = useState<string>();
   const [creating, setCreating] = useState(false);
-  const [rsi, setRsi] = useState(() => location.hash.startsWith("#rsi"));
+  const [view, setView] = useState<"session" | "rsi" | "chat">(() => location.hash.startsWith("#rsi") ? "rsi" : location.hash === "#chat" ? "chat" : "session");
+  const toggle = (v: "rsi" | "chat") => { const next = view === v ? "session" : v; setView(next); history.replaceState(null, "", next === "session" ? "#agents" : `#${next}`); };
   // The session view reads its tab from the hash, so leaving the RSI view must not hand it "rsi/<tab>".
-  const leaveRsi = (id: string) => { history.replaceState(null, "", "#agents"); setRsi(false); setSession(id); };
+  const leaveRsi = (id: string) => { history.replaceState(null, "", "#agents"); setView("session"); setSession(id); };
   // A just-started run may not have a state file yet; keep it selected, and move into a bench run's first session once it appears.
   useEffect(() => {
     if (!list?.length || (session && list.some(s => s.id === session))) return;
@@ -820,7 +1089,8 @@ function App() {
         <h1 className="text-xl font-semibold">hypharness</h1>
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
         <Button variant={creating ? "secondary" : "default"} onClick={() => setCreating(!creating)}>新規実行</Button>
-        <Button variant={rsi ? "secondary" : "outline"} onClick={() => { setRsi(!rsi); history.replaceState(null, "", rsi ? "#agents" : "#rsi"); }}>自己改善</Button>
+        <Button variant={view === "chat" ? "secondary" : "outline"} onClick={() => toggle("chat")}>チャット</Button>
+        <Button variant={view === "rsi" ? "secondary" : "outline"} onClick={() => toggle("rsi")}>自己改善</Button>
         {list && list.length > 0 && (
           <Select value={session} onValueChange={leaveRsi}>
             <SelectTrigger className="w-full sm:w-[28rem]" aria-label="セッション"><SelectValue placeholder="セッション" /></SelectTrigger>
@@ -832,7 +1102,7 @@ function App() {
         </div>
       </header>
       {creating && <NewRun onClose={() => setCreating(false)} onStarted={dir => { setCreating(false); setSession(dir); }} />}
-      {rsi ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
+      {view === "chat" ? <Chat onOpen={leaveRsi} /> : view === "rsi" ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
         {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
         {session && <Dashboard session={session} />}
       </>}

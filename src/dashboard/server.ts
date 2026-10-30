@@ -1,9 +1,15 @@
 import { Database } from "bun:sqlite";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
 import type { Message } from "@earendil-works/pi-ai";
 import { render, safePath } from "../tools.ts";
+import { openModel } from "../auth.ts";
+import { history, openChat, organize, reply, WINDOW } from "../chat.ts";
+import { centralization, type Store } from "../db.ts";
+import type { Llm } from "../locomo.ts";
+import { DEFAULTS } from "../../scripts/rsi-defaults.ts";
+import { collect, diagnose, traceMarkdown, type Stats } from "../../scripts/rsi-traces.ts";
 import * as runs from "./runs.ts";
 import index from "./index.html";
 
@@ -35,7 +41,7 @@ const all = (d: Database, sql: string, ...params: any[]) => d.query(sql).all(...
 function overview(d: Database) {
   const config = JSON.parse(meta(d, "config") ?? "{}");
   return {
-    purpose: meta(d, "purpose"), constraints: meta(d, "constraints"), config, modelCalls: Number(meta(d, "model_calls") ?? 0),
+    purpose: meta(d, "purpose"), constraints: meta(d, "constraints"), config, modelCalls: Number(meta(d, "model_calls") ?? 0), organization: centralization(d),
     totals: d.query("select count(*) calls, coalesce(sum(input),0) input, coalesce(sum(output),0) output, coalesce(sum(cache_read),0) cacheRead, coalesce(sum(cache_write),0) cacheWrite, coalesce(max(input + cache_read + cache_write),0) maxPromptTokens, coalesce(sum(ms),0) ms, min(at) firstAt, max(at) lastAt from usage").get(),
     agents: all(d, `select a.*, c.version memoryVersion, length(c.memory) memoryChars,
         (select count(*) from usage u where u.agent = a.id) calls, (select coalesce(sum(input),0) from usage u where u.agent = a.id) input,
@@ -96,6 +102,16 @@ const params = (req: Request) => new URL(req.url).searchParams;
 // This server can start processes with shell access, so it accepts requests only from its own page:
 // the Host header blocks DNS rebinding, and Origin plus a JSON body blocks cross-site form posts.
 const hosts = [`127.0.0.1:${port}`, `localhost:${port}`];
+// The front chat (src/chat.ts) keeps its log and memory in <dir>/chat; the model is opened on the first message.
+const chatDir = rel(join(root, "chat"));
+let chatStore: Store | undefined, chatLlm: Llm | undefined, chatQueue: Promise<unknown> = Promise.resolve();
+const chatOpen = () => chatStore ??= (mkdirSync(chatDir, { recursive: true }), openChat(join(chatDir, "state.sqlite")));
+function chatView() {
+  if (!chatStore && !existsSync(join(chatDir, "state.sqlite"))) return { dir: chatDir, window: WINDOW, messages: [], memory: { knowledge: 0, domains: 0, organizing: 0 } };
+  const s = chatOpen();
+  return { dir: chatDir, window: WINDOW, messages: history(s), memory: s.get("select (select count(*) from knowledge) knowledge, (select count(*) from domains where status = 'active') domains, (select count(*) from tasks where kind = 'organize' and status in ('open', 'claimed')) organizing") };
+}
+
 function guard(handler: (req: Request) => Response | Promise<Response>) {
   return async (req: Request) => {
     if (!hosts.includes(req.headers.get("host") ?? "")) return fail("Forbidden host", 403);
@@ -128,7 +144,7 @@ async function rsi() {
   const expected = 6 * Number(state?.settings.perCategory ?? 3);
   const stats = Object.fromEntries(await Promise.all((state?.generations ?? []).map(async g =>
     [g.gen, { improver: improverTotals(genDir(g.gen)), eval: await evalTotals(genDir(g.gen), expected) }] as const)));
-  return { dir: rsiDir, pid: rsiPid(), state, stats, lines: await tail("rsi.log", 300), launcher: await tail("launcher.log", 40) };
+  return { dir: rsiDir, pid: rsiPid(), state, defaults: DEFAULTS, stats, lines: await tail("rsi.log", 300), launcher: await tail("launcher.log", 40) };
 }
 
 const genDir = (gen: number) => join(rsiDir, `gen-${gen}`);
@@ -165,6 +181,18 @@ async function evalTotals(dir: string, expected: number) {
   };
 }
 
+// Call-level traces of a generation's evaluated questions (scripts/rsi-traces.ts), keyed by question directory.
+async function generationTraces(gen: number) {
+  const out = join(genDir(gen), "eval", "locomo");
+  const judged = await jsonl(join(out, "judgments.jsonl"));
+  const stats = new Map<string, Stats>();
+  for (const j of judged) {
+    const sample = String(j.id).replaceAll(":", "-"), db = join(out, String(j.arm), sample, "state.sqlite");
+    if (existsSync(db) && !stats.has(sample)) stats.set(sample, collect(db, sample, j.score));
+  }
+  return stats;
+}
+
 // One generation in detail: the improver's calls and every evaluated question with its score and context size.
 async function rsiGeneration(gen: number) {
   const dir = genDir(gen);
@@ -173,9 +201,11 @@ async function rsiGeneration(gen: number) {
   const preds = new Map((await jsonl(join(out, "predictions.jsonl"))).map(p => [p.id, p]));
   const samples = (await jsonl(join(out, "judgments.jsonl"))).map(j => {
     const p = preds.get(j.id);
-    const sizes = withDb(join(out, "dynamic", String(j.id).replaceAll(":", "-"), "state.sqlite"),
-      d => d.query("select input + cache_read + cache_write n from usage").all().map(r => (r as { n: number }).n)) ?? [];
+    const db = join(out, String(j.arm), String(j.id).replaceAll(":", "-"), "state.sqlite");
+    const sizes = withDb(db, d => d.query("select input + cache_read + cache_write n from usage").all().map(r => (r as { n: number }).n)) ?? [];
+    const org = withDb(db, centralization);
     return {
+      leadShare: org?.leadShare, agents: org?.agents,
       id: j.id, category: j.category, label: j.label, score: j.score, outcome: p?.outcome, calls: p?.usage.calls ?? 0, ms: p?.ms ?? 0,
       peakTokens: sizes.length ? Math.max(...sizes) : 0, meanTokens: sizes.length ? Math.round(sizes.reduce((a, b) => a + b, 0) / sizes.length) : 0,
     };
@@ -198,6 +228,11 @@ const server = Bun.serve({
         lastAt: (d.query("select max(at) at from log").get() as { at: number | null }).at };
     })))),
     "/api/overview": guard(async req => { const s = await session(params(req).get("s")); return json(s && overview(s.db)); }),
+    "/api/diagnostics": guard(async req => {
+      const s = await session(params(req).get("s"));
+      const stats = s && collect(join(s.id, "state.sqlite"), s.id);
+      return json(stats && { ...diagnose([stats]), trace: traceMarkdown(stats) });
+    }),
     "/api/agent": guard(async req => { const p = params(req), s = await session(p.get("s")); return json(s && agent(s.db, p.get("id") ?? "")); }),
     "/api/episode": guard(async req => { const p = params(req), s = await session(p.get("s")); return json(s && episode(s.db, p.get("id") ?? "")); }),
     "/api/files": guard(async req => {
@@ -227,6 +262,16 @@ const server = Bun.serve({
       const n = Number(params(req).get("n"));
       return json(Number.isSafeInteger(n) && n >= 0 ? await rsiGeneration(n) : undefined);
     }),
+    "/api/rsi/diagnostics": guard(async req => {
+      const n = Number(params(req).get("n"));
+      return json(Number.isSafeInteger(n) && n >= 0 && existsSync(genDir(n)) ? diagnose([...(await generationTraces(n)).values()]) : undefined);
+    }),
+    // Only questions found among the generation's judgments are read, so the parameter cannot name another file.
+    "/api/rsi/trace": guard(async req => {
+      const p = params(req), n = Number(p.get("n"));
+      const s = Number.isSafeInteger(n) && n >= 0 && existsSync(genDir(n)) ? (await generationTraces(n)).get(p.get("sample") ?? "") : undefined;
+      return json(s && { text: traceMarkdown(s) });
+    }),
     "/api/rsi/start": { POST: guard(async req => Response.json(runs.startRsi(rsiDir, await req.json() as runs.RsiRequest))) },
     "/api/rsi/stop": {
       POST: guard(() => {
@@ -234,6 +279,18 @@ const server = Bun.serve({
         const pid = rsiPid() ?? (() => { throw new Error("The RSI loop is not running"); })();
         process.kill(pid, "SIGTERM");
         return Response.json({ pid });
+      }),
+    },
+    "/api/chat": {
+      GET: guard(() => Response.json(chatView())),
+      // Replies are made one at a time: each one moves older messages into memory before the next reads it.
+      POST: guard(async req => {
+        const { text } = await req.json() as { text?: unknown };
+        if (typeof text !== "string" || !text.trim() || text.length > 20_000) throw new Error("text must be 1-20000 characters");
+        const next = chatQueue.then(async () => reply(chatLlm ??= await openModel(), chatOpen(), text.trim()));
+        // Stewards organize memory after the reply is sent; the next reply waits for them.
+        chatQueue = next.then(() => organize(chatLlm!, chatOpen(), chatDir)).catch(e => console.error(`chat organize: ${e}`));
+        return Response.json({ ...(await next), ...chatView() });
       }),
     },
     "/api/output": guard(req => json(runs.output(params(req).get("dir") ?? ""))),

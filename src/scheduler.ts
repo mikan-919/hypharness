@@ -1,33 +1,25 @@
 import { BudgetExhausted, runEpisode, type Runtime } from "./agent.ts";
-import type { Agent, Goal, Store, Task } from "./db.ts";
+import { centralization, type Agent, type Goal, type Store, type Task } from "./db.ts";
 import { mirror } from "./tools.ts";
+import { eligible, scan } from "./triggers.ts";
 
-// Any open goal with nothing pending goes back to its owner to decide the next step (plan, act, refine, drop, or submit).
-export function steer(store: Store) {
-  for (const g of store.all<Goal>("select * from goals where status = 'open'")) {
-    const busy = store.get("select 1 from goals where parent = ?1 and status in ('open', 'review') union all select 1 from tasks where goal = ?1 and status in ('open', 'claimed', 'review')", g.id);
-    if (busy) continue;
-    store.addTask({
-      goal: g.id, kind: "steer", author: "host", assignee: g.owner,
-      description: `Goal ${g.id} has no pending work.\nGoal: ${g.description}${g.feedback ? `\nIts last submission was rejected: ${g.feedback}` : ""}\nDecide the next step: do the work yourself, create tasks or subgoals, refine or drop the goal, or submit it with goal_complete.`,
-    });
-  }
-}
+// State triggers (src/triggers.ts), such as an idle goal going back to its owner.
+export const steer = scan;
 
 function claimable(store: Store, agent: Agent) {
   const candidates = store.all<Task>(
     `select * from tasks where status = 'open' and (assignee is null or assignee = ?1) and (exclude is null or exclude != ?1)
      order by assignee is null, kind != 'verify', created_at`, agent.id);
-  for (const t of candidates) if (store.claim(t.id, agent.id)) return store.task(t.id)!;
+  for (const t of candidates) if (eligible(store, agent, t) && store.claim(t.id, agent.id)) return store.task(t.id)!;
 }
 
 // A verify task excludes its author; if no active agent can take it, wake or create one rather than self-verify.
 function unblockVerification(store: Store) {
   const blocked = store.all<Task>("select * from tasks where status = 'open' and kind = 'verify' and exclude is not null");
   for (const t of blocked) {
-    const active = store.get<Agent>("select * from agents where status = 'active' and id != ?", t.exclude);
-    if (active) continue;
-    const dormant = store.get<Agent>("select * from agents where status = 'dormant' and id != ?", t.exclude);
+    const takers = store.all<Agent>("select * from agents where id != ?", t.exclude).filter(a => eligible(store, a, t));
+    if (takers.some(a => a.status === "active")) continue;
+    const dormant = takers.find(a => a.status === "dormant");
     if (dormant) {
       store.run("update agents set status = 'active', idle = 0 where id = ?", dormant.id);
       store.log("host", "agent_woken", { id: dormant.id, for: t.id });
@@ -46,6 +38,7 @@ export type Report = {
   rounds: number; modelCalls: number; elapsedMs: number;
   input: number; output: number; cacheRead: number; cacheWrite: number; maxPromptChars: number;
   agents: number; activeAgents: number; tasksDone: number; organizationChanges: number;
+  leadShare: number; maxDomainsPerSteward: number;
 };
 
 export function report(store: Store, status: Report["status"], rounds: number, elapsedMs: number): Report {
@@ -54,6 +47,7 @@ export function report(store: Store, status: Report["status"], rounds: number, e
     status, rounds, modelCalls: Number(store.meta("model_calls")), elapsedMs,
     input: u.input!, output: u.output!, cacheRead: u.cacheRead!, cacheWrite: u.cacheWrite!, maxPromptChars: u.maxPromptChars!,
     agents: store.agents().length, activeAgents: store.agents("active").length,
+    leadShare: centralization(store.db).leadShare, maxDomainsPerSteward: centralization(store.db).maxDomainsPerSteward,
     tasksDone: store.get<{ n: number }>("select count(*) n from tasks where status = 'done' and kind = 'work'")!.n,
     organizationChanges: store.get<{ n: number }>("select count(*) n from log where event in ('agent_created', 'agent_dormant', 'agent_woken', 'goal_transferred', 'domain_split', 'domain_merged', 'domain_transferred')")!.n,
   };
@@ -67,7 +61,7 @@ export async function runScheduler(rt: Runtime, maxRounds = Infinity): Promise<R
   let round = 0, failedRounds = 0;
   for (; round < maxRounds; round++) {
     store.reclaimExpired();
-    steer(store);
+    scan(store);
     if (store.goal("G0")!.status === "done") return report(store, "done", round, Date.now() - started);
     if (Number(store.meta("model_calls")) >= store.config.maxModelCalls) return report(store, "budget", round, Date.now() - started);
 
@@ -80,7 +74,7 @@ export async function runScheduler(rt: Runtime, maxRounds = Infinity): Promise<R
       if (task) {
         work.push([agent, task]);
         store.run("update agents set idle = 0 where id = ?", agent.id);
-      } else if (store.config.organization === "dynamic" && agent.id !== "lead" && agent.idle + 1 >= store.config.idleRounds) {
+      } else if ((store.config.organization === "dynamic" || store.config.organization === "market") && agent.id !== "lead" && agent.idle + 1 >= store.config.idleRounds) {
         store.run("update agents set status = 'dormant', idle = 0 where id = ?", agent.id);
         store.log("host", "agent_dormant", { id: agent.id, reason: "idle" });
       } else {

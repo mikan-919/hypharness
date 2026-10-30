@@ -5,6 +5,7 @@ import type { createModels } from "@earendil-works/pi-ai/models";
 import { defaultConfig, Store, type Config } from "./db.ts";
 import { runScheduler } from "./scheduler.ts";
 import { MODEL_TIMEOUT_MS, withTimeout } from "./agent.ts";
+import { ingestConversation, MEMORY_GUIDE } from "./memory.ts";
 
 // LoCoMo-Plus benchmark (Li et al., 2026; https://github.com/xjtuleeyf/Locomo-Plus).
 // The data and the judge are ported from the reference implementation at a pinned commit; the repository has no
@@ -355,32 +356,43 @@ export async function predictDirect(llm: Llm, s: Sample): Promise<Prediction> {
   return { arm: "direct", id: s.id, category: s.category, prediction: textOf(reply) || "(empty)", outcome: "answered", ms: Math.round(performance.now() - started), usage: usageOf(reply) };
 }
 
-export function harnessPurpose(s: Sample) {
-  const files = "The conversation is split into files under conversation/ in the workspace; conversation/index.txt lists them in order. Locate relevant parts with file_search and read what you need.";
+// A harness arm is an organization, optionally with "-memory": the conversation is held in DeLM instead of files.
+export const HARNESS_ARMS = ["single", "fixed", "dynamic", "market", "single-memory", "fixed-memory", "dynamic-memory", "market-memory"] as const;
+export type HarnessArm = (typeof HARNESS_ARMS)[number];
+const armParts = (arm: HarnessArm) => ({ mode: arm.split("-")[0] as Config["organization"], memory: arm.endsWith("-memory") });
+
+export function harnessPurpose(s: Sample, arm: HarnessArm = "dynamic") {
+  const files = armParts(arm).memory ? MEMORY_GUIDE
+    : "The conversation is split into files under conversation/ in the workspace; conversation/index.txt lists them in order. Locate relevant parts with file_search and read what you need.";
   return s.category === "Cognitive"
     ? `${instruction(s.category)}${files} Its last message is:\n${s.trigger}\nWrite your reply to that last message, and nothing else, to answer.txt.`
     : `${instruction(s.category)}Question: ${s.question}\n${files} Each session starts with its date. Write only your final answer to answer.txt.`;
 }
 
-export async function predictHarness(llm: Llm, s: Sample, mode: Config["organization"], dir: string, calls: number): Promise<Prediction | undefined> {
-  if (!s.input_prompt) return noInput(mode, s);
-  const workspace = join(dir, "workspace");
-  mkdirSync(join(workspace, "conversation"), { recursive: true });
-  const names = s.chunks.map((_, i) => `part-${String(i + 1).padStart(3, "0")}.txt`);
-  await Promise.all(s.chunks.map((c, i) => Bun.write(join(workspace, "conversation", names[i]!), c)));
-  await Bun.write(join(workspace, "conversation", "index.txt"), s.chunks.map((c, i) => `${names[i]}: ${c.split("\n")[0]}`).join("\n") + "\n");
+export async function predictHarness(llm: Llm, s: Sample, arm: HarnessArm, dir: string, calls: number): Promise<Prediction | undefined> {
+  if (!s.input_prompt) return noInput(arm, s);
+  const workspace = join(dir, "workspace"), { mode, memory } = armParts(arm);
+  mkdirSync(workspace, { recursive: true });
+  if (!memory) {
+    mkdirSync(join(workspace, "conversation"), { recursive: true });
+    const names = s.chunks.map((_, i) => `part-${String(i + 1).padStart(3, "0")}.txt`);
+    await Promise.all(s.chunks.map((c, i) => Bun.write(join(workspace, "conversation", names[i]!), c)));
+    await Bun.write(join(workspace, "conversation", "index.txt"), s.chunks.map((c, i) => `${names[i]}: ${c.split("\n")[0]}`).join("\n") + "\n");
+  }
   const store = new Store(join(dir, "state.sqlite"));
   try {
     const config: Config = mode === "single" ? { ...defaultConfig, organization: "single", maxAgents: 1, maxConcurrency: 1, maxModelCalls: calls }
-      : mode === "fixed" ? { ...defaultConfig, organization: "fixed", maxAgents: 3, maxModelCalls: calls } : { ...defaultConfig, maxModelCalls: calls };
-    store.init(harnessPurpose(s), "Use only the conversation files; do not invent facts that are not in them.", config);
+      : mode === "fixed" ? { ...defaultConfig, organization: "fixed", maxAgents: 3, maxModelCalls: calls } : { ...defaultConfig, organization: mode, maxModelCalls: calls };
+    const fresh = store.purpose === undefined;
+    store.init(harnessPurpose(s, arm), `Use only the conversation ${memory ? "stored as knowledge" : "files"}; do not invent facts that are not in them.`, config);
+    if (fresh && memory) ingestConversation(store, s.chunks.join("\n"));
     const started = performance.now();
     const r = await runScheduler({ store, ...llm, workspace, contextDir: join(dir, "contexts") });
     if (r.status === "error") return undefined; // provider failure, not an answer
     const answer = Bun.file(join(workspace, "answer.txt"));
     const text = await answer.exists() ? (await answer.text()).trim().slice(0, 4000) : "";
     return {
-      arm: mode, id: s.id, category: s.category, prediction: text || "(no answer)", outcome: `${r.status}${text ? "" : ":no-answer"}`,
+      arm, id: s.id, category: s.category, prediction: text || "(no answer)", outcome: `${r.status}${text ? "" : ":no-answer"}`,
       ms: Math.round(performance.now() - started), usage: { calls: r.modelCalls, input: r.input, output: r.output, cacheRead: r.cacheRead, cacheWrite: r.cacheWrite },
     };
   } finally {
@@ -450,7 +462,7 @@ export async function runLocomo(llm: Llm, judgeLlm: Llm, opts: BenchOptions) {
     const todo = samples.filter(s => !judged.has(key(arm, s.id)));
     const work = async (s: Sample) => guard(async () => {
       const p = predicted.get(key(arm, s.id)) ?? (arm === "direct" ? await predictDirect(llm, s)
-        : await predictHarness(llm, s, arm as Config["organization"], join(opts.out, arm, s.id.replaceAll(":", "-")), opts.calls));
+        : await predictHarness(llm, s, arm as HarnessArm, join(opts.out, arm, s.id.replaceAll(":", "-")), opts.calls));
       if (!p) throw new ProviderError("harness run stopped on provider errors");
       await record(s, p);
     });
@@ -465,7 +477,7 @@ export async function runLocomo(llm: Llm, judgeLlm: Llm, opts: BenchOptions) {
     notes: [
       "Scores: correct=1, partial=0.5, wrong=0 per the reference judge. The paper does not state the judge model for its main results (its human-agreement study used gemini-2.5-flash; the repository example uses gpt-4o-mini), so scores from another judge model are not directly comparable.",
       "Temperatures 0.3 (prediction) and 0 (judge) are requested as in the reference; pi-ai omits temperature when signed in with ChatGPT.",
-      "Harness arms read the same conversation split into files under the tool read limit; they answer through answer.txt.",
+      "Harness arms read the same conversation split into files under the tool read limit; they answer through answer.txt. Arms ending in -memory instead find it as knowledge, one sentence per item and one domain per session.",
     ],
     results: summarize(judgments.filter(j => samples.some(s => s.id === j.id)), predictions.filter(p => samples.some(s => s.id === p.id))),
   };

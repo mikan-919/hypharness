@@ -1,14 +1,12 @@
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import type { ThinkingLevel } from "@earendil-works/pi-ai";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { FileCredentialStore } from "./auth.ts";
+import { openModel } from "./auth.ts";
 import { defaultConfig, Store, type Config } from "./db.ts";
 import { report, runScheduler } from "./scheduler.ts";
 import type { Runtime } from "./agent.ts";
-import { CATEGORIES, runLocomo } from "./locomo.ts";
+import { CATEGORIES, HARNESS_ARMS, runLocomo } from "./locomo.ts";
+import { openChat, organize, reply } from "./chat.ts";
 
 const { values: opts, positionals } = parseArgs({
   allowPositionals: true,
@@ -39,14 +37,6 @@ const int = (v: string | undefined, name: string) => {
   return n;
 };
 
-async function openModel(modelId = process.env.OPENAI_MODEL ?? "gpt-6-sol") {
-  const models = createModels({ credentials: await FileCredentialStore.open() });
-  models.setProvider(openaiProvider());
-  if (!(await models.getAuth("openai"))) throw new Error("ChatGPTでのログインが必要です");
-  const model = models.getModel("openai", modelId) ?? (() => { throw new Error(`未対応のモデル: ${modelId}`); })();
-  return { models, model, reasoning: (process.env.REASONING ?? "medium") as ThinkingLevel };
-}
-
 function open(dir: string) {
   mkdirSync(join(dir, "workspace"), { recursive: true });
   return { store: new Store(join(dir, "state.sqlite")), workspace: resolve(dir, "workspace"), contextDir: resolve(dir, "contexts") };
@@ -56,7 +46,8 @@ function configFor(mode: string): Config {
   if (mode === "single") return { ...defaultConfig, organization: "single", maxAgents: 1, maxConcurrency: 1 };
   if (mode === "fixed") return { ...defaultConfig, organization: "fixed", maxAgents: 3 };
   if (mode === "dynamic") return { ...defaultConfig };
-  throw new Error("--mode must be single, fixed, or dynamic");
+  if (mode === "market") return { ...defaultConfig, organization: "market" };
+  throw new Error("--mode must be single, fixed, dynamic, or market");
 }
 
 // Host-side permissions and budgets come from this run's flags; the purpose and organization mode stay as stored.
@@ -80,7 +71,7 @@ const log = (line: string) => console.log(line);
 
 if (command === "locomo") {
   const arms = opts.arms!.split(",").map(a => a.trim()).filter(Boolean);
-  for (const a of arms) if (!["direct", "single", "fixed", "dynamic"].includes(a)) throw new Error(`Unknown arm ${a}; use direct, single, fixed, dynamic`);
+  for (const a of arms) if (!["direct", ...HARNESS_ARMS].includes(a)) throw new Error(`Unknown arm ${a}; use direct, ${HARNESS_ARMS.join(", ")}`);
   const categories = opts.categories?.split(",").map(c => c.trim()).filter(Boolean);
   for (const c of categories ?? []) if (!CATEGORIES.includes(c)) throw new Error(`Unknown category ${c}; use ${CATEGORIES.join(", ")}`);
   const perCategory = opts["per-category"] === "all" ? "all" : int(opts["per-category"], "per-category")!;
@@ -104,13 +95,29 @@ if (command === "locomo") {
   for (const g of store.all<Record<string, string>>("select * from goals order by created_at")) console.log(`${g.id} [${g.status}] owner=${g.owner}: ${g.description}`);
   for (const a of store.agents()) console.log(`agent ${a.id} [${a.status}]: ${a.role}`);
   console.log(JSON.stringify(report(store, "rounds", 0, 0), null, 2));
+} else if (command === "chat") {
+  // The same chat the dashboard shows: its log and memory live in <dir>/chat.
+  mkdirSync(join(opts.dir!, "chat"), { recursive: true });
+  const store = openChat(join(opts.dir!, "chat", "state.sqlite"));
+  const llm = await openModel();
+  console.log("Front chat. An empty line ends it.");
+  process.stdout.write("> ");
+  for await (const line of console) {
+    if (!line.trim()) break;
+    const r = await reply(llm, store, line.trim());
+    console.log(`${r.reply}\n  [${r.calls} calls, ${r.lookups} lookups, peak ${r.peakTokens} tokens, ${r.remembered} messages moved to memory]`);
+    const o = await organize(llm, store, join(opts.dir!, "chat"));
+    if (o) console.log(`  [stewards organized memory: ${o.status} after ${o.rounds} rounds]`);
+    process.stdout.write("> ");
+  }
+  store.db.close();
 } else if (command === "bench") {
   const purpose = rest.join(" ").trim();
   if (!purpose) throw new Error("bench requires a purpose");
   const llm = await openModel();
   const root = join(opts.dir!, `bench-${Date.now()}`);
   const results: Record<string, unknown> = {};
-  for (const mode of ["single", "fixed", "dynamic"]) {
+  for (const mode of ["single", "fixed", "dynamic", "market"]) {
     const env = open(join(root, mode));
     env.store.init(purpose, opts.constraints!, configFor(mode));
     applyFlags(env.store, env.store.config);

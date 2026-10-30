@@ -6,10 +6,14 @@ import { existsSync, mkdirSync, readdirSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { $ } from "bun";
+import { centralization } from "../src/db.ts";
 
 export type Eval = {
   ok: boolean; accepted?: boolean; transient?: boolean; reason?: string; commit?: string; sampleIds?: string[]; score?: number;
   perSample?: Record<string, number>; context?: { calls: number; maxTokens: number; meanTokens: number; meanPeakTokens: number };
+  // How concentrated the work was (src/db.ts centralization): lead's share and agents are means over questions, domains
+  // per steward the largest; absent in older evaluations.
+  organization?: { leadShare: number; agents: number; maxDomainsPerSteward: number };
 };
 
 // After RRSI (arXiv:2609.24972): the score may not fall below the noise band; a gain beyond the band may pay for
@@ -32,6 +36,8 @@ async function main() {
       calls: { type: "string", default: "40" },
       "harness-concurrency": { type: "string", default: "4" },
       delta: { type: "string", default: "0.05" },
+      // The harness arm that answers: dynamic reads the conversation from files, memory finds it in DeLM.
+      arm: { type: "string", default: "dynamic" },
     },
   });
   if (!candidateArg) throw new Error("usage: bun scripts/rsi-eval.ts <candidate-dir> [--baseline eval.json] [--out DIR]");
@@ -75,7 +81,7 @@ async function main() {
   // auth.json is read from cwd; the link stays outside the candidate's workspace.
   if (!existsSync(join(copy, "auth.json"))) symlinkSync(join(pinned, "auth.json"), join(copy, "auth.json"));
   const locomoOut = join(out, "locomo");
-  const code = await exec(["bun", "src/index.ts", "locomo", "--arms", "dynamic", "--per-category", opts["per-category"]!, "--seed", opts.seed!,
+  const code = await exec(["bun", "src/index.ts", "locomo", "--arms", opts.arm!, "--per-category", opts["per-category"]!, "--seed", opts.seed!,
     "--calls", opts.calls!, "--harness-concurrency", opts["harness-concurrency"]!, "--dir", join(pinned, ".hyph"), "--out", locomoOut]);
   // Provider failures stop the benchmark; the run resumes from the same --out, so this is not a verdict on the candidate.
   if (code !== 0) await finish({ ok: false, transient: true, commit, reason: `locomo exited ${code}` });
@@ -84,17 +90,18 @@ async function main() {
   const perSample: Record<string, number> = {};
   for (const line of (await Bun.file(join(locomoOut, "judgments.jsonl")).text()).split("\n").filter(Boolean)) {
     const j = JSON.parse(line);
-    if (j.arm === "dynamic") perSample[j.id] = j.score;
+    if (j.arm === opts.arm) perSample[j.id] = j.score;
   }
 
   // Prompt size per call as the provider reported it (fresh + cached input); stored message chars overcount reasoning data.
-  const all: number[] = [], peaks: number[] = [];
-  const armDir = join(locomoOut, "dynamic");
+  const all: number[] = [], peaks: number[] = [], orgs: ReturnType<typeof centralization>[] = [];
+  const armDir = join(locomoOut, opts.arm!);
   for (const sample of existsSync(armDir) ? readdirSync(armDir) : []) {
     const path = join(armDir, sample, "state.sqlite");
     if (!existsSync(path)) continue;
     const db = new Database(path, { readonly: true });
     const sizes = db.query("select input + cache_read + cache_write n from usage").all().map(r => (r as { n: number }).n);
+    orgs.push(centralization(db));
     db.close();
     if (!sizes.length) continue;
     all.push(...sizes);
@@ -102,8 +109,13 @@ async function main() {
   }
   const mean = (xs: number[]) => xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : 0;
   const result: Eval = {
-    ok: true, commit, sampleIds: report.sampleIds, score: report.results.dynamic.overallAvg, perSample,
+    ok: true, commit, sampleIds: report.sampleIds, score: report.results[opts.arm!].overallAvg, perSample,
     context: { calls: all.length, maxTokens: all.length ? Math.max(...all) : 0, meanTokens: mean(all), meanPeakTokens: mean(peaks) },
+    organization: {
+      leadShare: orgs.length ? Math.round(orgs.reduce((a, o) => a + o.leadShare, 0) / orgs.length * 1000) / 1000 : 0,
+      agents: orgs.length ? Math.round(orgs.reduce((a, o) => a + o.agents, 0) / orgs.length * 10) / 10 : 0,
+      maxDomainsPerSteward: orgs.length ? Math.max(...orgs.map(o => o.maxDomainsPerSteward)) : 0,
+    },
   };
 
   if (!opts.baseline) await finish({ ...result, accepted: true, reason: "baseline" });

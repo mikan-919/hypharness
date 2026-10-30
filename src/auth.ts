@@ -3,7 +3,10 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import type {
   Credential,
   CredentialStore,
+  ThinkingLevel,
 } from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 
 export class FileCredentialStore implements CredentialStore {
   private queue: Promise<void> = Promise.resolve();
@@ -95,4 +98,13 @@ export class FileCredentialStore implements CredentialStore {
 
     await rename(temporary, this.path);
   }
+}
+
+// The ChatGPT sign-in in auth.json; the model and reasoning level come from OPENAI_MODEL and REASONING.
+export async function openModel(modelId = process.env.OPENAI_MODEL ?? "gpt-6-sol") {
+  const models = createModels({ credentials: await FileCredentialStore.open() });
+  models.setProvider(openaiProvider());
+  if (!(await models.getAuth("openai"))) throw new Error("ChatGPTでのログインが必要です");
+  const model = models.getModel("openai", modelId) ?? (() => { throw new Error(`未対応のモデル: ${modelId}`); })();
+  return { models, model, reasoning: (process.env.REASONING ?? "medium") as ThinkingLevel };
 }

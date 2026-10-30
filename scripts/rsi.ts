@@ -1,41 +1,55 @@
-// Recursive self-improvement loop. Each generation, the incumbent harness runs a dynamic session whose workspace is a git
+// Recursive self-improvement loop. Each generation, the incumbent harness runs a session whose workspace is a git
 // worktree of its own source; scripts/rsi-eval.ts scores the resulting candidate against the incumbent; an accepted
 // candidate becomes the harness that runs the next generation. state.json records every generation for the dashboard.
 // Every step resumes after a stop: the session from its state.sqlite, the evaluation from its LoCoMo output.
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { $, type Subprocess } from "bun";
 import type { Eval } from "./rsi-eval.ts";
+import { resolveSettings, type RsiSettings } from "./rsi-defaults.ts";
+import { collect, diagnosticsMarkdown, traceMarkdown, type Stats } from "./rsi-traces.ts";
+import { brief, closed, comparison, criticRecord, directionOf, invest, ledger, review, type Ask, type Grant, type Review } from "./rsi-judges.ts";
+import { MODEL_TIMEOUT_MS, withTimeout } from "../src/agent.ts";
+import { openModel } from "../src/auth.ts";
+import { Database } from "bun:sqlite";
 
 const { values: opts } = parseArgs({
   options: {
     dir: { type: "string", default: ".hyph/rsi" },
-    calls: { type: "string", default: "150" },
-    generations: { type: "string" },
+    // Settings left out keep the value of the previous start (state.json), then the defaults in rsi-defaults.ts.
+    purpose: { type: "string" },
+    constraints: { type: "string" },
+    // Organization of the improver session.
+    mode: { type: "string" },
+    // Model-call budget of one improver session, and of one question in an evaluation.
+    calls: { type: "string" },
+    "eval-calls": { type: "string" },
     "per-category": { type: "string" },
-    // Questions solved at once in an evaluation; each runs its own session. Defaults to all of them.
-    parallel: { type: "string" },
+    // Evaluated arm: dynamic (conversation in files) or memory (conversation in DeLM).
+    arm: { type: "string" },
     seed: { type: "string" },
-    delta: { type: "string", default: "0.05" },
+    delta: { type: "string" },
+    // Not carried over: questions solved at once in an evaluation (defaults to all of them) and the generation limit.
+    parallel: { type: "string" },
+    generations: { type: "string" },
+    // on: an investor funds each generation and critics with an evaluator review accepted candidates (scripts/rsi-judges.ts).
+    judges: { type: "string" },
   },
 });
 
 export type Generation = {
   gen: number; base: number | null; phase: "improve" | "evaluate" | "done"; startedAt: number; endedAt?: number;
   commit?: string; status?: string; note?: string; eval?: Omit<Eval, "perSample" | "sampleIds">; accepted?: boolean; reason?: string; error?: string;
+  // Investment and review: the grant made before improving, the files changed, model calls spent, and the critics' review.
+  grant?: Grant; direction?: string; spent?: number; review?: Review;
+  judgeCalls?: number; // model calls of the investor, critic and evaluator for this generation
 };
 export type State = {
   incumbent?: { gen: number; commit: string; tree: string; eval: string };
-  settings: Record<string, string | undefined>; generations: Generation[];
+  settings: RsiSettings; generations: Generation[];
 };
 
-const PURPOSE = `Improve the hypharness agent harness whose source is this workspace (a git checkout of the harness that is running you).
-Objective: when the harness's dynamic organization answers a fixed LoCoMo-Plus subset, raise the judge score and lower the peak prompt tokens per question.
-rsi-traces/ holds evidence from the current harness: eval.json (score, per-sample scores, context sizes), locomo/judgments.jsonl and predictions.jsonl, locomo/dynamic/<sample>/contexts/*.md (each agent's working memory and live context), and history.md (earlier generations, their predicted and measured effects).
-Read the raw traces to find a cause, then make one focused change to the harness source. bun run check and bun test must pass.
-Before finishing, write rsi-traces/note.md: what you changed, why, and the effect you predict on score and peak tokens.`;
-const CONSTRAINTS = "Edit only files inside the workspace. Do not modify src/locomo.ts, delete tests, or encode LoCoMo questions or answers. Never read or print auth.json or .env.";
 const RETRY_MS = 10 * 60_000;
 
 const repo = resolve(import.meta.dir, "..");
@@ -80,7 +94,47 @@ async function writeTraces(state: State, workspace: string) {
   await $`cp ${state.incumbent!.eval} ${join(dst, "eval.json")}`;
   await $`rsync -a --prune-empty-dirs '--include=*/' '--include=contexts/***' --include=answer.txt '--include=*.jsonl' '--exclude=*' ${join(src, "locomo")}/ ${join(dst, "locomo")}/`.quiet();
   await Bun.write(join(dst, "history.md"), `# Earlier generations\n\n${history(state)}\n`);
+  // Call-by-call traces per question and a summary across questions, read from each question's state.sqlite.
+  const judged = join(src, "locomo", "judgments.jsonl"), arm = state.settings.arm, armDir = join(src, "locomo", arm);
+  const scores = new Map((existsSync(judged) ? readFileSync(judged, "utf8").split("\n").filter(Boolean) : [])
+    .flatMap(l => { try { const j = JSON.parse(l); return j.arm === arm ? [[String(j.id).replaceAll(":", "-"), Number(j.score)] as const] : []; } catch { return []; } }));
+  const stats: Stats[] = [];
+  for (const sample of existsSync(armDir) ? readdirSync(armDir).sort() : []) {
+    const db = join(armDir, sample, "state.sqlite");
+    if (!existsSync(db)) continue;
+    const s = collect(db, sample, scores.get(sample));
+    stats.push(s);
+    await Bun.write(join(dst, "locomo", arm, sample, "trace.md"), traceMarkdown(s));
+  }
+  await Bun.write(join(dst, "diagnostics.md"), diagnosticsMarkdown(stats));
 }
+
+// The judges call the model directly from this checkout; the candidate never runs them.
+let llm: Awaited<ReturnType<typeof openModel>> | undefined;
+// Calls made for a generation are added to it by judged().
+let judgeCalls = 0;
+async function judged<T>(g: Generation, fn: () => Promise<T>) {
+  const before = judgeCalls;
+  try { return await fn(); } finally { g.judgeCalls = (g.judgeCalls ?? 0) + judgeCalls - before; }
+}
+const ask: Ask = async prompt => {
+  judgeCalls++;
+  llm ??= await openModel();
+  const m = llm;
+  const reply = await withTimeout(MODEL_TIMEOUT_MS, signal =>
+    m.models.completeSimple(m.model, { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, { reasoning: m.reasoning, signal }));
+  if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(`judge model error: ${reply.errorMessage}`);
+  return reply.content.filter(b => b.type === "text").map(b => b.text).join("");
+};
+
+const improverCalls = (gen: number) => {
+  const path = join(genDir(gen), "state.sqlite");
+  if (!existsSync(path)) return 0;
+  const db = new Database(path, { readonly: true });
+  try { return Number((db.query("select value from meta where key = 'model_calls'").get() as { value: string } | null)?.value ?? 0); } finally { db.close(); }
+};
+const spentOn = (g: Generation) => improverCalls(g.gen) + (g.eval?.context?.calls ?? 0) + (g.judgeCalls ?? 0);
+const evalSummary = (path: string) => { const { perSample: _, sampleIds: __, ...rest } = JSON.parse(readFileSync(path, "utf8")) as Eval; return JSON.stringify(rest); };
 
 async function improve(state: State, g: Generation) {
   const dir = genDir(g.gen), workspace = join(dir, "workspace");
@@ -90,8 +144,12 @@ async function improve(state: State, g: Generation) {
   const fresh = !existsSync(join(dir, "state.sqlite"));
   // A resumed session keeps the traces it started with, including the note the improver already wrote.
   if (fresh) await writeTraces(state, workspace);
-  const code = await run(["bun", join(state.incumbent!.tree, "src", "index.ts"), ...(fresh ? [PURPOSE, "--constraints", CONSTRAINTS] : []),
-    "--dir", dir, "--allow-shell", "--calls", opts.calls!], join(dir, "run.log"));
+  // Purpose, constraints and organization belong to a new session; a resumed one keeps those it started with.
+  const { purpose, constraints, mode, calls, judges } = state.settings;
+  const shut = closed(ledger(state.generations));
+  if (fresh && judges === "on" && !g.grant) g.grant = await judged(g, () => invest(ask, { history: history(state), incumbent: evalSummary(state.incumbent!.eval), ledger: ledger(state.generations), maxCalls: Number(calls) }));
+  const code = await run(["bun", join(state.incumbent!.tree, "src", "index.ts"), ...(fresh ? [purpose + (g.grant ? brief(g.grant, shut) : ""), `--constraints=${constraints}`, "--mode", mode] : []),
+    "--dir", dir, "--allow-shell", "--calls", String(g.grant?.calls ?? calls)], join(dir, "run.log"));
   const status = [...readFileSync(join(dir, "run.log"), "utf8").matchAll(/"status": "(\w+)"/g)].at(-1)?.[1];
   if (code !== 0 || !status || status === "error") throw new Error(`improver session ended with exit ${code}, status ${status ?? "unknown"}`);
   g.status = status;
@@ -106,6 +164,12 @@ async function improve(state: State, g: Generation) {
   const subject = g.note?.split("\n").find(l => l.trim())?.replace(/^#+\s*/, "").slice(0, 72) || "candidate";
   await $`git -C ${workspace} commit -q -m ${`rsi gen ${g.gen}: ${subject}`} -m ${g.note ?? ""}`;
   g.commit = (await $`git -C ${workspace} rev-parse HEAD`.text()).trim();
+  g.direction = directionOf((await $`git -C ${workspace} diff --name-only ${state.incumbent!.commit} HEAD`.text()).split("\n"));
+  // A closed direction gets no evaluation: its changes kept losing, and evaluating is the larger cost.
+  if (judges === "on" && shut.includes(g.direction)) {
+    Object.assign(g, { phase: "done", accepted: false, reason: `direction closed: ${g.direction}`, spent: spentOn(g), endedAt: Date.now() });
+    return;
+  }
   g.phase = "evaluate";
 }
 
@@ -114,14 +178,26 @@ async function evaluate(state: State, g: Generation) {
   if (!existsSync(workspace)) await $`git -C ${repo} worktree add -f --detach ${workspace} HEAD`.quiet();
   g.commit ??= (await $`git -C ${workspace} rev-parse HEAD`.text()).trim();
   rmSync(join(out, "eval.json"), { force: true });
-  await run(["bun", join(repo, "scripts", "rsi-eval.ts"), workspace, "--out", out, "--per-category", opts["per-category"]!, "--seed", opts.seed!,
-    "--delta", opts.delta!, "--harness-concurrency", opts.parallel ?? String(6 * Number(opts["per-category"])), ...(state.incumbent ? ["--baseline", state.incumbent.eval] : [])], join(dir, "eval.log"));
+  const { perCategory, seed, delta, evalCalls, parallel, arm } = state.settings;
+  await run(["bun", join(repo, "scripts", "rsi-eval.ts"), workspace, "--out", out, "--per-category", perCategory, "--seed", seed, "--calls", evalCalls, "--arm", arm,
+    "--delta", delta, "--harness-concurrency", parallel ?? String(6 * Number(perCategory)), ...(state.incumbent ? ["--baseline", state.incumbent.eval] : [])], join(dir, "eval.log"));
   const evalPath = join(out, "eval.json");
   const e: Eval | undefined = existsSync(evalPath) ? JSON.parse(readFileSync(evalPath, "utf8")) : undefined;
   if (!e || e.transient) throw new Error(`evaluation did not finish: ${e?.reason ?? "no eval.json (see eval.log)"}`);
   if (!state.incumbent && !e.accepted) throw new Error(`the starting harness fails its own checks: ${e.reason}`);
   const { perSample: _, sampleIds: __, ...summary } = e;
-  Object.assign(g, { eval: summary, accepted: e.accepted, reason: e.reason, phase: "done", endedAt: Date.now() });
+  // The mechanical rule is the floor: the review can only turn an acceptance into a rejection.
+  const incumbent = state.incumbent;
+  if (e.accepted && incumbent && state.settings.judges === "on" && !g.review) {
+    const diff = await $`git -C ${workspace} diff ${incumbent.commit} HEAD`.text();
+    g.review = await judged(g, () => review(ask, {
+      diff, note: g.note ?? "", result: e.reason ?? "",
+      comparison: comparison((JSON.parse(readFileSync(incumbent.eval, "utf8")) as Eval).perSample ?? {}, e.perSample ?? {}),
+      record: criticRecord(state.generations.map(x => x.review)),
+    }));
+  }
+  if (e.accepted && incumbent && g.review?.veto) { e.accepted = false; e.reason = `vetoed: ${g.review.reason} (mechanical: ${e.reason})`; }
+  Object.assign(g, { eval: summary, accepted: e.accepted, reason: e.reason, phase: "done", spent: spentOn({ ...g, eval: summary }), endedAt: Date.now() });
   if (e.accepted) state.incumbent = { gen: g.gen, commit: g.commit!, tree: join(out, "tree"), eval: evalPath };
 }
 
@@ -137,17 +213,9 @@ async function main() {
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => { child?.kill("SIGTERM"); releasePid(); process.exit(0); });
 
   const state: State = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { settings: {}, generations: [] };
-  // Every generation is compared with the incumbent on the same samples, so the sample set is fixed by the first start.
-  const fixed = { perCategory: state.settings.perCategory ?? "3", seed: state.settings.seed ?? "1" };
-  if (state.generations.length) {
-    for (const [key, flag] of [["perCategory", "per-category"], ["seed", "seed"]] as const)
-      if (opts[flag] !== undefined && opts[flag] !== fixed[key]) throw new Error(`--${flag} is fixed at ${fixed[key]} for ${root}; start a new --dir to change it`);
-  } else Object.assign(fixed, { perCategory: opts["per-category"] ?? fixed.perCategory, seed: opts.seed ?? fixed.seed });
-  opts["per-category"] = fixed.perCategory;
-  opts.seed = fixed.seed;
-  state.settings = { calls: opts.calls, perCategory: fixed.perCategory, seed: fixed.seed, delta: opts.delta, parallel: opts.parallel, generations: opts.generations };
+  state.settings = resolveSettings(state.settings, state.generations.length > 0, opts);
   const save = () => writeFileSync(statePath, JSON.stringify(state, null, 2));
-  const limit = opts.generations ? Number(opts.generations) : Infinity;
+  const limit = state.settings.generations ? Number(state.settings.generations) : Infinity;
   log(`loop started (pid ${process.pid}); incumbent ${state.incumbent ? `gen ${state.incumbent.gen}` : "none yet"}`);
 
   for (;;) {
