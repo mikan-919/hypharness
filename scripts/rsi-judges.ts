@@ -5,6 +5,8 @@
 // reject: the mechanical rule in rsi-eval.ts stays the floor. Incentives come from prompts (records of upheld and
 // overruled objections), since weights cannot be trained through the API. The candidate is compared only with its
 // neighbour in the ranking, the incumbent.
+// These are not the market roles of src/triggers.ts, which work inside a harness session and which the improver may
+// change; these judge the improver's candidates and stay out of its reach.
 
 export type Ask = (prompt: string) => Promise<string>;
 export type Grant = { direction: string; rationale: string; expected: string; calls: number };

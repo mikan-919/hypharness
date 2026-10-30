@@ -9,6 +9,7 @@ import { isSteward } from "./memory.ts";
 // In market mode the flow is: lead splits a goal (goal_created) -> the investor funds the subgoal with a model-call
 // budget or declines it -> a worker does the funded task -> a critic objects to the result or passes it -> the
 // evaluator rules on the objections. A task that spends its budget goes back to the investor.
+// These roles work inside a harness session; the RSI loop's own investor and judges (scripts/rsi-judges.ts) are separate.
 
 type Organization = Store["config"]["organization"];
 type EventTrigger = { on: string; modes?: Organization[]; fire: (store: Store, agent: string, detail: Record<string, any>) => void };
