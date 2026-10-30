@@ -265,6 +265,10 @@ export const tools: Record<string, Def<TSchema>> = {
           c.store.run("update tasks set status = 'review', result = ?, rev = rev + 1 where id = ?", a.result, task.id);
           requestVerification(c.store, task.goal, c.agent.id, task.id, `Verify task ${task.id}.\nTask: ${task.description}\nClaimed result: ${a.result}\nInspect the actual artifacts; do not trust the claim.`);
         } else {
+          // A steer task exists because its goal had nothing pending; finishing it without a decision would only recreate it.
+          const goal = c.store.goal(task.goal)!;
+          const pending = c.store.get("select 1 from goals where parent = ?1 and status in ('open', 'review') union all select 1 from tasks where goal = ?1 and status in ('open', 'claimed', 'review') and id != ?2", goal.id, task.id);
+          if (goal.status === "open" && !pending) fail(`Goal ${goal.id} is still open with nothing pending. Submit it with goal_complete, create tasks or subgoals, refine or drop it with goal_update, or task_release if you need more time.`);
           c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", a.result, task.id);
         }
       });
@@ -519,6 +523,22 @@ export const tools: Record<string, Def<TSchema>> = {
       const text = await Bun.file(safePath(c.workspace, a.path)).text();
       const offset = a.offset ?? 0, limit = a.limit ?? 3000;
       return `${a.path} chars ${offset}-${Math.min(offset + limit, text.length)} of ${text.length}:\n${text.slice(offset, offset + limit)}`;
+    },
+  }),
+  file_search: def({
+    description: "Find lines containing a text (case-insensitive) in workspace files, with file and line number. Use it to locate what to read instead of reading everything.",
+    parameters: Type.Object({ query: Type.String({ minLength: 1 }), path: Opt(Str("Directory or file to search; defaults to the whole workspace")) }),
+    async run(c, a) {
+      const start = safePath(c.workspace, a.path ?? ".");
+      if (!existsSync(start)) fail(`${a.path} does not exist`);
+      const paths = statSync(start).isDirectory() ? readdirSync(start, { recursive: true }).map(f => join(start, String(f))).filter(f => statSync(f).isFile()) : [start];
+      const needle = a.query.toLowerCase(), hits: string[] = [];
+      for (const path of paths.sort()) {
+        const lines = (await Bun.file(path).text()).split("\n");
+        lines.forEach((l, i) => { if (hits.length < 40 && l.toLowerCase().includes(needle)) hits.push(`${relative(c.workspace, path)}:${i + 1}: ${l.slice(0, 200)}`); });
+        if (hits.length >= 40) break;
+      }
+      return hits.join("\n") || "No matches";
     },
   }),
   file_write: def({

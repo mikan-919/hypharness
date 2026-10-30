@@ -8,6 +8,7 @@ import { FileCredentialStore } from "./auth.ts";
 import { defaultConfig, Store, type Config } from "./db.ts";
 import { report, runScheduler } from "./scheduler.ts";
 import type { Runtime } from "./agent.ts";
+import { CATEGORIES, runLocomo } from "./locomo.ts";
 
 const { values: opts, positionals } = parseArgs({
   allowPositionals: true,
@@ -21,6 +22,12 @@ const { values: opts, positionals } = parseArgs({
     rounds: { type: "string", default: "100" },
     "allow-shell": { type: "boolean", default: false },
     check: { type: "string" },
+    arms: { type: "string", default: "direct,dynamic" },
+    "per-category": { type: "string", default: "2" },
+    categories: { type: "string" },
+    seed: { type: "string", default: "1" },
+    "judge-model": { type: "string" },
+    out: { type: "string" },
   },
 });
 
@@ -31,10 +38,9 @@ const int = (v: string | undefined, name: string) => {
   return n;
 };
 
-async function openModel() {
+async function openModel(modelId = process.env.OPENAI_MODEL ?? "gpt-6-sol") {
   const models = createModels({ credentials: await FileCredentialStore.open() });
   models.setProvider(openaiProvider());
-  const modelId = process.env.OPENAI_MODEL ?? "gpt-6-sol";
   if (!(await models.getAuth("openai"))) throw new Error("ChatGPTでのログインが必要です");
   const model = models.getModel("openai", modelId) ?? (() => { throw new Error(`未対応のモデル: ${modelId}`); })();
   return { models, model, reasoning: (process.env.REASONING ?? "medium") as ThinkingLevel };
@@ -71,7 +77,26 @@ async function checkWorkspace(workspace: string) {
 const [command, ...rest] = positionals;
 const log = (line: string) => console.log(line);
 
-if (command === "status") {
+if (command === "locomo") {
+  const arms = opts.arms!.split(",").map(a => a.trim()).filter(Boolean);
+  for (const a of arms) if (!["direct", "single", "fixed", "dynamic"].includes(a)) throw new Error(`Unknown arm ${a}; use direct, single, fixed, dynamic`);
+  const categories = opts.categories?.split(",").map(c => c.trim()).filter(Boolean);
+  for (const c of categories ?? []) if (!CATEGORIES.includes(c)) throw new Error(`Unknown category ${c}; use ${CATEGORIES.join(", ")}`);
+  const perCategory = opts["per-category"] === "all" ? "all" : int(opts["per-category"], "per-category")!;
+  const llm = await openModel();
+  const judgeLlm = opts["judge-model"] ? await openModel(opts["judge-model"]) : llm;
+  const out = opts.out ?? join(opts.dir!, `locomo-${Date.now()}`);
+  log(`results: ${out}`);
+  const report = await runLocomo(llm, judgeLlm, {
+    out, cacheDir: join(opts.dir!, "locomo-data"), arms, categories, perCategory, seed: Number.isSafeInteger(Number(opts.seed)) ? Number(opts.seed) : (() => { throw new Error("--seed must be an integer"); })(), log,
+    calls: int(opts.calls, "calls") ?? 40, concurrency: int(opts.concurrency, "concurrency") ?? 2,
+  });
+  console.table(Object.fromEntries(Object.entries(report.results).map(([arm, r]) => [arm, {
+    avg: r.overallAvg, judged: r.judged, ...Object.fromEntries(Object.entries(r.byCategory).map(([c, v]) => [c, v.avg])),
+    calls: r.usage.calls, tokens: r.usage.input + r.usage.cacheRead + r.usage.cacheWrite + r.usage.output, seconds: Math.round(r.ms / 1000),
+  }])));
+  console.log(`report: ${join(out, "report.json")}`);
+} else if (command === "status") {
   const { store } = open(opts.dir!);
   if (!store.purpose) throw new Error(`No session in ${opts.dir}`);
   console.log(`purpose: ${store.purpose}`);

@@ -32,6 +32,39 @@ bun run bench 'ToDo管理のCLIを書く' --calls 60 --allow-shell --check 'bun 
 
 同じ目的・モデル・呼び出し上限で single、fixed、dynamic を別々の状態で順に実行し、完了状態、最上位目標が独立検証されたか、検査コマンドの終了コード、モデル呼び出し数、入出力トークン数、キャッシュ読み取りトークン数、最大入力文字数、経過時間、エージェント数、組織変更数を `.hyph/bench-<時刻>/report.json` に書きます。モデルの応答は実行ごとに変わるため、結果も実行ごとに変わります。
 
+## LoCoMo-Plus ベンチマーク
+
+[LoCoMo-Plus](https://github.com/xjtuleeyf/Locomo-Plus)（長期にわたる会話の記憶を測る評価。LoCoMo の5分類の質問に、会話の前のほうにある暗黙の手がかりを後の発言に結び付けられるかを問う Cognitive 分類を加えたもの）で、ハーネスと単発のモデル呼び出しを比較します。
+
+```bash
+bun run src/index.ts locomo --arms direct,single,dynamic --per-category 2 --calls 40
+bun run src/index.ts locomo --arms direct --categories Cognitive,adversarial --per-category 10
+bun run src/index.ts locomo --out .hyph/locomo-1234   # 中断した実行を同じ出力先で続ける
+```
+
+| オプション | 意味 |
+| --- | --- |
+| `--arms` | 比較する方式。`direct` は参照実装と同じく会話全体と質問を1回の呼び出しで渡す。`single`・`fixed`・`dynamic` はハーネスをその組織で1問ごとに実行する（既定値 `direct,dynamic`） |
+| `--per-category N` | 分類ごとの問題数。`all` で全2,387問（既定値 2） |
+| `--categories` | 対象の分類（multi-hop, temporal, common-sense, single-hop, adversarial, Cognitive） |
+| `--seed N` | 問題の選び方を決める乱数の種。同じ種なら全方式が同じ問題を解く（既定値 1） |
+| `--calls N` | ハーネス方式の1問あたりの呼び出し上限（既定値 40） |
+| `--concurrency N` | `direct` の同時実行数（既定値 2） |
+| `--judge-model ID` | 採点に使うモデル（既定値は `OPENAI_MODEL`） |
+| `--out DIR` | 出力先（既定値 `.hyph/locomo-<時刻>`） |
+
+データは参照実装のリポジトリから固定したコミットの `locomo10.json` と `locomo_plus.json` を取得し、`.hyph/locomo-data/` に保存します。リポジトリにライセンスの記載がないため、データはこのリポジトリに含めていません。問題の組み立て（会話の整形、根拠の文、手がかりと発言の挿入位置）と採点（分類ごとの判定文、correct=1・partial=0.5・wrong=0、判定結果の読み取り）は参照実装を移植しています。参照実装と同じく、時刻が重なって会話を組み立てられない Cognitive の33問は、モデルを呼ばずに `(no input_prompt)` として採点します。
+
+ハーネス方式では、会話を1回で読める大きさ（3,000文字以下）のファイルに分けて作業ディレクトリの `conversation/` に置き、目的として指示と質問を渡します。エージェントは `file_search` と `file_read` で必要な箇所を探し、答えを `answer.txt` に書きます。各問題のセッションは `<出力先>/<方式>/<問題ID>/` に残り、ダッシュボードで経過を確認できます。
+
+出力先には次のファイルができます。予測と採点は1問ごとに追記され、同じ出力先で再実行すると済んだ問題を飛ばします。モデル提供元のエラーは予測や採点として記録せず、3回続くと中断します。
+
+- `predictions.jsonl`: 方式・問題ごとの予測、終わり方（`answered`、ハーネスの `done`・`budget` など）、呼び出し回数とトークン数、時間
+- `judgments.jsonl`: 判定ラベル、理由、点数、判定結果を文字列の一致で読み取ったかどうか
+- `report.json`: データの出典とハッシュ値、問題 ID の一覧、方式ごとの平均点・分類別の平均点・使用量・採点にかかった使用量
+
+論文は採点に gpt-4o-mini を使っているため、別のモデルで採点した点数とは直接比較できません。参照実装は予測で temperature 0.3、採点で 0 を指定しますが、ChatGPT でサインインしている場合、pi-ai は temperature を送りません。
+
 ## ダッシュボード
 
 ハーネスの操作画面です。実行の開始・再開・停止と、進行状況・成果物・テレメトリの確認をブラウザで行えます。
