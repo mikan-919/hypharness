@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { defaultConfig, Store, type Config } from "./db.ts";
 import { runScheduler } from "./scheduler.ts";
-import { safePath } from "./tools.ts";
+import { safePath, toolSchemas, tools, type ToolContext } from "./tools.ts";
 import type { Runtime } from "./agent.ts";
 
 // A scripted agent: reads its opening message and the tools it already used, and returns the next tool call.
@@ -124,4 +124,31 @@ test("fixed organization: three agents work concurrently, verify each other, and
   expect(work).toHaveLength(4);
   for (const t of work) expect(t.verified_by).not.toBe(t.claimed_by);
   expect(store.goal("G0")!.verified_by).not.toBe("lead");
+});
+
+test("web_search sends the query to Parallel and returns ranked excerpts", async () => {
+  const { store, rt } = setup({});
+  const c = { store, agent: store.agent("lead")!, task: { id: "T-1" }, workspace: rt.workspace, contextDir: rt.contextDir, episode: "e", messages: [] } as unknown as ToolContext;
+  const args = { objective: "Find Bun's SQLite API", queries: ["bun sqlite api"], include_domains: ["bun.com"] };
+  const original = globalThis.fetch, key = process.env.PARALLEL_API_KEY;
+  try {
+    delete process.env.PARALLEL_API_KEY;
+    expect(toolSchemas().map(t => t.name)).not.toContain("web_search");
+    await expect(tools.web_search!.run(c, args)).rejects.toThrow("not configured");
+    process.env.PARALLEL_API_KEY = "test-key";
+    expect(toolSchemas().map(t => t.name)).toContain("web_search");
+    let sent: { url: string; init: RequestInit } | undefined;
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      sent = { url, init };
+      return Response.json({ search_id: "s", session_id: "T-1", warnings: null, results: [{ url: "https://bun.com/docs/api/sqlite", title: "SQLite", publish_date: null, excerpts: ["bun:sqlite is built in"] }] });
+    }) as typeof fetch;
+    const out = await tools.web_search!.run(c, args);
+    expect(sent!.url).toBe("https://api.parallel.ai/v1/search");
+    expect((sent!.init.headers as Record<string, string>)["x-api-key"]).toBe("test-key");
+    expect(JSON.parse(sent!.init.body as string)).toMatchObject({ search_queries: ["bun sqlite api"], session_id: "T-1", advanced_settings: { source_policy: { include_domains: ["bun.com"] } } });
+    expect(out).toContain("[1] SQLite\nhttps://bun.com/docs/api/sqlite\nbun:sqlite is built in");
+  } finally {
+    globalThis.fetch = original;
+    if (key === undefined) delete process.env.PARALLEL_API_KEY; else process.env.PARALLEL_API_KEY = key;
+  }
 });
