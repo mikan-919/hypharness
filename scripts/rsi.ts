@@ -183,7 +183,9 @@ async function evaluate(state: State, g: Generation) {
     "--delta", delta, "--harness-concurrency", parallel ?? String(6 * Number(perCategory)), ...(state.incumbent ? ["--baseline", state.incumbent.eval] : [])], join(dir, "eval.log"));
   const evalPath = join(out, "eval.json");
   const e: Eval | undefined = existsSync(evalPath) ? JSON.parse(readFileSync(evalPath, "utf8")) : undefined;
-  if (!e || e.transient) throw new Error(`evaluation did not finish: ${e?.reason ?? "no eval.json (see eval.log)"}`);
+  // The last error line in eval.log names the cause (a provider outage, an unknown model).
+  const cause = readFileSync(join(dir, "eval.log"), "utf8").match(/^error: .*$/gm)?.at(-1);
+  if (!e || e.transient) throw new Error(`evaluation did not finish: ${e?.reason ?? "no eval.json (see eval.log)"}${cause ? ` (${cause})` : ""}`);
   if (!state.incumbent && !e.accepted) throw new Error(`the starting harness fails its own checks: ${e.reason}`);
   const { perSample: _, sampleIds: __, ...summary } = e;
   // The mechanical rule is the floor: the review can only turn an acceptance into a rejection.

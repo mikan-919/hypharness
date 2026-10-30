@@ -246,7 +246,7 @@ function NewRun({ onStarted, onClose }: { onStarted: (dir: string) => void; onCl
   );
 }
 
-function RunControl({ session, o }: { session: string; o?: Overview }) {
+function RunControl({ session, o, onDeleted }: { session: string; o?: Overview; onDeleted: (dir: string) => void }) {
   const list = usePoll<RunInfo[]>("/api/runs", 2000);
   const run = runFor(list, session);
   const live = usePoll<RunInfo & { lines: string[] }>(run ? `/api/output?dir=${enc(run.dir)}` : null, 2000);
@@ -284,6 +284,9 @@ function RunControl({ session, o }: { session: string; o?: Overview }) {
               <Label htmlFor="resume-shell">シェルを許可</Label>
             </div>
             <Button type="submit" disabled={done} title={done ? "最上位目標は完了しています" : undefined}>再開する</Button>
+            <Button type="button" variant="outline" className="text-destructive" onClick={() => {
+              if (confirm(`この実行のディレクトリ（${session.split("/").slice(0, 2).join("/")}）を削除します。ベンチマークなら全セッションが消え、元に戻せません。`)) act(async () => onDeleted((await post("/api/runs/delete", { session })).dir));
+            }}>削除する</Button>
           </form>
         )}
       </CardHeader>
@@ -329,14 +332,14 @@ function Files({ session }: { session: string }) {
   );
 }
 
-function Dashboard({ session }: { session: string }) {
+function Dashboard({ session, onDeleted }: { session: string; onDeleted: (dir: string) => void }) {
   const o = usePoll<Overview>(`/api/overview?s=${encodeURIComponent(session)}`);
   const [agentId, setAgentId] = useState<string>();
   const [taskStatus, setTaskStatus] = useState("all");
   const [tab, setTab] = useState(() => location.hash.slice(1) || "agents");
   useEffect(() => { history.replaceState(null, "", `#${tab}`); }, [tab]);
   useEffect(() => setAgentId(undefined), [session]);
-  if (!o) return <div className="grid gap-6"><RunControl session={session} /><div className="text-muted-foreground">状態を読み込み中…</div></div>;
+  if (!o) return <div className="grid gap-6"><RunControl session={session} onDeleted={onDeleted} /><div className="text-muted-foreground">状態を読み込み中…</div></div>;
   const t = o.totals, root = o.goals.find(g => g.id === "G0");
   const work = o.tasks.filter(x => x.kind === "work");
   const agent = o.agents.find(a => a.id === agentId);
@@ -344,7 +347,7 @@ function Dashboard({ session }: { session: string }) {
 
   return (
     <div className="grid gap-6">
-      <RunControl session={session} o={o} />
+      <RunControl session={session} o={o} onDeleted={onDeleted} />
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">最上位目的 {root && <Status value={root.status} />}</CardTitle>
@@ -1069,7 +1072,9 @@ function Chat({ onOpen }: { onOpen: (id: string) => void }) {
 }
 
 function App() {
-  const list = usePoll<Session[]>("/api/sessions");
+  // A deleted run stays hidden until the next poll drops it, so it is not selected again in between.
+  const [deleted, setDeleted] = useState<string>();
+  const list = usePoll<Session[]>("/api/sessions")?.filter(s => !deleted || (s.id !== deleted && !s.id.startsWith(`${deleted}/`)));
   const [session, setSession] = useState<string>();
   const [creating, setCreating] = useState(false);
   const [view, setView] = useState<"session" | "rsi" | "chat">(() => location.hash.startsWith("#rsi") ? "rsi" : location.hash === "#chat" ? "chat" : "session");
@@ -1104,7 +1109,7 @@ function App() {
       {creating && <NewRun onClose={() => setCreating(false)} onStarted={dir => { setCreating(false); setSession(dir); }} />}
       {view === "chat" ? <Chat onOpen={leaveRsi} /> : view === "rsi" ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
         {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
-        {session && <Dashboard session={session} />}
+        {session && <Dashboard session={session} onDeleted={dir => { setDeleted(dir); setSession(undefined); }} />}
       </>}
     </div>
   );

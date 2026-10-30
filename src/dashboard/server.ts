@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
 import type { Message } from "@earendil-works/pi-ai";
@@ -254,6 +254,19 @@ const server = Bun.serve({
         const body = await req.json() as runs.RunRequest & { session?: string };
         const s = await session(body.session) ?? (() => { throw new Error("Unknown session"); })();
         return Response.json(runs.start(s.id, { ...body, kind: "run" }, true));
+      }),
+    },
+    // Deletes the run a session belongs to: the directory directly under the data directory, so a bench run goes whole.
+    "/api/runs/delete": {
+      POST: guard(async req => {
+        const s = await session((await req.json() as { session?: string }).session) ?? (() => { throw new Error("Unknown session"); })();
+        const top = relative(root, s.id).split("/")[0]!, dir = rel(join(root, top));
+        if (!top || dir === rsiDir || dir === chatDir) throw new Error(`${dir} cannot be deleted here`);
+        const inside = (a: string, b: string) => a === b || a.startsWith(`${b}/`);
+        if (runs.list().some(r => r.running && (inside(r.dir, dir) || inside(dir, r.dir)))) throw new Error(`${dir} is running; stop it first`);
+        for (const [id, d] of open) if (inside(id, dir)) { d.close(); open.delete(id); }
+        rmSync(dir, { recursive: true, force: true });
+        return Response.json({ dir });
       }),
     },
     "/api/runs/stop": { POST: guard(async req => Response.json(runs.stop(String((await req.json() as { dir?: string }).dir)))) },

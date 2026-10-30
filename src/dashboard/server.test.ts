@@ -166,3 +166,26 @@ test("diagnostics summarize a session's tool use and a generation's questions, a
     proc.kill();
   }
 });
+
+test("deleting a session removes its whole run, but never the RSI loop's or the chat's directory", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyph-del-"));
+  for (const session of ["bench/single/q1", "bench/dynamic/q1", "keep", "rsi/gen-1"]) {
+    mkdirSync(join(dir, ".hyph", session), { recursive: true });
+    const store = new Store(join(dir, ".hyph", session, "state.sqlite"));
+    store.init(session, "", defaultConfig);
+    store.db.close();
+  }
+  const { proc, base, post } = await serve(dir);
+  try {
+    expect((await fetch(`${base}/api/overview?s=.hyph/bench/single/q1`)).status).toBe(200);
+    expect(await (await post("/api/runs/delete", { session: ".hyph/bench/single/q1" })).json()).toEqual({ dir: ".hyph/bench" });
+    expect(existsSync(join(dir, ".hyph", "bench"))).toBe(false);
+    expect(((await (await fetch(`${base}/api/sessions`)).json()) as { id: string }[]).map(s => s.id)).toEqual([".hyph/keep", ".hyph/rsi/gen-1"]);
+    expect((await post("/api/runs/delete", { session: ".hyph/rsi/gen-1" })).status).toBe(400);
+    expect((await post("/api/runs/delete", { session: ".." })).status).toBe(400);
+    expect((await post("/api/runs/delete", { session: ".hyph/keep" }, { "content-type": "application/json" })).status).toBe(403);
+    expect(existsSync(join(dir, ".hyph", "keep"))).toBe(true);
+  } finally {
+    proc.kill();
+  }
+});
