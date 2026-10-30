@@ -4,6 +4,7 @@ import type { Api, AssistantMessage, Model, ThinkingLevel } from "@earendil-work
 import type { createModels } from "@earendil-works/pi-ai/models";
 import { defaultConfig, Store, type Config } from "./db.ts";
 import { runScheduler } from "./scheduler.ts";
+import { MODEL_TIMEOUT_MS, withTimeout } from "./agent.ts";
 
 // LoCoMo-Plus benchmark (Li et al., 2026; https://github.com/xjtuleeyf/Locomo-Plus).
 // The data and the judge are ported from the reference implementation at a pinned commit; the repository has no
@@ -337,7 +338,9 @@ const zero = (): Usage => ({ calls: 0, input: 0, output: 0, cacheRead: 0, cacheW
 
 // A provider error is never turned into a prediction or a judgment: it throws, nothing is recorded, and a rerun retries.
 async function ask(llm: Llm, content: string, temperature: number, sessionId?: string) {
-  const reply = await llm.models.completeSimple(llm.model, { messages: [{ role: "user", content, timestamp: Date.now() }] }, { reasoning: llm.reasoning, temperature, sessionId });
+  const reply = await withTimeout(MODEL_TIMEOUT_MS, signal =>
+    llm.models.completeSimple(llm.model, { messages: [{ role: "user", content, timestamp: Date.now() }] }, { reasoning: llm.reasoning, temperature, sessionId, signal }))
+    .catch(e => { throw new ProviderError(e instanceof Error ? e.message : String(e)); });
   if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new ProviderError(reply.errorMessage ?? "provider error");
   return reply;
 }

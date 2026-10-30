@@ -173,3 +173,14 @@ test("a steer task cannot be finished while its goal stays open with nothing pen
   tools.task_create!.run(c, { goal: "G0", description: "more work" });
   expect(tools.task_finish!.run(c, { result: "planned" })).toBe(`Finished ${task.id}`);
 });
+
+test("a model call that never answers times out instead of holding the run", async () => {
+  const { rt } = setup({});
+  const faux = fauxProvider();
+  rt.models.setProvider(faux.provider);
+  faux.setResponses(Array(10).fill(() => new Promise(() => {})));
+  const started = Date.now();
+  const r = await runScheduler({ ...rt, model: faux.getModel(), modelTimeoutMs: 50 });
+  expect(r.status).toBe("error");
+  expect(Date.now() - started).toBeLessThan(5000);
+});

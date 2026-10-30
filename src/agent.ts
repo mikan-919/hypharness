@@ -11,7 +11,21 @@ export type Runtime = {
   workspace: string;
   contextDir: string;
   log?: (line: string) => void;
+  modelTimeoutMs?: number;
 };
+
+// A provider connection that never answers would otherwise hold the whole run; a timed-out call counts as a model error.
+export const MODEL_TIMEOUT_MS = Number(process.env.MODEL_TIMEOUT_MS ?? 300_000);
+
+// Aborts the request and also stops waiting, so a provider that ignores the abort signal cannot hang the caller.
+export async function withTimeout<T>(ms: number, call: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(new Error(`Model call timed out after ${ms} ms`)); }, ms);
+  });
+  try { return await Promise.race([call(controller.signal), timeout]); } finally { clearTimeout(timer); }
+}
 
 export class BudgetExhausted extends Error {}
 
@@ -125,7 +139,8 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
     if (!store.takeModelCall()) throw new BudgetExhausted("Model call budget exhausted");
     store.renew(task.id, agent.id);
     const started = performance.now();
-    const reply: AssistantMessage = await rt.models.completeSimple(rt.model, { systemPrompt: system, messages, tools: schemas }, { reasoning: rt.reasoning, sessionId: agent.id });
+    const reply: AssistantMessage = await withTimeout(rt.modelTimeoutMs ?? MODEL_TIMEOUT_MS, signal =>
+      rt.models.completeSimple(rt.model, { systemPrompt: system, messages, tools: schemas }, { reasoning: rt.reasoning, sessionId: agent.id, signal }));
     const u = reply.usage;
     store.run("insert into usage(agent, task, input, output, cache_read, cache_write, prompt_chars, ms, at) values(?, ?, ?, ?, ?, ?, ?, ?, ?)",
       agent.id, task.id, u.input, u.output, u.cacheRead, u.cacheWrite, system.length + JSON.stringify(messages).length, Math.round(performance.now() - started), Date.now());
