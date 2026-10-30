@@ -85,8 +85,9 @@ async function improve(state: State, g: Generation) {
   if (!existsSync(workspace)) await $`git -C ${repo} worktree add -f -B rsi/gen-${g.gen} ${workspace} ${state.incumbent!.commit}`.quiet();
   // The improver's shell runs bun check and bun test in the worktree, which has no node_modules of its own.
   if (!existsSync(join(workspace, "node_modules"))) await $`bun install`.cwd(workspace).quiet();
-  await writeTraces(state, workspace);
   const fresh = !existsSync(join(dir, "state.sqlite"));
+  // A resumed session keeps the traces it started with, including the note the improver already wrote.
+  if (fresh) await writeTraces(state, workspace);
   const code = await run(["bun", join(state.incumbent!.tree, "src", "index.ts"), ...(fresh ? [PURPOSE, "--constraints", CONSTRAINTS] : []),
     "--dir", dir, "--allow-shell", "--calls", opts.calls!], join(dir, "run.log"));
   const status = [...readFileSync(join(dir, "run.log"), "utf8").matchAll(/"status": "(\w+)"/g)].at(-1)?.[1];
@@ -94,7 +95,8 @@ async function improve(state: State, g: Generation) {
   g.status = status;
   const note = join(workspace, "rsi-traces", "note.md");
   g.note = existsSync(note) ? readFileSync(note, "utf8").slice(0, 4000) : undefined;
-  await $`git -C ${workspace} add -A -- . :!rsi-traces`.quiet();
+  // rsi-traces/ is in .gitignore; naming it in a pathspec makes git add fail on the ignored path.
+  await $`git -C ${workspace} add -A`.quiet();
   if (!(await $`git -C ${workspace} diff --cached --name-only`.text()).trim()) {
     Object.assign(g, { phase: "done", accepted: false, reason: "no changes", endedAt: Date.now() });
     return;
