@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -44,7 +44,7 @@ function usePoll<T>(url: string | null, ms = REFRESH_MS) {
 }
 
 const statusVariant: Record<string, "default" | "secondary" | "outline" | "destructive"> = {
-  done: "default", verified: "default", active: "default", claimed: "secondary", review: "secondary", running: "secondary",
+  done: "default", verified: "default", accepted: "default", active: "default", claimed: "secondary", review: "secondary", running: "secondary",
   open: "outline", hypothesis: "outline", dormant: "outline", failed: "destructive", rejected: "destructive", dropped: "destructive", expired: "destructive",
 };
 const Status = ({ value }: { value: string }) => <Badge variant={statusVariant[value] ?? "outline"}>{value}</Badge>;
@@ -497,10 +497,316 @@ function Dashboard({ session }: { session: string }) {
   );
 }
 
+type Generation = {
+  gen: number; base: number | null; phase: string; startedAt: number; endedAt?: number; commit?: string; status?: string; note?: string;
+  eval?: { ok: boolean; score?: number; reason?: string; context?: { calls: number; maxTokens: number; meanTokens: number; meanPeakTokens: number } };
+  accepted?: boolean; reason?: string; error?: string;
+};
+type EvalTotals = Row & { expected: number; judged: number; calls: number; judgeCalls: number; ms: number; byCategory: Record<string, { avg: number; count: number }> };
+type GenStats = Record<number, { improver: Row | null; eval: EvalTotals | null }>;
+type RsiInfo = {
+  dir: string; pid: number | null; lines: string[]; launcher: string[]; stats: GenStats;
+  state: { incumbent?: { gen: number; commit: string }; settings: Row; generations: Generation[] } | null;
+};
+type RsiGen = { gen: number; usage: Row[]; agents: Row[]; samples: Row[] };
+
+function StackedBars({ title, description, data, series, format = v => num.format(v) }: {
+  title: string; description: string; data: Row[]; series: Record<string, string>; format?: (v: number) => string;
+}) {
+  const config: ChartConfig = Object.fromEntries(Object.entries(series).map(([k, label], i) => [k, { label, color: `var(--chart-${i + 1})` }]));
+  return (
+    <Card>
+      <CardHeader><CardTitle>{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader>
+      <CardContent>
+        {data.length === 0 ? <div className="text-sm text-muted-foreground">まだ世代がありません</div> : (
+          <ChartContainer config={config} className="aspect-auto h-56 w-full">
+            <BarChart data={data} margin={{ left: 8, right: 16, top: 8 }}>
+              <CartesianGrid vertical={false} strokeOpacity={0.5} />
+              <XAxis dataKey="gen" tickLine={false} axisLine={false} />
+              <YAxis tickLine={false} axisLine={false} width={64} tickFormatter={format} />
+              <ChartTooltip content={<ChartTooltipContent labelFormatter={(_, p) => `世代 ${p[0]?.payload.gen}`} />} />
+              <ChartLegend content={<ChartLegendContent />} />
+              {Object.keys(series).map(k => <Bar key={k} dataKey={k} stackId="a" fill={`var(--color-${k})`} isAnimationActive={false} />)}
+            </BarChart>
+          </ChartContainer>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// Resources each generation spent: the improver's session and the evaluation's answering and judging.
+function RsiTelemetry({ gens, stats }: { gens: Generation[]; stats: GenStats }) {
+  const rows = gens.map(g => {
+    const s = stats[g.gen], im = s?.improver, ev = s?.eval;
+    return {
+      id: String(g.gen), gen: g.gen, improverCalls: im?.calls ?? 0, evalCalls: ev?.calls ?? 0, judgeCalls: ev?.judgeCalls ?? 0,
+      improverTokens: im ? promptTokens(im) : 0, evalTokens: ev ? promptTokens(ev) : 0, judgeTokens: ev?.judgeInput ?? 0,
+      improverOutput: im?.output ?? 0, evalOutput: ev?.output ?? 0, improverMax: im?.maxPromptTokens ?? 0,
+      improverMin: im?.firstAt ? Math.round((im.lastAt - im.firstAt) / 60_000) : 0, evalMin: ev ? Math.round(ev.ms / 60_000) : 0,
+      cache: pct((im?.cacheRead ?? 0) + (ev?.cacheRead ?? 0), (im ? promptTokens(im) : 0) + (ev ? promptTokens(ev) : 0)),
+      outcomes: ev ? Object.entries(ev.outcomes as Record<string, number>).map(([k, v]) => `${k} ${v}`).join("、") : "-",
+    };
+  });
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-4 lg:grid-cols-2">
+        <StackedBars title="モデル呼び出し" description="世代ごとの呼び出し回数。改善役のセッション、評価での解答、採点" data={rows}
+          series={{ improverCalls: "改善", evalCalls: "解答", judgeCalls: "採点" }} />
+        <StackedBars title="入力トークン" description="世代ごとの入力トークン（キャッシュ分を含む）" data={rows}
+          series={{ improverTokens: "改善", evalTokens: "解答", judgeTokens: "採点" }} />
+        <StackedBars title="時間（分）" description="改善は最初と最後の呼び出しの間隔、評価は問題ごとの所要時間の合計（並行に解くため実時間より長い）" data={rows}
+          series={{ improverMin: "改善", evalMin: "評価" }} />
+        <StackedBars title="改善役の最大入力トークン" description="改善役のセッションの1回の呼び出しの最大入力" data={rows} series={{ improverMax: "改善" }} />
+      </div>
+      <Card>
+        <CardHeader><CardTitle>世代ごとの使用量</CardTitle></CardHeader>
+        <CardContent>
+          <DataTable rows={[...rows].reverse()} columns={[
+            { key: "gen", label: "世代" },
+            { key: "improverCalls", label: "改善 呼出", render: r => num.format(r.improverCalls), className: "text-right tabular-nums" },
+            { key: "improverTokens", label: "改善 入力", render: r => num.format(r.improverTokens), className: "text-right tabular-nums" },
+            { key: "improverOutput", label: "改善 出力", render: r => num.format(r.improverOutput), className: "text-right tabular-nums" },
+            { key: "evalCalls", label: "解答 呼出", render: r => num.format(r.evalCalls), className: "text-right tabular-nums" },
+            { key: "evalTokens", label: "解答 入力", render: r => num.format(r.evalTokens), className: "text-right tabular-nums" },
+            { key: "judgeCalls", label: "採点 呼出", render: r => num.format(r.judgeCalls), className: "text-right tabular-nums" },
+            { key: "cache", label: "キャッシュ", className: "text-right tabular-nums" },
+            { key: "improverMin", label: "改善 分", className: "text-right tabular-nums" },
+            { key: "evalMin", label: "評価 分", className: "text-right tabular-nums" },
+            { key: "outcomes", label: "解答の終わり方", render: r => <Clip text={r.outcomes} width="max-w-xs" /> },
+          ]} />
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// One generation against the harness it was built on: by category, by question, and the improver's calls.
+function RsiDetail({ gens, gen, onGen, stats }: { gens: Generation[]; gen?: number; onGen: (g: number) => void; stats: GenStats }) {
+  const g = gens.find(x => x.gen === gen);
+  const detail = usePoll<RsiGen>(g ? `/api/rsi/gen?n=${g.gen}` : null, 5000);
+  const base = usePoll<RsiGen>(g && g.base !== null ? `/api/rsi/gen?n=${g.base}` : null, 60_000);
+  if (!g) return <div className="text-muted-foreground">まだ世代がありません</div>;
+  const cats = stats[g.gen]?.eval?.byCategory ?? {}, baseCats = g.base !== null ? stats[g.base]?.eval?.byCategory ?? {} : {};
+  const baseById = new Map((base?.samples ?? []).map(s => [s.id, s]));
+  const signed = (v: number | undefined, f: (v: number) => string) => v === undefined ? "-" : `${v > 0 ? "+" : ""}${f(v)}`;
+  const samples = (detail?.samples ?? []).map(s => {
+    const b = baseById.get(s.id);
+    return { ...s, baseScore: b?.score, baseScoreText: b ? String(b.score) : "-", scoreDiff: b ? s.score - b.score : undefined, peakDiff: b ? s.peakTokens - b.peakTokens : undefined };
+  });
+  return (
+    <div className="grid gap-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <Select value={String(g.gen)} onValueChange={v => onGen(Number(v))}>
+          <SelectTrigger className="w-48" aria-label="世代"><SelectValue /></SelectTrigger>
+          <SelectContent>{[...gens].reverse().map(x => <SelectItem key={x.gen} value={String(x.gen)}>世代 {x.gen}</SelectItem>)}</SelectContent>
+        </Select>
+        <span className="text-sm text-muted-foreground">{g.base === null ? "ベースライン" : `世代 ${g.base} と比較`}・{g.reason ?? g.error ?? "評価前"}</span>
+      </div>
+      {g.note && (
+        <Card>
+          <CardHeader><CardTitle>改善役のメモ</CardTitle><CardDescription>変更内容と予測（rsi-traces/note.md）</CardDescription></CardHeader>
+          <CardContent><pre className="max-h-64 overflow-auto text-xs whitespace-pre-wrap">{g.note}</pre></CardContent>
+        </Card>
+      )}
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+        <Card>
+          <CardHeader><CardTitle>分類別の点数</CardTitle></CardHeader>
+          <CardContent>
+            <DataTable rows={Object.entries(cats).map(([c, v]) => ({ id: c, category: c, ...v, base: baseCats[c]?.avg }))} empty="まだ採点がありません" columns={[
+              { key: "category", label: "分類" },
+              { key: "avg", label: "点数", render: r => r.avg.toFixed(2), className: "text-right tabular-nums" },
+              { key: "base", label: "比較元", render: r => r.base?.toFixed(2) ?? "-", className: "text-right tabular-nums" },
+              { key: "diff", label: "差", render: r => signed(r.base === undefined ? undefined : r.avg - r.base, v => v.toFixed(2)), className: "text-right tabular-nums" },
+              { key: "count", label: "問題数", className: "text-right tabular-nums" },
+            ]} />
+          </CardContent>
+        </Card>
+        <PerCallChart title="改善役の入力トークン" description="改善役のセッションの呼び出しごとの入力トークン（キャッシュ分を含む）"
+          usage={(detail?.usage ?? []).map(u => ({ ...u, promptTokens: promptTokens(u) }))} agents={detail?.agents ?? []} field="promptTokens" />
+      </div>
+      <Card>
+        <CardHeader><CardTitle>問題別</CardTitle><CardDescription>ピークは1問のセッションでの1回の呼び出しの最大入力トークン。差は比較元の世代との差</CardDescription></CardHeader>
+        <CardContent>
+          <DataTable rows={samples} empty="まだ採点がありません" columns={[
+            { key: "id", label: "問題" }, { key: "category", label: "分類" },
+            { key: "label", label: "判定", render: r => <Status value={r.label === "correct" ? "done" : r.label === "partial" ? "review" : "failed"} /> },
+            { key: "score", label: "点数", className: "text-right tabular-nums" },
+            { key: "baseScoreText", label: "比較元", className: "text-right tabular-nums" },
+            { key: "scoreDiff", label: "差", render: r => signed(r.scoreDiff, v => String(v)), className: "text-right tabular-nums" },
+            { key: "peakTokens", label: "ピーク", render: r => num.format(r.peakTokens), className: "text-right tabular-nums" },
+            { key: "peakDiff", label: "ピーク差", render: r => signed(r.peakDiff, v => num.format(v)), className: "text-right tabular-nums" },
+            { key: "meanTokens", label: "平均入力", render: r => num.format(r.meanTokens), className: "text-right tabular-nums" },
+            { key: "calls", label: "呼出", className: "text-right tabular-nums" },
+            { key: "ms", label: "秒", render: r => num.format(Math.round(r.ms / 1000)), className: "text-right tabular-nums" },
+            { key: "outcome", label: "終わり方" },
+          ]} />
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function GenerationChart({ title, description, rows, field, format }: { title: string; description: string; rows: Generation[]; field: (g: Generation) => number | undefined; format: (v: number) => string }) {
+  const config: ChartConfig = { candidate: { label: "候補", color: "var(--chart-1)" }, incumbent: { label: "採用済み", color: "var(--chart-2)" } };
+  // The incumbent line steps only when a candidate is accepted, so its gap to the candidate shows what was rejected.
+  let current: number | undefined;
+  const data = rows.filter(g => g.eval?.ok).map(g => {
+    const v = field(g);
+    if (g.accepted) current = v;
+    return { gen: g.gen, candidate: v, incumbent: current };
+  });
+  return (
+    <Card>
+      <CardHeader><CardTitle>{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader>
+      <CardContent>
+        {data.length === 0 ? <div className="text-sm text-muted-foreground">評価を終えた世代がまだありません</div> : (
+          <ChartContainer config={config} className="aspect-auto h-56 w-full">
+            <LineChart data={data} margin={{ left: 8, right: 16, top: 8 }}>
+              <CartesianGrid vertical={false} strokeOpacity={0.5} />
+              <XAxis dataKey="gen" tickLine={false} axisLine={false} label={{ value: "世代", position: "insideBottomRight", offset: -4, fontSize: 11 }} />
+              <YAxis tickLine={false} axisLine={false} width={64} tickFormatter={format} domain={["auto", "auto"]} />
+              <ChartTooltip content={<ChartTooltipContent labelFormatter={(_, p) => `世代 ${p[0]?.payload.gen}`} />} />
+              <ChartLegend content={<ChartLegendContent />} />
+              <Line dataKey="candidate" type="linear" stroke="var(--color-candidate)" strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
+              <Line dataKey="incumbent" type="stepAfter" stroke="var(--color-incumbent)" strokeWidth={2} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
+            </LineChart>
+          </ChartContainer>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) => void }) {
+  const info = usePoll<RsiInfo>("/api/rsi", 3000);
+  const [form, setForm] = useState({ calls: "150", generations: "", perCategory: "3", parallel: "", seed: "1", delta: "0.05" });
+  const [error, setError] = useState<string>();
+  // The tab is kept in the URL (#rsi/<tab>) so a view of the loop can be linked and reopened.
+  const [tab, setTab] = useState(() => location.hash.match(/^#rsi\/(\w+)/)?.[1] ?? "overview");
+  useEffect(() => { history.replaceState(null, "", `#rsi/${tab}`); }, [tab]);
+  const [detailGen, setDetailGen] = useState<number>();
+  const logRef = useRef<HTMLPreElement>(null);
+  useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight); }, [info?.lines.length, tab]);
+  const act = async (fn: () => Promise<unknown>) => { setError(undefined); try { await fn(); } catch (e) { setError(String((e as Error).message)); } };
+  if (!info) return <div className="text-muted-foreground">RSI の状態を読み込み中…</div>;
+  const gens = info.state?.generations ?? [];
+  const inc = info.state?.incumbent, incGen = gens.find(g => g.gen === inc?.gen);
+  const current = gens.at(-1);
+  const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
+  const sessionOf = (g: Generation) => `${info.dir}/gen-${g.gen}`;
+  const phase: Record<string, string> = { improve: "改善中", evaluate: "評価中", done: "完了" };
+  const curEval = current && info.stats[current.gen]?.eval;
+  const totals = Object.values(info.stats).reduce((t, s) => {
+    t.improver += s.improver?.calls ?? 0; t.eval += s.eval?.calls ?? 0; t.judge += s.eval?.judgeCalls ?? 0;
+    t.tokens += (s.improver ? promptTokens(s.improver) : 0) + (s.eval ? promptTokens(s.eval) : 0);
+    return t;
+  }, { improver: 0, eval: 0, judge: 0, tokens: 0, calls: 0 });
+  totals.calls = totals.improver + totals.eval + totals.judge;
+
+  return (
+    <div className="grid gap-6">
+      <Card>
+        <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-4">
+          <div className="grid gap-1.5">
+            <CardTitle className="flex items-center gap-2">再帰的自己改善 <Badge variant={info.pid ? "secondary" : "outline"}>{info.pid ? `実行中（pid ${info.pid}）` : "停止中"}</Badge></CardTitle>
+            <CardDescription>
+              採用中のハーネスが自分のソースの worktree を改善し、LoCoMo-Plus のサブセットで点数と1問あたりのピーク入力トークンを測ります。採用された候補が次の世代を動かします。状態は {info.dir} にあります
+            </CardDescription>
+          </div>
+          {info.pid ? (
+            <Button variant="destructive" onClick={() => act(() => post("/api/rsi/stop", {}))}>停止する</Button>
+          ) : (
+            <form className="flex flex-wrap items-end gap-3" onSubmit={e => {
+              e.preventDefault();
+              // The sample set is fixed by the first start; a resume keeps it.
+              const sample = gens.length ? {} : { perCategory: toInt(form.perCategory), seed: toInt(form.seed) };
+              act(() => post("/api/rsi/start", { calls: toInt(form.calls), generations: toInt(form.generations), parallel: toInt(form.parallel), ...sample, delta: form.delta.trim() ? Number(form.delta) : undefined }));
+            }}>
+              <Field id="rsi-calls" label="改善の呼び出し上限" hint="1世代あたり"><Input id="rsi-calls" className="w-28" type="number" min={1} value={form.calls} onChange={set("calls")} /></Field>
+              <Field id="rsi-gens" label="世代数" hint="空欄で止めるまで"><Input id="rsi-gens" className="w-24" type="number" min={1} value={form.generations} onChange={set("generations")} placeholder="無制限" /></Field>
+              <Field id="rsi-per" label="分類ごとの問題数"><Input id="rsi-per" className="w-24" type="number" min={1} disabled={gens.length > 0} value={gens.length ? info.state!.settings.perCategory : form.perCategory} onChange={set("perCategory")} /></Field>
+              <Field id="rsi-seed" label="種"><Input id="rsi-seed" className="w-20" type="number" disabled={gens.length > 0} value={gens.length ? info.state!.settings.seed : form.seed} onChange={set("seed")} /></Field>
+              <Field id="rsi-parallel" label="評価の並列数" hint="空欄で全問同時"><Input id="rsi-parallel" className="w-24" type="number" min={1} value={form.parallel} onChange={set("parallel")} placeholder="全問" /></Field>
+              <Field id="rsi-delta" label="許容幅 δ"><Input id="rsi-delta" className="w-20" type="number" step="0.01" min={0} max={1} value={form.delta} onChange={set("delta")} /></Field>
+              <Button type="submit">{gens.length ? "再開する" : "開始する"}</Button>
+            </form>
+          )}
+        </CardHeader>
+        {error && <CardContent><div className="text-sm text-destructive">{error}</div></CardContent>}
+      </Card>
+
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-8">
+        <Kpi label="現在の世代" value={current ? `${current.gen}` : "-"} note={current ? `${phase[current.phase] ?? current.phase}・${time(current.startedAt)} 開始` : undefined} />
+        <Kpi label="評価の進み" value={curEval ? `${curEval.judged} / ${curEval.expected}` : "-"} note={current ? `世代 ${current.gen} の採点済みの問題数` : undefined} />
+        <Kpi label="採用中" value={inc ? `世代 ${inc.gen}` : "-"} note={inc?.commit.slice(0, 10)} />
+        <Kpi label="採用中の点数" value={incGen?.eval?.score != null ? incGen.eval.score.toFixed(3) : "-"} note="0〜1（正解1・部分0.5）" />
+        <Kpi label="採用中のピーク平均" value={incGen?.eval?.context ? num.format(incGen.eval.context.meanPeakTokens) : "-"} note="1問ごとの最大入力トークンの平均" />
+        <Kpi label="採用 / 評価済み" value={`${gens.filter(g => g.gen > 0 && g.accepted).length} / ${gens.filter(g => g.gen > 0 && g.phase === "done").length}`} />
+        <Kpi label="総モデル呼び出し" value={num.format(totals.calls)} note={`改善 ${num.format(totals.improver)}・解答 ${num.format(totals.eval)}・採点 ${num.format(totals.judge)}`} />
+        <Kpi label="総入力トークン" value={num.format(totals.tokens)} note="改善と解答（キャッシュ分を含む）" />
+      </div>
+      {current?.error && <Card><CardContent className="text-sm text-destructive">世代 {current.gen} のエラー: {current.error}</CardContent></Card>}
+
+      <Tabs value={tab} onValueChange={setTab}>
+        <TabsList className="flex-wrap">
+          <TabsTrigger value="overview">概要</TabsTrigger>
+          <TabsTrigger value="telemetry">テレメトリ</TabsTrigger>
+          <TabsTrigger value="detail">世代の詳細</TabsTrigger>
+          <TabsTrigger value="log">ログ</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="overview" className="grid gap-4">
+          <div className="grid gap-4 lg:grid-cols-2">
+            <GenerationChart title="点数" description="各世代の候補と、その時点で採用中のハーネスの点数" rows={gens} field={g => g.eval?.score} format={v => v.toFixed(2)} />
+            <GenerationChart title="ピーク入力トークン" description="1問ごとの最大入力トークン（キャッシュ分を含む）の平均。低いほど良い" rows={gens} field={g => g.eval?.context?.meanPeakTokens} format={v => num.format(v)} />
+          </div>
+          <Card>
+            <CardHeader><CardTitle>世代</CardTitle><CardDescription>行を選ぶと「世代の詳細」に移ります。メモは改善役が書いた変更内容と予測です</CardDescription></CardHeader>
+            <CardContent>
+              <DataTable rows={[...gens].reverse().map(g => ({ ...g, id: String(g.gen) }))} empty="まだ世代がありません"
+                onSelect={r => { setDetailGen(r.gen); setTab("detail"); }} columns={[
+                { key: "gen", label: "世代" }, { key: "base", label: "元", render: r => r.base ?? "-" },
+                { key: "phase", label: "段階", render: r => <Status value={r.phase === "done" ? (r.gen === 0 ? "done" : r.accepted ? "accepted" : "rejected") : "running"} /> },
+                { key: "score", label: "点数", render: r => r.eval?.score?.toFixed(3) ?? "-", className: "text-right tabular-nums" },
+                { key: "peak", label: "ピーク平均", render: r => r.eval?.context ? num.format(r.eval.context.meanPeakTokens) : "-", className: "text-right tabular-nums" },
+                { key: "max", label: "最大", render: r => r.eval?.context ? num.format(r.eval.context.maxTokens) : "-", className: "text-right tabular-nums" },
+                { key: "reason", label: "判定・エラー", render: r => <Clip text={r.error ?? r.reason} width="max-w-xs" /> },
+                { key: "note", label: "メモ", render: r => <Clip text={r.note} width="max-w-sm" /> },
+                { key: "commit", label: "コミット", render: r => r.commit?.slice(0, 8) ?? "-" },
+                { key: "open", label: "", render: r => sessions.some(s => s.id === sessionOf(r as Generation))
+                  ? <Button size="sm" variant="outline" onClick={e => { e.stopPropagation(); onOpen(sessionOf(r as Generation)); }}>セッション</Button> : null },
+              ]} />
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="telemetry"><RsiTelemetry gens={gens} stats={info.stats} /></TabsContent>
+        <TabsContent value="detail">
+          <RsiDetail gens={gens} gen={detailGen ?? current?.gen} onGen={setDetailGen} stats={info.stats} />
+        </TabsContent>
+
+        <TabsContent value="log">
+          <Card>
+            <CardHeader><CardTitle>ループのログ</CardTitle><CardDescription>{info.dir}/rsi.log の末尾。各世代の詳細は gen-N/run.log と gen-N/eval.log にあります</CardDescription></CardHeader>
+            <CardContent className="grid gap-2">
+              <pre ref={logRef} className="h-96 overflow-auto rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap">{info.lines.join("\n") || "(まだありません)"}</pre>
+              {!info.pid && info.launcher.length > 0 && <pre className="max-h-40 overflow-auto rounded-md border p-3 text-xs whitespace-pre-wrap">{info.launcher.join("\n")}</pre>}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
 function App() {
   const list = usePoll<Session[]>("/api/sessions");
   const [session, setSession] = useState<string>();
   const [creating, setCreating] = useState(false);
+  const [rsi, setRsi] = useState(() => location.hash.startsWith("#rsi"));
+  // The session view reads its tab from the hash, so leaving the RSI view must not hand it "rsi/<tab>".
+  const leaveRsi = (id: string) => { history.replaceState(null, "", "#agents"); setRsi(false); setSession(id); };
   // A just-started run may not have a state file yet; keep it selected, and move into a bench run's first session once it appears.
   useEffect(() => {
     if (!list?.length || (session && list.some(s => s.id === session))) return;
@@ -514,8 +820,9 @@ function App() {
         <h1 className="text-xl font-semibold">hypharness</h1>
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
         <Button variant={creating ? "secondary" : "default"} onClick={() => setCreating(!creating)}>新規実行</Button>
+        <Button variant={rsi ? "secondary" : "outline"} onClick={() => { setRsi(!rsi); history.replaceState(null, "", rsi ? "#agents" : "#rsi"); }}>自己改善</Button>
         {list && list.length > 0 && (
-          <Select value={session} onValueChange={setSession}>
+          <Select value={session} onValueChange={leaveRsi}>
             <SelectTrigger className="w-full sm:w-[28rem]" aria-label="セッション"><SelectValue placeholder="セッション" /></SelectTrigger>
             <SelectContent>
               {list.map(s => <SelectItem key={s.id} value={s.id}>{s.id} · {s.mode} · {s.rootStatus} · {s.modelCalls} 回</SelectItem>)}
@@ -525,8 +832,10 @@ function App() {
         </div>
       </header>
       {creating && <NewRun onClose={() => setCreating(false)} onStarted={dir => { setCreating(false); setSession(dir); }} />}
-      {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
-      {session && <Dashboard session={session} />}
+      {rsi ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
+        {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
+        {session && <Dashboard session={session} />}
+      </>}
     </div>
   );
 }

@@ -41,3 +41,6 @@ auth.json
 
 # harness state, workspace, and context mirrors
 .hyph/
+
+# improver evidence copied into RSI worktrees
+rsi-traces/

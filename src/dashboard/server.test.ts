@@ -80,3 +80,46 @@ test("output of earlier runs stays readable from the session's run.log", async (
     proc.kill();
   }
 });
+
+test("the RSI view reads the loop's state and log, and per-question evaluation sessions stay out of the session list", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyph-rsi-"));
+  for (const session of ["rsi/gen-1", "rsi/gen-1/eval/locomo/dynamic/q1"]) {
+    mkdirSync(join(dir, ".hyph", session), { recursive: true });
+    const store = new Store(join(dir, ".hyph", session, "state.sqlite"));
+    store.init(session, "", defaultConfig);
+    store.db.close();
+  }
+  await Bun.write(join(dir, ".hyph", "rsi", "state.json"), JSON.stringify({ settings: {}, generations: [{ gen: 0, base: null, phase: "done", accepted: true }] }));
+  await Bun.write(join(dir, ".hyph", "rsi", "rsi.log"), "loop started\n");
+  const { proc, base, post } = await serve(dir);
+  try {
+    expect(((await (await fetch(`${base}/api/sessions`)).json()) as { id: string }[]).map(s => s.id)).toEqual([".hyph/rsi/gen-1"]);
+    const rsi = await (await fetch(`${base}/api/rsi`)).json() as { dir: string; pid: number | null; lines: string[]; state: { generations: unknown[] } };
+    expect([rsi.dir, rsi.pid, rsi.lines, rsi.state.generations.length]).toEqual([".hyph/rsi", null, ["loop started"], 1]);
+    expect((await post("/api/rsi/start", { delta: 2 })).status).toBe(400);
+    expect((await post("/api/rsi/stop", {})).status).toBe(400);
+  } finally {
+    proc.kill();
+  }
+});
+
+test("the RSI view totals each generation's evaluation from its per-question records", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyph-rsi-stats-"));
+  const out = join(dir, ".hyph", "rsi", "gen-0", "eval", "locomo");
+  mkdirSync(out, { recursive: true });
+  await Bun.write(join(dir, ".hyph", "rsi", "state.json"), JSON.stringify({ settings: { perCategory: "1" }, generations: [{ gen: 0, base: null, phase: "evaluate" }] }));
+  const usage = { calls: 3, input: 10, output: 2, cacheRead: 5, cacheWrite: 0 };
+  await Bun.write(join(out, "predictions.jsonl"), `${JSON.stringify({ id: "q1", category: "temporal", outcome: "done", ms: 1000, usage })}\n`);
+  await Bun.write(join(out, "judgments.jsonl"), `${JSON.stringify({ id: "q1", category: "temporal", label: "correct", score: 1, usage: { ...usage, calls: 1 } })}\n`);
+  const { proc, base } = await serve(dir);
+  try {
+    const rsi = await (await fetch(`${base}/api/rsi`)).json() as { stats: Record<string, { eval: { expected: number; judged: number; calls: number; judgeCalls: number; byCategory: unknown } }> };
+    const e = rsi.stats["0"]!.eval;
+    expect([e.expected, e.judged, e.calls, e.judgeCalls, e.byCategory]).toEqual([6, 1, 3, 1, { temporal: { avg: 1, count: 1 } }]);
+    const gen = await (await fetch(`${base}/api/rsi/gen?n=0`)).json() as { samples: { id: string; score: number; calls: number }[] };
+    expect(gen.samples.map(s => [s.id, s.score, s.calls])).toEqual([["q1", 1, 3]]);
+    expect((await fetch(`${base}/api/rsi/gen?n=7`)).status).toBe(404);
+  } finally {
+    proc.kill();
+  }
+});
