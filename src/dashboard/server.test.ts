@@ -47,7 +47,7 @@ test("runs start only from the dashboard's own origin, and their output and exit
 
     const started = await (await post("/api/runs", { name: "first", kind: "run", purpose: "Write a file", mode: "single", calls: 5 })).json() as { dir: string; args: string[] };
     expect(started.dir).toBe(".hyph/first");
-    expect(started.args).toEqual(["Write a file", "--dir", ".hyph/first", "--calls", "5", "--mode", "single"]);
+    expect(started.args).toEqual(["run", "Write a file", "--dir", ".hyph/first", "--calls", "5", "--mode", "single"]);
     let out: { exitCode: number | null; lines: string[] };
     do {
       await Bun.sleep(100);
@@ -59,7 +59,7 @@ test("runs start only from the dashboard's own origin, and their output and exit
     // The state was created before the model failed, so the run can be resumed but not started again.
     expect((await post("/api/runs", { name: "first", kind: "run", purpose: "Write a file" })).status).toBe(400);
     const resumed = await post("/api/runs/resume", { session: ".hyph/first", calls: 10, allowShell: true });
-    expect(((await resumed.json()) as { args: string[] }).args).toEqual(["--dir", ".hyph/first", "--calls", "10", "--allow-shell"]);
+    expect(((await resumed.json()) as { args: string[] }).args).toEqual(["run", "--dir", ".hyph/first", "--calls", "10", "--allow-shell"]);
     expect((await post("/api/runs/resume", { session: ".hyph/none" })).status).toBe(400);
   } finally {
     proc.kill();

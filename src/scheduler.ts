@@ -112,3 +112,33 @@ export async function runScheduler(rt: Runtime, maxRounds = Infinity): Promise<R
   }
   return report(store, "rounds", round, Date.now() - started);
 }
+
+// Resident work fills each slot as soon as an episode finishes; benchmark scheduling stays unchanged.
+export async function runWorkerPool(rt: Runtime, signal: AbortSignal, execute = runEpisode) {
+  const { store } = rt;
+  const running = new Map<string, Promise<void>>(), retryAfter = new Map<string, number>();
+  store.adoptRunning();
+  while (!signal.aborted) {
+    for (const id of running.keys()) {
+      const claimed = store.get<Task>("select * from tasks where claimed_by = ? and status = 'claimed'", id);
+      if (claimed) store.renew(claimed.id, id);
+    }
+    store.reclaimExpired();
+    scan(store);
+    unblockVerification(store);
+    for (const agent of store.agents("active")) {
+      if (running.size >= store.config.maxConcurrency) break;
+      if (running.has(agent.id) || (retryAfter.get(agent.id) ?? 0) > Date.now()) continue;
+      const resumable = store.get<Task>("select t.* from episodes e join tasks t on t.id = e.task where e.agent = ? and e.status = 'running' and t.status = 'claimed' and t.claimed_by = e.agent", agent.id);
+      const task = resumable ?? claimable(store, agent);
+      if (!task) continue;
+      const promise = execute(rt, agent, task).then(() => { retryAfter.delete(agent.id); }, error => {
+        store.log(agent.id, "episode_error", { task: task.id, error: String(error) });
+        retryAfter.set(agent.id, Date.now() + (/usage limit|quota|rate.limit/i.test(String(error)) ? 60_000 : 5_000));
+      }).finally(() => running.delete(agent.id));
+      running.set(agent.id, promise);
+    }
+    await Promise.race([...running.values(), Bun.sleep(250)]);
+  }
+  await Promise.allSettled(running.values());
+}

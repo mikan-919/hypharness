@@ -1001,7 +1001,7 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
 }
 
 type ChatInfo = {
-  dir: string; window: number; memory: { knowledge: number; domains: number; organizing: number };
+  dir: string; window: number; resident?: boolean; purpose?: string; memory: { knowledge: number; domains: number; organizing: number };
   messages: { id: number; role: "user" | "assistant"; text: string; at: number; remembered: number }[];
 };
 type ChatReply = { calls: number; lookups: number; peakTokens: number; remembered: number };
@@ -1014,14 +1014,26 @@ function Chat({ onOpen }: { onOpen: (id: string) => void }) {
   const [last, setLast] = useState<ChatReply>();
   const [error, setError] = useState<string>();
   const endRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { fetch("/api/chat").then(r => r.json()).then(setInfo).catch(e => setError(String(e))); }, []);
+  useEffect(() => {
+    const refresh = () => fetch("/api/chat").then(r => r.json()).then(setInfo).catch(e => setError(String(e)));
+    refresh();
+    const timer = setInterval(refresh, 3000);
+    return () => clearInterval(timer);
+  }, []);
   useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [info?.messages.length, pending]);
   const send = async () => {
-    const t = text.trim();
-    if (!t || pending) return;
+    const t = text;
+    if (!t.trim() || pending) return;
     setPending(t); setText(""); setError(undefined);
     try { const r = await post("/api/chat", { text: t }); setInfo(r); setLast(r); }
     catch (e) { setError(String((e as Error).message)); setText(t); fetch("/api/chat").then(r => r.json()).then(setInfo).catch(() => {}); }
+    finally { setPending(undefined); }
+  };
+  const order = async () => {
+    if (!text.trim() || pending) return;
+    setPending(text); setError(undefined);
+    try { await post("/api/order", { purpose: text }); setText(""); setInfo(await (await fetch("/api/chat")).json()); }
+    catch (e) { setError(String((e as Error).message)); }
     finally { setPending(undefined); }
   };
   if (!info) return <div className="text-muted-foreground">チャットを読み込み中…</div>;
@@ -1032,7 +1044,7 @@ function Chat({ onOpen }: { onOpen: (id: string) => void }) {
       <Card>
         <CardHeader>
           <CardTitle>フロントチャット</CardTitle>
-          <CardDescription>応答するモデルは直近 {info.window} 件だけをコンテキストに持ちます。それより前の発言は文ごとに DeLM の記憶へ移し、必要なときに検索して読みます</CardDescription>
+          <CardDescription>直近 {info.window} 件の発言と記憶市場の材料を使って応答します。現在の目的: {info.purpose || "未設定"}</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3">
           <div className="grid h-[60vh] content-start gap-3 overflow-auto rounded-md border bg-muted/30 p-3">
@@ -1056,6 +1068,7 @@ function Chat({ onOpen }: { onOpen: (id: string) => void }) {
               onKeyDown={e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } }} />
             <div className="flex items-center justify-between gap-2">
               <span className="text-sm text-destructive">{error}</span>
+              {info.resident && <Button type="button" variant="outline" disabled={!!pending || !text.trim()} onClick={order}>目的に設定</Button>}
               <Button type="submit" disabled={!!pending || !text.trim()}>送信する</Button>
             </div>
           </form>
@@ -1065,19 +1078,20 @@ function Chat({ onOpen }: { onOpen: (id: string) => void }) {
         <Kpi label="記憶の件数" value={num.format(info.memory.knowledge)} note={`domain ${info.memory.domains} 件・整理待ち ${info.memory.organizing} 件`} />
         <Kpi label="直前の応答" value={last ? `${last.calls} 回` : "-"} note={last ? `検索 ${last.lookups} 回・記憶へ移した発言 ${last.remembered} 件` : "モデル呼び出しの回数"} />
         <Kpi label="直前のピーク入力" value={last ? num.format(last.peakTokens) : "-"} note="応答中の1回の呼び出しの最大入力トークン" />
-        {n > 0 && <Button variant="outline" onClick={() => onOpen(info.dir)}>記憶の中身を見る</Button>}
+        {n > 0 && !info.resident && <Button variant="outline" onClick={() => onOpen(info.dir)}>記憶の中身を見る</Button>}
       </div>
     </div>
   );
 }
 
 function App() {
+  const resident = usePoll<ChatInfo>("/api/chat")?.resident;
   // A deleted run stays hidden until the next poll drops it, so it is not selected again in between.
   const [deleted, setDeleted] = useState<string>();
   const list = usePoll<Session[]>("/api/sessions")?.filter(s => !deleted || (s.id !== deleted && !s.id.startsWith(`${deleted}/`)));
   const [session, setSession] = useState<string>();
   const [creating, setCreating] = useState(false);
-  const [view, setView] = useState<"session" | "rsi" | "chat">(() => location.hash.startsWith("#rsi") ? "rsi" : location.hash === "#chat" ? "chat" : "session");
+  const [view, setView] = useState<"session" | "rsi" | "chat">(() => location.hash.startsWith("#rsi") ? "rsi" : location.hash === "#chat" || !location.hash ? "chat" : "session");
   const toggle = (v: "rsi" | "chat") => { const next = view === v ? "session" : v; setView(next); history.replaceState(null, "", next === "session" ? "#agents" : `#${next}`); };
   // The session view reads its tab from the hash, so leaving the RSI view must not hand it "rsi/<tab>".
   const leaveRsi = (id: string) => { history.replaceState(null, "", "#agents"); setView("session"); setSession(id); };
@@ -1092,7 +1106,7 @@ function App() {
     <div className="mx-auto grid max-w-[1600px] gap-6 p-4 md:p-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold">hypharness</h1>
-        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+        {!resident && <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
         <Button variant={creating ? "secondary" : "default"} onClick={() => setCreating(!creating)}>新規実行</Button>
         <Button variant={view === "chat" ? "secondary" : "outline"} onClick={() => toggle("chat")}>チャット</Button>
         <Button variant={view === "rsi" ? "secondary" : "outline"} onClick={() => toggle("rsi")}>自己改善</Button>
@@ -1104,10 +1118,10 @@ function App() {
             </SelectContent>
           </Select>
         )}
-        </div>
+        </div>}
       </header>
-      {creating && <NewRun onClose={() => setCreating(false)} onStarted={dir => { setCreating(false); setSession(dir); }} />}
-      {view === "chat" ? <Chat onOpen={leaveRsi} /> : view === "rsi" ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
+      {!resident && creating && <NewRun onClose={() => setCreating(false)} onStarted={dir => { setCreating(false); setSession(dir); }} />}
+      {resident || view === "chat" ? <Chat onOpen={leaveRsi} /> : view === "rsi" ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
         {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
         {session && <Dashboard session={session} onDeleted={dir => { setDeleted(dir); setSession(undefined); }} />}
       </>}

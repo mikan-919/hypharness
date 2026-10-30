@@ -39,7 +39,7 @@ export function harnessArgs(r: RunRequest, dir: string, resume: boolean) {
   const purpose = typeof r.purpose === "string" ? r.purpose.trim() : "";
   if (!resume && !purpose) throw new Error("purpose is required");
   if (r.mode !== undefined && !["single", "fixed", "dynamic", "market"].includes(r.mode)) throw new Error("mode must be single, fixed, dynamic, or market");
-  const args = r.kind === "bench" ? ["bench", purpose] : resume ? [] : [purpose];
+  const args = r.kind === "bench" ? ["bench", purpose] : resume ? ["run"] : ["run", purpose];
   const flags: [string, string | undefined][] = [
     ["--dir", dir], ["--calls", positive(r.calls, "calls")], ["--agents", positive(r.agents, "agents")],
     ["--concurrency", positive(r.concurrency, "concurrency")], ["--rounds", positive(r.rounds, "rounds")],

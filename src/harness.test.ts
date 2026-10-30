@@ -114,6 +114,11 @@ test("shell confines writes and does not expose the host environment", async () 
   await Bun.write(join(dir, "outside"), "private");
   const probe = await tools.shell!.run(c, { command: "printf ok" });
   if (!String(probe).includes("exit 0\nok")) return; // User namespaces may be disabled by the host.
+  mkdirSync(join(rt.workspace, "nested"));
+  await Bun.write(join(rt.workspace, "nested", ".env"), "fixture");
+  await Bun.write(join(rt.workspace, "nested", "auth.json"), "fixture");
+  const protectedResult = await tools.shell!.run(c, { command: "test ! -s nested/.env && test ! -s nested/auth.json && bun --version >/dev/null && printf protected" });
+  expect(protectedResult).toContain("exit 0\nprotected");
   const result = await tools.shell!.run(c, { command: `printf '%s' "${"${HOME}"}"; test ! -e '${dir}/outside' && echo hidden; echo written > result` });
   expect(result).toContain("exit 0\n/tmphidden");
   expect(await Bun.file(join(rt.workspace, "result")).text()).toBe("written\n");

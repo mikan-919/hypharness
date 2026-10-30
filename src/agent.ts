@@ -38,7 +38,7 @@ export function systemPrompt(store: Store, agent: Agent) {
   const c = store.config;
   return `You are agent "${agent.id}" in an autonomous multi-agent organization.
 Role: ${agent.role}
-Top-level purpose (fixed; you may reinterpret how to reach it, never what it is): ${store.purpose}
+Top-level purpose (only the user may change it): ${store.purpose}
 Constraints: ${store.meta("constraints") || "none"}
 Organization: ${c.organization} mode, ${Number.isFinite(c.maxAgents) ? `at most ${c.maxAgents}` : "no limit on the number of"} agents. Shell access: ${c.allowShell ? "granted" : "not granted"}.
 
@@ -165,7 +165,12 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
     const u = reply.usage;
     store.run("insert into usage(agent, task, input, output, cache_read, cache_write, prompt_chars, ms, at) values(?, ?, ?, ?, ?, ?, ?, ?, ?)",
       agent.id, task.id, u.input, u.output, u.cacheRead, u.cacheWrite, system.length + JSON.stringify(messages).length, Math.round(performance.now() - started), Date.now());
-    if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(`Model error: ${reply.errorMessage}`);
+    if (reply.stopReason === "error" || reply.stopReason === "aborted") {
+      if (store.meta("resident") === "1" && /usage limit|quota|rate.limit/i.test(reply.errorMessage ?? "")) {
+        store.setMeta("model_calls", String(Math.max(0, Number(store.meta("model_calls")) - 1)));
+      }
+      throw new Error(`Model error: ${reply.errorMessage}`);
+    }
     messages.push(reply);
     save();
   }

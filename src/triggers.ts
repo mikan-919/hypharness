@@ -45,6 +45,7 @@ export function eligible(store: Store, agent: Agent, task: Pick<Task, "kind">) {
 // Tools a role may not use; execute() rejects any tool missing from the agent's list.
 export function withheldTools(store: Store, agent: Agent) {
   const withheld = new Set<string>();
+  if (store.meta("resident") === "1") for (const t of ["domain_create", "domain_link", "domain_split", "domain_merge", "domain_transfer", "domain_request"]) withheld.add(t);
   if (isSteward(agent.id)) for (const t of ["file_write", "shell", "task_create", "task_assign", "agent_spawn", "goal_create", "goal_complete", "goal_update", "goal_transfer"]) withheld.add(t);
   if (!(isMarket(store) && agent.id === "investor")) { withheld.add("goal_fund"); withheld.add("goal_decline"); }
   if (isMarket(store) && agent.id === "lead") for (const t of ["file_write", "shell", "task_create", "task_assign", "agent_spawn"]) withheld.add(t);

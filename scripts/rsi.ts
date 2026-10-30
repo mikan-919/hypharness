@@ -148,7 +148,7 @@ async function improve(state: State, g: Generation) {
   const { purpose, constraints, mode, calls, judges } = state.settings;
   const shut = closed(ledger(state.generations));
   if (fresh && judges === "on" && !g.grant) g.grant = await judged(g, () => invest(ask, { history: history(state), incumbent: evalSummary(state.incumbent!.eval), ledger: ledger(state.generations), maxCalls: Number(calls) }));
-  const code = await run(["bun", join(state.incumbent!.tree, "src", "index.ts"), ...(fresh ? [purpose + (g.grant ? brief(g.grant, shut) : ""), `--constraints=${constraints}`, "--mode", mode] : []),
+  const code = await run(["bun", join(state.incumbent!.tree, "src", "index.ts"), "run", ...(fresh ? [purpose + (g.grant ? brief(g.grant, shut) : ""), `--constraints=${constraints}`, "--mode", mode] : []),
     "--dir", dir, "--allow-shell", "--calls", String(g.grant?.calls ?? calls)], join(dir, "run.log"));
   const status = [...readFileSync(join(dir, "run.log"), "utf8").matchAll(/"status": "(\w+)"/g)].at(-1)?.[1];
   if (code !== 0 || !status || status === "error") throw new Error(`improver session ended with exit ${code}, status ${status ?? "unknown"}`);

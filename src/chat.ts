@@ -8,6 +8,8 @@ import { emit } from "./triggers.ts";
 import { runScheduler } from "./scheduler.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { remember, type Embed } from "./resident-memory.ts";
+import { frontPacket } from "./resident-market.ts";
 
 // Front chat: the model that talks to the user keeps only the last few messages in its context. Older messages are
 // handed to DeLM as knowledge (one sentence per item, one domain per day), and the model looks them up when a reply
@@ -25,6 +27,14 @@ Do not claim to remember something you did not find. Reply in the user's languag
 
 export type ChatMessage = { id: number; role: "user" | "assistant"; text: string; at: number; remembered: number };
 export type ChatReply = { reply: string; calls: number; lookups: number; peakTokens: number; remembered: number };
+
+export async function waitForFront(call: () => Promise<AssistantMessage>, resident: boolean, sleep = Bun.sleep) {
+  for (;;) {
+    const result = await call();
+    if (!resident || result.stopReason !== "error" || !/usage limit|quota|rate.limit/i.test(result.errorMessage ?? "")) return result;
+    await sleep(60_000);
+  }
+}
 
 export function openChat(path: string) {
   const store = new Store(path);
@@ -57,35 +67,45 @@ export function rememberOld(store: Store) {
   return old.length;
 }
 
-export async function reply(llm: Llm, store: Store, text: string): Promise<ChatReply> {
+export async function reply(llm: Llm, store: Store, text: string, embed?: Embed): Promise<ChatReply> {
+  const resident = store.meta("resident") === "1";
+  if (resident && !embed) throw new Error("Resident chat requires an embedder");
   store.run("insert into chat(role, text, at) values('user', ?, ?)", text, Date.now());
-  const remembered = rememberOld(store);
+  let remembered: number;
+  if (resident) {
+    // Recover messages whose embedding was interrupted by process shutdown.
+    for (const m of history(store)) if (!store.get("select 1 from memory_vectors where chat_id = ?", m.id)) await remember(store, embed!, m.text, `chat:${m.id}`, m.id);
+    remembered = store.run("update chat set remembered = 1 where remembered = 0 and id not in (select id from chat order by id desc limit ?)", WINDOW);
+  } else remembered = rememberOld(store);
   const recent = history(store).slice(-WINDOW);
+  const packet = resident ? frontPacket(store) : undefined;
   const messages: Message[] = [{
     role: "user", timestamp: Date.now(),
-    content: `${recent.length > 1 ? `Recent messages:\n${recent.slice(0, -1).map(m => turnOf(m).line).join("\n")}\n\n` : ""}New message from the user (${turnOf(recent.at(-1)!).when} UTC):\n${text}`,
+    content: `${packet ? `Memory packet:\n${packet.text}\n\n` : ""}${recent.length > 1 ? `Recent messages:\n${recent.slice(0, -1).map(m => turnOf(m).line).join("\n")}\n\n` : ""}New message from the user (${turnOf(recent.at(-1)!).when} UTC):\n${text}`,
   }];
-  const schemas = LOOKUP.map(name => ({ name, description: tools[name]!.description, parameters: tools[name]!.parameters }));
+  const lookup = resident ? ["knowledge_search", "knowledge_get"] : LOOKUP;
+  const schemas = lookup.map(name => ({ name, description: tools[name]!.description, parameters: tools[name]!.parameters }));
+  const system = resident ? `You are the front of a conversation. Reply in the user's language. The supplied memory packet and recent messages are your context; use the lookup tools only if the packet is insufficient. Do not assign work.` : SYSTEM;
   // Lookup tools read only the store; the agent and task are placeholders for the shared tool signature.
   const ctx = { store, agent: { id: "front" } as Agent, task: { id: "chat" } as Task, workspace: "", contextDir: "", episode: "chat", messages } as ToolContext;
   let calls = 0, lookups = 0, peakTokens = 0, answer = "";
   for (let step = 0; step < MAX_STEPS && !answer; step++) {
     const started = performance.now();
-    const r: AssistantMessage = await withTimeout(MODEL_TIMEOUT_MS, signal =>
-      llm.models.completeSimple(llm.model, { systemPrompt: SYSTEM, messages, tools: step < MAX_STEPS - 1 ? schemas : [] }, { reasoning: llm.reasoning, sessionId: "front", signal }));
+    const r = await waitForFront(() => withTimeout(MODEL_TIMEOUT_MS, signal =>
+      llm.models.completeSimple(llm.model, { systemPrompt: system, messages, tools: step < MAX_STEPS - 1 ? schemas : [] }, { reasoning: llm.reasoning, sessionId: "front", signal })), resident);
     if (r.stopReason === "error" || r.stopReason === "aborted") throw new Error(`Model error: ${r.errorMessage}`);
     const u = r.usage;
     calls++;
     peakTokens = Math.max(peakTokens, u.input + u.cacheRead + u.cacheWrite);
     store.run("insert into usage(agent, task, input, output, cache_read, cache_write, prompt_chars, ms, at) values('front', 'chat', ?, ?, ?, ?, ?, ?, ?)",
-      u.input, u.output, u.cacheRead, u.cacheWrite, SYSTEM.length + JSON.stringify(messages).length, Math.round(performance.now() - started), Date.now());
+      u.input, u.output, u.cacheRead, u.cacheWrite, system.length + JSON.stringify(messages).length, Math.round(performance.now() - started), Date.now());
     messages.push(r);
     const toolCalls = r.content.filter((b): b is ToolCall => b.type === "toolCall");
     if (!toolCalls.length) { answer = r.content.filter(b => b.type === "text").map(b => b.text).join("").trim(); break; }
     for (const call of toolCalls) {
       let out: string, isError = false;
       try {
-        if (!LOOKUP.includes(call.name)) throw new Error(`Unknown tool ${call.name}`);
+        if (!lookup.includes(call.name)) throw new Error(`Unknown tool ${call.name}`);
         out = String(await tools[call.name]!.run(ctx, validateToolCall(schemas, call)));
         lookups++;
       } catch (e) { out = `Error: ${e instanceof Error ? e.message : String(e)}`; isError = true; }
@@ -94,6 +114,12 @@ export async function reply(llm: Llm, store: Store, text: string): Promise<ChatR
   }
   answer ||= "(no reply)";
   store.run("insert into chat(role, text, at) values('assistant', ?, ?)", answer, Date.now());
+  if (resident) {
+    const message = history(store).at(-1)!;
+    await remember(store, embed!, answer, `chat:${message.id}`, message.id);
+    store.run("update chat set remembered = 1 where remembered = 0 and id not in (select id from chat order by id desc limit ?)", WINDOW);
+    store.setMeta(`packet:${message.id}`, JSON.stringify(packet!.ids));
+  }
   return { reply: answer, calls, lookups, peakTokens, remembered };
 }
 

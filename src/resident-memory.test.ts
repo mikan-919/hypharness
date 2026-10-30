@@ -1,0 +1,31 @@
+import { expect, test } from "bun:test";
+import { Store } from "./db.ts";
+import { distance, distanceThreshold, indexKnowledge, initMemory, remember, sentences, vectors, type Embed } from "./resident-memory.ts";
+
+const embed: Embed = async text => text.includes("犬") ? [1, 0] : [0, 1];
+
+test("resident memory preserves sentence text and stores exactly one vector and domain per fragment", async () => {
+  const store = new Store(":memory:");
+  initMemory(store);
+  const text = "犬を飼った。\n世話をする！";
+  const ids = await remember(store, embed, text, "chat:1", 1);
+  expect(sentences(text).join("")).toBe(text);
+  expect(sentences("\n  犬。\n\n").join("")).toBe("\n  犬。\n\n");
+  expect(ids).toHaveLength(2);
+  expect(vectors(store)).toHaveLength(2);
+  expect(store.all<{ raw: string }>("select raw from knowledge order by rowid").map(x => x.raw).join("")).toBe(text);
+  expect(store.get<{ n: number }>("select count(*) n from domain_knowledge")!.n).toBe(2);
+  expect(distance([1, 0], [0, 1])).toBe(1);
+  expect(distanceThreshold([0.1, 0.2, 0.4, 0.9])).toBe(0.4);
+  store.db.close();
+});
+
+test("knowledge added by tools is indexed without changing its status or duplicating its content", async () => {
+  const store = new Store(":memory:"); initMemory(store);
+  store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values('K1', 'title', 'summary', 'raw', 'https://example.com', 'hypothesis', 'worker', 1)");
+  expect(await indexKnowledge(store, embed)).toBe(true);
+  expect(await indexKnowledge(store, embed)).toBe(false);
+  expect(store.get<{ status: string }>("select status from knowledge where id = 'K1'")!.status).toBe("hypothesis");
+  expect(vectors(store).map(v => v.knowledge)).toEqual(["K1"]);
+  store.db.close();
+});

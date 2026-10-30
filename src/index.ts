@@ -6,12 +6,12 @@ import { defaultConfig, Store, type Config } from "./db.ts";
 import { report, runScheduler } from "./scheduler.ts";
 import type { Runtime } from "./agent.ts";
 import { CATEGORIES, HARNESS_ARMS, runLocomo } from "./locomo.ts";
-import { openChat, organize, reply } from "./chat.ts";
 
 const { values: opts, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     dir: { type: "string", default: ".hyph" },
+    port: { type: "string", default: "4321" },
     constraints: { type: "string", default: "" },
     mode: { type: "string", default: "dynamic" },
     calls: { type: "string" },
@@ -69,7 +69,9 @@ async function checkWorkspace(workspace: string) {
 const [command, ...rest] = positionals;
 const log = (line: string) => console.log(line);
 
-if (command === "locomo") {
+if (command === "serve") {
+  await import("./dashboard/server.ts");
+} else if (command === "locomo") {
   const arms = opts.arms!.split(",").map(a => a.trim()).filter(Boolean);
   for (const a of arms) if (!["direct", ...HARNESS_ARMS].includes(a)) throw new Error(`Unknown arm ${a}; use direct, ${HARNESS_ARMS.join(", ")}`);
   const categories = opts.categories?.split(",").map(c => c.trim()).filter(Boolean);
@@ -89,28 +91,24 @@ if (command === "locomo") {
   }])));
   console.log(`report: ${join(out, "report.json")}`);
 } else if (command === "status") {
-  const { store } = open(opts.dir!);
+  const { store } = open(join(opts.dir!, "main"));
   if (!store.purpose) throw new Error(`No session in ${opts.dir}`);
   console.log(`purpose: ${store.purpose}`);
   for (const g of store.all<Record<string, string>>("select * from goals order by created_at")) console.log(`${g.id} [${g.status}] owner=${g.owner}: ${g.description}`);
   for (const a of store.agents()) console.log(`agent ${a.id} [${a.status}]: ${a.role}`);
   console.log(JSON.stringify(report(store, "rounds", 0, 0), null, 2));
 } else if (command === "chat") {
-  // The same chat the dashboard shows: its log and memory live in <dir>/chat.
-  mkdirSync(join(opts.dir!, "chat"), { recursive: true });
-  const store = openChat(join(opts.dir!, "chat", "state.sqlite"));
-  const llm = await openModel();
+  const base = `http://127.0.0.1:${int(opts.port, "port")}`;
   console.log("Front chat. An empty line ends it.");
   process.stdout.write("> ");
   for await (const line of console) {
     if (!line.trim()) break;
-    const r = await reply(llm, store, line.trim());
-    console.log(`${r.reply}\n  [${r.calls} calls, ${r.lookups} lookups, peak ${r.peakTokens} tokens, ${r.remembered} messages moved to memory]`);
-    const o = await organize(llm, store, join(opts.dir!, "chat"));
-    if (o) console.log(`  [stewards organized memory: ${o.status} after ${o.rounds} rounds]`);
+    const response = await fetch(`${base}/api/chat`, { method: "POST", headers: { "content-type": "application/json", origin: base }, body: JSON.stringify({ text: line }) });
+    if (!response.ok) throw new Error(`Chat failed: ${await response.text()}`);
+    const r = await response.json() as { reply: string };
+    console.log(r.reply);
     process.stdout.write("> ");
   }
-  store.db.close();
 } else if (command === "bench") {
   const purpose = rest.join(" ").trim();
   if (!purpose) throw new Error("bench requires a purpose");
@@ -129,8 +127,8 @@ if (command === "locomo") {
   await Bun.write(join(root, "report.json"), JSON.stringify(results, null, 2));
   console.table(results);
   console.log(`report: ${join(root, "report.json")}`);
-} else {
-  const purpose = [command, ...rest].filter(Boolean).join(" ").trim();
+} else if (command === "run") {
+  const purpose = rest.join(" ").trim();
   const env = open(opts.dir!);
   if (purpose) env.store.init(purpose, opts.constraints!, configFor(opts.mode!));
   else if (!env.store.purpose) throw new Error("Give a purpose to start, e.g. bun run start 'Write a CLI that ...'");
@@ -139,4 +137,11 @@ if (command === "locomo") {
   const r = await runScheduler(rt, int(opts.rounds, "rounds"));
   console.log(JSON.stringify({ ...r, checkExit: await checkWorkspace(env.workspace) }, null, 2));
   env.store.db.close();
+} else {
+  const purpose = [command, ...rest].filter(Boolean).join(" ").trim();
+  if (!purpose) throw new Error("Start the resident process with 'serve', or supply an order");
+  const base = `http://127.0.0.1:${int(opts.port, "port")}`;
+  const response = await fetch(`${base}/api/order`, { method: "POST", headers: { "content-type": "application/json", origin: base }, body: JSON.stringify({ purpose }) });
+  if (!response.ok) throw new Error(`Could not set order: ${await response.text()}`);
+  console.log(`Order updated: ${purpose}`);
 }
