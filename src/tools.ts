@@ -463,6 +463,44 @@ export const tools: Record<string, Def<TSchema>> = {
     },
   }),
 
+  // --- External information ---
+  web_search: def({
+    description: "Search the web with Parallel. Returns ranked URLs with excerpts. Record what you rely on with knowledge_add, citing the URL as source.",
+    parameters: Type.Object({
+      objective: Str("Self-contained statement of what you are looking for and why"),
+      queries: Type.Array(Type.String(), { minItems: 1, maxItems: 5, description: "2-3 keyword queries of 3-6 words each" }),
+      mode: Opt(StringEnum(["turbo", "fast", "basic", "advanced"], { description: "Speed versus quality; defaults to basic" })),
+      max_results: Opt(Type.Integer({ minimum: 1, maximum: 20 })),
+      include_domains: Opt(Type.Array(Type.String(), { description: "Restrict to these domains, e.g. docs.python.org or .gov" })),
+      after_date: Opt(Str("Only content published on or after YYYY-MM-DD")),
+    }),
+    async run(c, a) {
+      // Configuring the key is the host's permission to send queries to Parallel.
+      const key = process.env.PARALLEL_API_KEY;
+      if (!key) fail("Web search is not configured by the host (PARALLEL_API_KEY is not set)");
+      const source = a.include_domains || a.after_date ? { include_domains: a.include_domains, after_date: a.after_date } : undefined;
+      const res = await fetch("https://api.parallel.ai/v1/search", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": key! },
+        body: JSON.stringify({
+          objective: a.objective, search_queries: a.queries, mode: a.mode ?? "basic", session_id: c.task.id,
+          max_chars_total: c.store.config.toolOutputLimit,
+          advanced_settings: { max_results: a.max_results ?? 8, ...(source && { source_policy: source }) },
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const body = await res.json() as {
+        results?: { url: string; title: string | null; publish_date: string | null; excerpts?: string[] }[];
+        warnings?: { message: string }[] | null; error?: { message: string };
+      };
+      if (!res.ok) fail(`Parallel search failed (${res.status}): ${body.error?.message ?? JSON.stringify(body).slice(0, 300)}`);
+      const warnings = body.warnings?.map(w => `warning: ${w.message}`) ?? [];
+      const results = (body.results ?? []).map((r, i) =>
+        `[${i + 1}] ${r.title ?? "(untitled)"}${r.publish_date ? ` (${r.publish_date})` : ""}\n${r.url}\n${(r.excerpts ?? []).join("\n…\n")}`);
+      return [...warnings, ...results].join("\n\n") || "No results";
+    },
+  }),
+
   // --- Work in the workspace ---
   file_list: def({
     description: "List files under a workspace directory.",
