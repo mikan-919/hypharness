@@ -2,12 +2,13 @@
 // worktree of its own source; scripts/rsi-eval.ts scores the resulting candidate against the incumbent; an accepted
 // candidate becomes the harness that runs the next generation. state.json records every generation for the dashboard.
 // Every step resumes after a stop: the session from its state.sqlite, the evaluation from its LoCoMo output.
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { $, type Subprocess } from "bun";
 import type { Eval } from "./rsi-eval.ts";
 import { resolveSettings, type RsiSettings } from "./rsi-defaults.ts";
+import { collect, diagnosticsMarkdown, traceMarkdown, type Stats } from "./rsi-traces.ts";
 import { brief, closed, comparison, criticRecord, directionOf, invest, ledger, review, type Ask, type Grant, type Review } from "./rsi-judges.ts";
 import { MODEL_TIMEOUT_MS, withTimeout } from "../src/agent.ts";
 import { openModel } from "../src/auth.ts";
@@ -92,6 +93,19 @@ async function writeTraces(state: State, workspace: string) {
   await $`cp ${state.incumbent!.eval} ${join(dst, "eval.json")}`;
   await $`rsync -a --prune-empty-dirs '--include=*/' '--include=contexts/***' --include=answer.txt '--include=*.jsonl' '--exclude=*' ${join(src, "locomo")}/ ${join(dst, "locomo")}/`.quiet();
   await Bun.write(join(dst, "history.md"), `# Earlier generations\n\n${history(state)}\n`);
+  // Call-by-call traces per question and a summary across questions, read from each question's state.sqlite.
+  const judged = join(src, "locomo", "judgments.jsonl"), arm = state.settings.arm, armDir = join(src, "locomo", arm);
+  const scores = new Map((existsSync(judged) ? readFileSync(judged, "utf8").split("\n").filter(Boolean) : [])
+    .flatMap(l => { try { const j = JSON.parse(l); return j.arm === arm ? [[String(j.id).replaceAll(":", "-"), Number(j.score)] as const] : []; } catch { return []; } }));
+  const stats: Stats[] = [];
+  for (const sample of existsSync(armDir) ? readdirSync(armDir).sort() : []) {
+    const db = join(armDir, sample, "state.sqlite");
+    if (!existsSync(db)) continue;
+    const s = collect(db, sample, scores.get(sample));
+    stats.push(s);
+    await Bun.write(join(dst, "locomo", arm, sample, "trace.md"), traceMarkdown(s));
+  }
+  await Bun.write(join(dst, "diagnostics.md"), diagnosticsMarkdown(stats));
 }
 
 // The judges call the model directly from this checkout; the candidate never runs them.

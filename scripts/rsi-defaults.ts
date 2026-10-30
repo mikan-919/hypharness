@@ -2,9 +2,23 @@
 import { HARNESS_ARMS } from "../src/locomo.ts";
 export const PURPOSE = `Improve the hypharness agent harness whose source is this workspace (a git checkout of the harness that is running you).
 Objective: when the harness answers a fixed LoCoMo-Plus subset, raise the judge score and lower the peak prompt tokens per question.
-rsi-traces/ holds evidence from the current harness: eval.json (score, per-sample scores, context sizes), locomo/judgments.jsonl and predictions.jsonl, locomo/<arm>/<sample>/contexts/*.md (each agent's working memory and live context), and history.md (earlier generations, their predicted and measured effects).
-Read the raw traces to find a cause, then make one focused change to the harness source. bun run check and bun test must pass.
-Before finishing, write rsi-traces/note.md: what you changed, why, and the effect you predict on score and peak tokens.`;
+
+Evidence from the current harness is in rsi-traces/:
+- eval.json: score, per-question scores, context sizes, and how concentrated the work was (lead's share of calls, agents).
+- diagnostics.md: across questions, every tool's calls, errors and result sizes, tools never called, lookups that found nothing, identical calls repeated, episode outcomes, and per question the peak prompt, context_edit calls and working-memory writes.
+- locomo/<arm>/<sample>/trace.md: each agent's episodes call by call, with arguments, result size or error, and the prompt size at that step.
+- locomo/<arm>/<sample>/contexts/*.md: each agent's final working memory and live context.
+- locomo/judgments.jsonl and predictions.jsonl: answers and the judge's reasons.
+- history.md: earlier generations, their changes, predictions and measured effects. Do not repeat a change that already failed.
+
+Diagnose before changing anything. Start from questions that lost points and the ones with the largest peaks, and check:
+1. CLM (each agent's persistent context): Does working memory carry what the next task needs, short, with pointers to knowledge and files instead of copies? Do agents replace digested steps with context_edit, or does the live context only grow until the step limit? Do episodes end with step_limit, released, or nudges to continue instead of finishing?
+2. Tool use: Are the right tools called with good arguments? Look for errors, empty lookups, identical calls repeated, results far larger than needed, and tools that would have found the answer but were never called. Check whether tool descriptions, result formats or limits cause it.
+3. Organization (DeLM): Are agents, tasks and verification used where they help, or do they add calls without catching mistakes? Is the work concentrated on lead?
+4. Answers: For each wrong answer, find where it went wrong: evidence never found, found but misread (dates, people), or the answer not written as asked.
+
+Then make one focused change to the harness source that addresses the most frequent cause you found. bun run check and bun test must pass; add a test for the change.
+Before finishing, write rsi-traces/note.md: the diagnosis (which check failed, in which questions, with call-level evidence), what you changed and why, and the effect you predict on score and peak tokens.`;
 export const CONSTRAINTS = "Edit only files inside the workspace. Do not modify src/locomo.ts, delete tests, or encode LoCoMo questions or answers. Never read or print auth.json or .env.";
 
 export type RsiSettings = {
