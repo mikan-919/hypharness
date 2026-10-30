@@ -189,7 +189,7 @@ function Field({ id, label, hint, children }: { id: string; label: string; hint?
 }
 
 function NewRun({ onStarted, onClose }: { onStarted: (dir: string) => void; onClose: () => void }) {
-  const [form, setForm] = useState({ name: "", purpose: "", constraints: "", mode: "dynamic", calls: "80", agents: "", concurrency: "", check: "", allowShell: false });
+  const [form, setForm] = useState({ name: "", purpose: "", constraints: "", mode: "dynamic", calls: "", agents: "", concurrency: "", check: "", allowShell: false });
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
@@ -225,9 +225,9 @@ function NewRun({ onStarted, onClose }: { onStarted: (dir: string) => void; onCl
             </Select>
           </Field>
           <div className="grid grid-cols-3 gap-3">
-            <Field id="calls" label="呼び出し上限"><Input id="calls" type="number" min={1} value={form.calls} onChange={set("calls")} /></Field>
-            <Field id="agents" label="エージェント上限"><Input id="agents" type="number" min={1} value={form.agents} onChange={set("agents")} placeholder="既定" /></Field>
-            <Field id="concurrency" label="同時実行"><Input id="concurrency" type="number" min={1} value={form.concurrency} onChange={set("concurrency")} placeholder="既定" /></Field>
+            <Field id="calls" label="呼び出し上限"><Input id="calls" type="number" min={1} value={form.calls} onChange={set("calls")} placeholder="なし" /></Field>
+            <Field id="agents" label="エージェント上限"><Input id="agents" type="number" min={1} value={form.agents} onChange={set("agents")} placeholder="なし" /></Field>
+            <Field id="concurrency" label="同時実行"><Input id="concurrency" type="number" min={1} value={form.concurrency} onChange={set("concurrency")} placeholder="なし" /></Field>
           </div>
           <Field id="check" label="終了後の検査コマンド" hint="作業ディレクトリで実行し、終了コードを結果に含めます"><Input id="check" value={form.check} onChange={set("check")} placeholder="bun test" /></Field>
           <div className="flex items-center gap-2">
@@ -256,7 +256,7 @@ function RunControl({ session, o }: { session: string; o?: Overview }) {
   const [check, setCheck] = useState("");
   const [error, setError] = useState<string>();
   const loaded = !!o;
-  useEffect(() => { if (o) { setCalls(String(o.modelCalls + 50)); setAllowShell(!!o.config.allowShell); } }, [session, loaded]);
+  useEffect(() => { if (o) { setCalls(o.config.maxModelCalls == null ? "" : String(o.modelCalls + 50)); setAllowShell(!!o.config.allowShell); } }, [session, loaded]);
   const logRef = useRef<HTMLPreElement>(null);
   useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight); }, [out?.lines.length]);
   const act = async (fn: () => Promise<unknown>) => { setError(undefined); try { await fn(); } catch (e) { setError(String((e as Error).message)); } };
@@ -276,7 +276,7 @@ function RunControl({ session, o }: { session: string; o?: Overview }) {
           <Button variant="destructive" onClick={() => act(() => post("/api/runs/stop", { dir: run!.dir }))}>停止する</Button>
         ) : o && (
           <form className="flex flex-wrap items-end gap-3" onSubmit={e => { e.preventDefault(); act(() => post("/api/runs/resume", { session, calls: toInt(calls), allowShell, check })); }}>
-            <Field id="resume-calls" label="呼び出し上限（累計）"><Input id="resume-calls" className="w-32" type="number" min={1} value={calls} onChange={e => setCalls(e.target.value)} /></Field>
+            <Field id="resume-calls" label="呼び出し上限（累計）"><Input id="resume-calls" className="w-32" type="number" min={1} value={calls} onChange={e => setCalls(e.target.value)} placeholder="なし" /></Field>
             <Field id="resume-check" label="検査コマンド"><Input id="resume-check" className="w-40" value={check} onChange={e => setCheck(e.target.value)} placeholder="任意" /></Field>
             <div className="flex h-9 items-center gap-2">
               <Switch id="resume-shell" checked={allowShell} onCheckedChange={setAllowShell} />
@@ -355,7 +355,7 @@ function Dashboard({ session }: { session: string }) {
       </Card>
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-8">
-        <Kpi label="モデル呼び出し" value={num.format(o.modelCalls)} note={`上限 ${num.format(o.config.maxModelCalls ?? 0)}`} />
+        <Kpi label="モデル呼び出し" value={num.format(o.modelCalls)} note={o.config.maxModelCalls == null ? "上限なし" : `上限 ${num.format(o.config.maxModelCalls)}`} />
         <Kpi label="入力トークン" value={num.format(promptTokens(t))} note={`キャッシュ外 ${num.format(t.input)}`} />
         <Kpi label="出力トークン" value={num.format(t.output)} />
         <Kpi label="キャッシュ読み取り" value={pct(t.cacheRead, promptTokens(t))} note={`${num.format(t.cacheRead)} トークン`} />

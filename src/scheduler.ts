@@ -59,7 +59,7 @@ export function report(store: Store, status: Report["status"], rounds: number, e
   };
 }
 
-export async function runScheduler(rt: Runtime, maxRounds = 100): Promise<Report> {
+export async function runScheduler(rt: Runtime, maxRounds = Infinity): Promise<Report> {
   const { store } = rt;
   const started = Date.now();
   store.adoptRunning();
