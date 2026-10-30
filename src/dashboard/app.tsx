@@ -568,12 +568,14 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
           ) : (
             <form className="flex flex-wrap items-end gap-3" onSubmit={e => {
               e.preventDefault();
-              act(() => post("/api/rsi/start", { calls: toInt(form.calls), generations: toInt(form.generations), perCategory: toInt(form.perCategory), seed: toInt(form.seed), delta: form.delta.trim() ? Number(form.delta) : undefined }));
+              // The sample set is fixed by the first start; a resume keeps it.
+              const sample = gens.length ? {} : { perCategory: toInt(form.perCategory), seed: toInt(form.seed) };
+              act(() => post("/api/rsi/start", { calls: toInt(form.calls), generations: toInt(form.generations), ...sample, delta: form.delta.trim() ? Number(form.delta) : undefined }));
             }}>
               <Field id="rsi-calls" label="改善の呼び出し上限" hint="1世代あたり"><Input id="rsi-calls" className="w-28" type="number" min={1} value={form.calls} onChange={set("calls")} /></Field>
               <Field id="rsi-gens" label="世代数" hint="空欄で止めるまで"><Input id="rsi-gens" className="w-24" type="number" min={1} value={form.generations} onChange={set("generations")} placeholder="無制限" /></Field>
-              <Field id="rsi-per" label="分類ごとの問題数"><Input id="rsi-per" className="w-24" type="number" min={1} value={form.perCategory} onChange={set("perCategory")} /></Field>
-              <Field id="rsi-seed" label="種"><Input id="rsi-seed" className="w-20" type="number" value={form.seed} onChange={set("seed")} /></Field>
+              <Field id="rsi-per" label="分類ごとの問題数"><Input id="rsi-per" className="w-24" type="number" min={1} disabled={gens.length > 0} value={gens.length ? info.state!.settings.perCategory : form.perCategory} onChange={set("perCategory")} /></Field>
+              <Field id="rsi-seed" label="種"><Input id="rsi-seed" className="w-20" type="number" disabled={gens.length > 0} value={gens.length ? info.state!.settings.seed : form.seed} onChange={set("seed")} /></Field>
               <Field id="rsi-delta" label="許容幅 δ"><Input id="rsi-delta" className="w-20" type="number" step="0.01" min={0} max={1} value={form.delta} onChange={set("delta")} /></Field>
               <Button type="submit">{gens.length ? "再開する" : "開始する"}</Button>
             </form>

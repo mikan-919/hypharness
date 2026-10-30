@@ -57,21 +57,28 @@ async function main() {
   const removed = [...tests(pinned)].filter(t => !tests(copy).has(t));
   if (removed.length) await finish({ ok: false, commit, reason: `tests removed: ${removed.join(", ")}` });
 
+  // A stopped evaluation must not leave the benchmark running and appending to the output that a restart resumes.
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => { child?.kill("SIGTERM"); process.exit(1); });
+  const exec = async (cmd: string[]) => {
+    child = Bun.spawn(cmd, { cwd: copy, stdout: "inherit", stderr: "inherit" });
+    try { return await child.exited; } finally { child = undefined; }
+  };
+
   await $`cp ${join(pinned, "src", "locomo.ts")} ${join(copy, "src", "locomo.ts")}`;
   await $`bun install`.cwd(copy).quiet();
   for (const cmd of [["bun", "run", "check"], ["bun", "test"]]) {
-    const r = Bun.spawnSync(cmd, { cwd: copy, stdout: "inherit", stderr: "inherit" });
-    if (r.exitCode !== 0) await finish({ ok: false, commit, reason: `${cmd.join(" ")} exited ${r.exitCode}` });
+    const code = await exec(cmd);
+    if (code !== 0) await finish({ ok: false, commit, reason: `${cmd.join(" ")} exited ${code}` });
   }
 
   // auth.json is read from cwd; the link stays outside the candidate's workspace.
   if (!existsSync(join(copy, "auth.json"))) symlinkSync(join(pinned, "auth.json"), join(copy, "auth.json"));
   const locomoOut = join(out, "locomo");
-  const run = Bun.spawnSync(["bun", "src/index.ts", "locomo", "--arms", "dynamic", "--per-category", opts["per-category"]!, "--seed", opts.seed!,
-    "--calls", opts.calls!, "--harness-concurrency", opts["harness-concurrency"]!, "--dir", join(pinned, ".hyph"), "--out", locomoOut],
-  { cwd: copy, stdout: "inherit", stderr: "inherit" });
+  const code = await exec(["bun", "src/index.ts", "locomo", "--arms", "dynamic", "--per-category", opts["per-category"]!, "--seed", opts.seed!,
+    "--calls", opts.calls!, "--harness-concurrency", opts["harness-concurrency"]!, "--dir", join(pinned, ".hyph"), "--out", locomoOut]);
   // Provider failures stop the benchmark; the run resumes from the same --out, so this is not a verdict on the candidate.
-  if (run.exitCode !== 0) await finish({ ok: false, transient: true, commit, reason: `locomo exited ${run.exitCode}` });
+  if (code !== 0) await finish({ ok: false, transient: true, commit, reason: `locomo exited ${code}` });
 
   const report = await Bun.file(join(locomoOut, "report.json")).json();
   const perSample: Record<string, number> = {};

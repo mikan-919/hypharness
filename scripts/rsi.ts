@@ -13,8 +13,8 @@ const { values: opts } = parseArgs({
     dir: { type: "string", default: ".hyph/rsi" },
     calls: { type: "string", default: "150" },
     generations: { type: "string" },
-    "per-category": { type: "string", default: "3" },
-    seed: { type: "string", default: "1" },
+    "per-category": { type: "string" },
+    seed: { type: "string" },
     delta: { type: "string", default: "0.05" },
   },
 });
@@ -131,7 +131,15 @@ async function main() {
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => { child?.kill("SIGTERM"); rmSync(pidPath, { force: true }); process.exit(0); });
 
   const state: State = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : { settings: {}, generations: [] };
-  state.settings = { calls: opts.calls, perCategory: opts["per-category"], seed: opts.seed, delta: opts.delta, generations: opts.generations };
+  // Every generation is compared with the incumbent on the same samples, so the sample set is fixed by the first start.
+  const fixed = { perCategory: state.settings.perCategory ?? "3", seed: state.settings.seed ?? "1" };
+  if (state.generations.length) {
+    for (const [key, flag] of [["perCategory", "per-category"], ["seed", "seed"]] as const)
+      if (opts[flag] !== undefined && opts[flag] !== fixed[key]) throw new Error(`--${flag} is fixed at ${fixed[key]} for ${root}; start a new --dir to change it`);
+  } else Object.assign(fixed, { perCategory: opts["per-category"] ?? fixed.perCategory, seed: opts.seed ?? fixed.seed });
+  opts["per-category"] = fixed.perCategory;
+  opts.seed = fixed.seed;
+  state.settings = { calls: opts.calls, perCategory: fixed.perCategory, seed: fixed.seed, delta: opts.delta, generations: opts.generations };
   const save = () => writeFileSync(statePath, JSON.stringify(state, null, 2));
   const limit = opts.generations ? Number(opts.generations) : Infinity;
   log(`loop started (pid ${process.pid}); incumbent ${state.incumbent ? `gen ${state.incumbent.gen}` : "none yet"}`);
