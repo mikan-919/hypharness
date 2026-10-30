@@ -29,6 +29,9 @@ export async function withTimeout<T>(ms: number, call: (signal: AbortSignal) => 
 
 export class BudgetExhausted extends Error {}
 
+// Live context size (characters) above which tool results ask the agent to compact.
+const COMPACT_AT = 60_000;
+
 // Stable per agent: no clocks, counters, or shared state, so the provider can reuse the cached prefix.
 export function systemPrompt(store: Store, agent: Agent) {
   const c = store.config;
@@ -45,7 +48,7 @@ How you work:
 - Your working memory is the only thing you carry between tasks. Before finishing, update it if something should carry over: memory_edit changes a part, memory_write replaces it all. Keep it short and point to knowledge IDs and files instead of copying them.
 - Another agent verifies your results. When you verify, inspect the artifacts yourself and fail anything that is not demonstrated.
 - Change the organization (spawn, sleep, reassign, transfer, split or merge domains) only when the expected benefit clearly exceeds its cost; keeping the current structure is a valid choice.
-- Your live context for a task is yours to edit, and each tool result ends with its current size. Use context_outline to find bulky messages, then context_replace to cut text inside one message or context_edit to replace whole steps with a short note; edits must shrink the context. Use news to see what other agents did since you last looked.
+- Your live context for a task is yours to edit. Each tool result ends with its message number and the context size. Once steps are digested, replace them with context_edit: from the tool call that started them to the message that concluded them, with a short note of what they established. Use news to see what other agents did since you last looked.
 - End every task with task_finish or task_release.`;
 }
 
@@ -115,9 +118,10 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
     for (const call of toolCalls(last).filter(c => !answered.has(c.id))) {
       const r = await execute(rt, ctx, id, call, schemas);
       rt.log?.(`[${agent.id}] ${call.name}${r.isError ? " ✗" : ""} ${r.text.split("\n")[0]!.slice(0, 120)}`);
-      // The size readout lets the agent judge when to compact, as in the CLM reference harness.
+      // As in the CLM reference harness, every result shows where it sits and how large the context is, and asks for compaction past a threshold.
       const size = system.length + JSON.stringify(messages).length + r.text.length;
-      messages.push({ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: `${r.text}\n[live context: ~${size} chars]` }], isError: r.isError, timestamp: Date.now() });
+      const readout = `[#${messages.length} · live context: ~${size} chars${size > COMPACT_AT ? ` — over ${COMPACT_AT}; replace digested steps with context_edit now` : ""}]`;
+      messages.push({ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: `${r.text}\n${readout}` }], isError: r.isError, timestamp: Date.now() });
       save();
     }
     const current = store.task(task.id)!;

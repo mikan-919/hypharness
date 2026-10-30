@@ -53,6 +53,9 @@ test("A: a purpose alone leads to planned, executed, independently verified work
   const root = store.goal("G0")!;
   expect(root.verified_by).not.toBe("lead");
   for (const t of store.all<{ verified_by: string; claimed_by: string }>("select * from tasks where kind = 'work'")) expect(t.verified_by).not.toBe(t.claimed_by);
+  // Each tool result names its own position, so a range can be given to context_edit without an outline.
+  const msgs = JSON.parse(store.get<{ messages: string }>("select messages from episodes limit 1")!.messages) as Message[];
+  msgs.forEach((m, i) => { if (m.role === "toolResult") expect((m.content[0] as { text: string }).text).toMatch(new RegExp(`\\[#${i} · live context: ~\\d+ chars\\]$`)); });
 });
 
 test("B: the organization grows only when verification needs another agent", async () => {
@@ -197,14 +200,13 @@ test("unlimited defaults stay unlimited after the config is stored and read back
   expect(JSON.parse(store.meta("config")!).maxModelCalls).toBeNull(); // what the dashboard reads
 });
 
-test("working memory and live context can be edited in part, and edits must shrink the live context", () => {
+test("working memory can be edited in part, and a range of steps is replaced only by a shorter note", () => {
   const { store, rt } = setup({});
-  const messages: Message[] = [
-    { role: "user", content: "opening", timestamp: 0 },
-    { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "file_read", arguments: { path: "big.txt" } }], api: "x", provider: "x", model: "x", usage: {} as never, stopReason: "toolUse", timestamp: 0 } as Message,
-    { role: "toolResult", toolCallId: "c1", toolName: "file_read", content: [{ type: "text", text: "line A\nnoise noise noise\nline B" }], isError: false, timestamp: 0 },
-    { role: "assistant", content: [{ type: "toolCall", id: "c2", name: "context_replace", arguments: {} }], api: "x", provider: "x", model: "x", usage: {} as never, stopReason: "toolUse", timestamp: 0 } as Message,
+  const step = (id: string, name: string, text: string): Message[] => [
+    { role: "assistant", content: [{ type: "toolCall", id, name, arguments: {} }], api: "x", provider: "x", model: "x", usage: {} as never, stopReason: "toolUse", timestamp: 0 } as Message,
+    { role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text }], isError: false, timestamp: 0 },
   ];
+  const messages: Message[] = [{ role: "user", content: "opening", timestamp: 0 }, ...step("c1", "file_read", "x".repeat(500)), ...step("c2", "shell", "y".repeat(500)), ...step("c3", "context_edit", "")];
   store.run("insert into episodes(id, agent, task, messages, status) values('e', 'lead', 'T-1', ?, 'running')", JSON.stringify(messages));
   const c = { store, agent: store.agent("lead")!, task: { id: "T-1" }, workspace: rt.workspace, contextDir: rt.contextDir, episode: "e", messages } as unknown as ToolContext;
 
@@ -213,12 +215,9 @@ test("working memory and live context can be edited in part, and edits must shri
   expect(store.memory("lead")).toEqual({ memory: "plan: A\nstatus: done", version: 2 });
   expect(() => tools.memory_edit!.run(c, { old: "missing", new: "x" })).toThrow("does not occur");
 
-  expect(() => tools.context_replace!.run(c, { at: 2, old: "noise", new: "" })).toThrow("occurs 3 times");
-  expect(() => tools.context_replace!.run(c, { at: 2, old: "line A", new: "line A plus more" })).toThrow("must shrink");
-  expect(() => tools.context_replace!.run(c, { at: 3, old: "x", new: "" })).toThrow("within #1..#2");
-  tools.context_replace!.run(c, { at: 2, old: "\nnoise noise noise", new: "" });
-  expect(messages[2]).toMatchObject({ role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "line A\nline B" }] });
-  expect(JSON.parse(store.get<{ messages: string }>("select messages from episodes where id = 'e'")!.messages)[2].content[0].text).toBe("line A\nline B");
+  expect(() => tools.context_edit!.run(c, { from: 1, to: 4, note: "z".repeat(5000) })).toThrow("must shrink");
+  expect(() => tools.context_edit!.run(c, { from: 2, to: 4, note: "n" })).toThrow("must not separate");
+  tools.context_edit!.run(c, { from: 1, to: 4, note: "read the file and ran the tests; both fine" });
+  expect(messages.map(m => m.role)).toEqual(["user", "user", "assistant", "toolResult"]);
   expect(store.get<{ n: number }>("select count(*) n from episode_history where episode = 'e'")!.n).toBe(1);
-  expect(() => tools.context_edit!.run(c, { from: 1, to: 2, note: "x".repeat(1000) })).toThrow("must shrink");
 });

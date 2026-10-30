@@ -136,27 +136,6 @@ export const tools: Record<string, Def<TSchema>> = {
       return `Replaced #${a.from}-#${a.to}; live context now has ${m.length} messages`;
     },
   }),
-  context_replace: def({
-    description: "Replace a piece of text inside one message of your live context, for example cutting a tool output down to the lines you still need. The text must occur exactly once in that message and the replacement must be shorter. Takes effect from your next step; the original is kept in history.",
-    parameters: Type.Object({ at: Type.Integer({ minimum: 1, description: "Message index from context_outline" }), old: Type.String({ minLength: 1, description: "Exact text to replace" }), new: Str("Shorter replacement; empty to delete") }),
-    run(c, a) {
-      const m = c.messages;
-      const lastAssistant = m.findLastIndex(x => x.role === "assistant");
-      if (a.at >= lastAssistant) fail(`Index must be within #1..#${lastAssistant - 1}`);
-      if (a.new.length >= a.old.length) fail("An edit must shrink the context: replace stale text with a shorter note");
-      const msg = m[a.at]!;
-      // Only text is editable; tool calls and their pairing with results stay intact.
-      const blocks = typeof msg.content === "string" ? undefined : (msg.content as { type: string; text?: string }[]).filter(b => b.type === "text");
-      const texts = blocks ? blocks.map(b => b.text!) : [msg.content as string];
-      const hits = texts.reduce((n, t) => n + t.split(a.old).length - 1, 0);
-      if (hits !== 1) fail(hits ? `The text occurs ${hits} times in #${a.at}; include more surrounding text` : `The text does not occur in #${a.at}`);
-      c.store.run("insert into episode_history(episode, at, messages) values(?, ?, ?)", c.episode, Date.now(), JSON.stringify(m));
-      if (blocks) { const b = blocks.find(b => b.text!.includes(a.old))!; b.text = b.text!.replace(a.old, () => a.new); }
-      else (msg as { content: string }).content = (msg.content as string).replace(a.old, () => a.new);
-      c.store.run("update episodes set messages = ? where id = ?", JSON.stringify(m), c.episode);
-      return `Replaced ${a.old.length} chars with ${a.new.length} in #${a.at}`;
-    },
-  }),
   news: def({
     description: "Show what other agents did since you last checked (published knowledge, finished or released tasks, verdicts, organization changes). Gists only.",
     parameters: Type.Object({}),
