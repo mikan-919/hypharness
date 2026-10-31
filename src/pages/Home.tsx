@@ -1,11 +1,11 @@
 import { router } from '@inertiajs/react'
-import { type FormEvent, useEffect, useState } from 'react'
+import { type FormEvent, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { post } from '@/lib/api'
 import type { PageProps } from '../pages.gen'
 
-export default function Home({ user, codexConnected }: PageProps<'Home'>) {
+export default function Home({ user }: PageProps<'Home'>) {
   const logout = async () => {
     await post('/auth/logout')
     router.visit('/login')
@@ -19,61 +19,8 @@ export default function Home({ user, codexConnected }: PageProps<'Home'>) {
           ログアウト
         </Button>
       </header>
-      {codexConnected ? <Chat /> : <ConnectCodex />}
+      <Chat />
     </main>
-  )
-}
-
-type Device = { userCode: string; verificationUrl: string; interval: number }
-
-function ConnectCodex() {
-  const [device, setDevice] = useState<Device>()
-  const [error, setError] = useState('')
-
-  // 利用者がコードを入力するまで、指定された間隔で確認する
-  useEffect(() => {
-    if (!device) return
-    const timer = setInterval(async () => {
-      try {
-        const { status } = await post<{ status: string }>('/codex/device/poll')
-        if (status === 'connected') router.reload()
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e))
-        setDevice(undefined)
-      }
-    }, device.interval * 1000)
-    return () => clearInterval(timer)
-  }, [device])
-
-  const start = async () => {
-    setError('')
-    try {
-      setDevice(await post<Device>('/codex/device'))
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    }
-  }
-
-  return (
-    <section className='flex flex-col gap-3'>
-      {device ? (
-        <p>
-          <a
-            className='underline'
-            href={device.verificationUrl}
-            target='_blank'
-            rel='noreferrer'
-          >
-            {device.verificationUrl}
-          </a>
-          {' で次のコードを入力してください: '}
-          <code className='font-bold'>{device.userCode}</code>
-        </p>
-      ) : (
-        <Button onClick={start}>Codex を接続</Button>
-      )}
-      {error && <p className='text-destructive text-sm'>{error}</p>}
-    </section>
   )
 }
 

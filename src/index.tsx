@@ -5,7 +5,7 @@ import { csrf } from 'hono/csrf'
 import { createMiddleware } from 'hono/factory'
 import { HTTPException } from 'hono/http-exception'
 import type { Accounts, RelyingParty, User } from './accounts'
-import type { Agent, Codex } from './agent'
+import type { Agent } from './agent'
 import { rootView } from './renderer'
 
 type AppEnv = { Bindings: Env; Variables: { user: User } }
@@ -13,8 +13,6 @@ type AppEnv = { Bindings: Env; Variables: { user: User } }
 // cf の型生成は自分自身の Durable Object にクラス型を付けないため、ここで型を与える
 const accounts = (env: Env) =>
   (env.ACCOUNTS as DurableObjectNamespace<Accounts>).getByName('default')
-const codex = (c: Context<AppEnv>) =>
-  (c.env.CODEX as DurableObjectNamespace<Codex>).getByName(c.var.user.id)
 
 const relyingParty = (c: Context): RelyingParty => {
   const url = new URL(c.req.url)
@@ -60,12 +58,7 @@ app.onError((err, c) => {
 })
 
 const routes = app
-  .get('/', auth, async (c) =>
-    c.render('Home', {
-      user: c.var.user,
-      codexConnected: await codex(c).connected(),
-    }),
-  )
+  .get('/', auth, (c) => c.render('Home', { user: c.var.user }))
   .get('/login', (c) => c.render('Login'))
   .post('/auth/register/options', async (c) => {
     const { name } = await c.req.json<{ name?: unknown }>()
@@ -105,12 +98,6 @@ const routes = app
     deleteCookie(c, 'session', { path: '/' })
     return c.json({ ok: true })
   })
-  .post('/codex/device', auth, async (c) =>
-    c.json(await codex(c).startDevice()),
-  )
-  .post('/codex/device/poll', auth, async (c) =>
-    c.json({ status: await codex(c).pollDevice() }),
-  )
   .post('/agents/:name/chat', auth, async (c) => {
     const name = c.req.param('name')
     const { message } = await c.req.json<{ message?: unknown }>()
@@ -127,7 +114,7 @@ const routes = app
     const agent = (c.env.AGENT as DurableObjectNamespace<Agent>).getByName(
       `${c.var.user.id}/${name}`,
     )
-    return c.json({ reply: await agent.chat(c.var.user.id, message) })
+    return c.json({ reply: await agent.chat(message) })
   })
   .get('/agents/:name/memories', auth, async (c) =>
     c.json(
@@ -139,4 +126,4 @@ const routes = app
 
 export default routes
 export { Accounts } from './accounts'
-export { Agent, Codex } from './agent'
+export { Agent } from './agent'

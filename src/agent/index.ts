@@ -1,14 +1,13 @@
 import { DurableObject } from 'cloudflare:workers'
-import { type Codex, complete, type Message } from './codex'
 import { ftsQuery } from './lib'
 
-export { Codex } from './codex'
-
+const MODEL = '@cf/google/gemma-4-26b-a4b-it'
 const INSTRUCTIONS =
   'あなたは利用者と対話するエージェントです。日本語で簡潔に答えてください。'
 const RECENT = 10
 const RECALL = 5
 
+type Message = { role: 'user' | 'assistant'; content: string }
 type Memory = Message & { id: number; created_at: number }
 
 // 1つのインスタンスが1体のエージェント。記憶はインスタンス専用の SQLite に置くため、エージェント間で混ざらない
@@ -30,8 +29,7 @@ export class Agent extends DurableObject<Env> {
     )
   }
 
-  // userId は記憶の持ち主のアカウントで、そのアカウントの Codex でモデルを呼ぶ
-  async chat(userId: string, message: string) {
+  async chat(message: string) {
     const sql = this.ctx.storage.sql
     const recent = sql
       .exec<Memory>('SELECT * FROM memories ORDER BY id DESC LIMIT ?', RECENT)
@@ -56,13 +54,17 @@ export class Agent extends DurableObject<Env> {
     const instructions = recalled.length
       ? `${INSTRUCTIONS}\n\n関連する過去の記憶:\n${recalled.map((m) => `- [${m.role}] ${m.content}`).join('\n')}`
       : INSTRUCTIONS
-    const codex = (this.env.CODEX as DurableObjectNamespace<Codex>).getByName(
-      userId,
-    )
-    const reply = await complete(codex, instructions, [
-      ...recent.map(({ role, content }) => ({ role, content })),
-      { role: 'user', content: message },
-    ])
+    const result = await this.env.AI.run(MODEL, {
+      messages: [
+        { role: 'system', content: instructions },
+        ...recent.map(({ role, content }) => ({ role, content })),
+        { role: 'user', content: message },
+      ],
+    })
+    const reply = result.choices[0]?.message?.content
+    if (typeof reply !== 'string') {
+      throw new Error('モデルの応答に本文がありません')
+    }
 
     this.remember('user', message)
     this.remember('assistant', reply)
