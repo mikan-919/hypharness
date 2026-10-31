@@ -1,6 +1,11 @@
 import { type PageObject, type RootView, serializePage } from '@hono/inertia'
 import { renderToString } from 'react-dom/server'
-import { Link, Script, ViteClient } from 'vite-ssr-components/react'
+import {
+  Link,
+  ReactRefresh,
+  Script,
+  ViteClient,
+} from 'vite-ssr-components/react'
 
 const Document = ({ page }: { page: PageObject }) => (
   <html lang='ja'>
@@ -12,6 +17,7 @@ const Document = ({ page }: { page: PageObject }) => (
         rel='stylesheet'
       />
       <ViteClient />
+      <ReactRefresh />
       <Script src='/src/client.tsx' />
       <Link href='/src/style.css' rel='stylesheet' />
     </head>
