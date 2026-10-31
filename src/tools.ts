@@ -4,6 +4,7 @@ import { StringEnum, Type, type Message, type Static, type TSchema, type Tool } 
 import type { Agent, Goal, Store, Task } from "./db.ts";
 import { emit, MAX_DECLINES, requestVerification } from "./triggers.ts";
 import { fetchPublicPage } from "./web-fetch.ts";
+import { sandboxShell } from "./sandbox.ts";
 
 // messages is the caller's live context for the current episode; context_edit changes it in place.
 export type ToolContext = { store: Store; agent: Agent; task: Task; workspace: string; contextDir: string; episode: string; messages: Message[] };
@@ -674,28 +675,7 @@ export const tools: Record<string, Def<TSchema>> = {
     parameters: Type.Object({ command: Type.String() }),
     async run(c, a) {
       if (!c.store.config.allowShell) fail("Shell is not permitted by the host; start the harness with --allow-shell to grant it");
-      const bwrap = Bun.which("bwrap") ?? fail("Shell requires bubblewrap");
-      const shellPath = Bun.which("sh") ?? fail("Shell executable not found");
-      const bunPath = Bun.which("bun") ?? fail("Bun executable not found");
-      const shell = realpathSync(shellPath);
-      const executableDirs = [...new Set([dirname(shellPath), dirname(bunPath)])];
-      const system = ["/nix/store", "/run/current-system/sw", "/usr", "/bin", "/lib", "/lib64", "/etc/resolv.conf", "/etc/ssl/certs"]
-        .filter(existsSync).flatMap(path => ["--ro-bind", path, path]);
-      const masked: string[] = [];
-      function maskSecrets(dir: string) {
-        for (const entry of readdirSync(dir, { withFileTypes: true })) {
-          const path = join(dir, entry.name);
-          if (entry.name === ".env" || entry.name === "auth.json") {
-            if (!entry.isFile()) fail(`Cannot safely hide ${path}`);
-            masked.push("--ro-bind", "/dev/null", join("/workspace", relative(c.workspace, path)));
-          } else if (entry.isDirectory()) maskSecrets(path);
-        }
-      }
-      maskSecrets(c.workspace);
-      const proc = Bun.spawn([bwrap, "--unshare-user", "--unshare-pid", "--die-with-parent", "--clearenv",
-        ...system, ...executableDirs.flatMap(path => ["--ro-bind", path, path]), "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--bind", resolve(c.workspace), "/workspace", ...masked,
-        "--chdir", "/workspace", "--setenv", "PATH", [...executableDirs, "/run/current-system/sw/bin", "/usr/bin", "/bin"].join(":"), "--setenv", "HOME", "/tmp",
-        "--", shell, "-c", a.command], { stdout: "pipe", stderr: "pipe", timeout: 60_000 });
+      const proc = Bun.spawn(sandboxShell(c.workspace, a.command), { stdout: "pipe", stderr: "pipe", timeout: 60_000 });
       const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
       return `exit ${code}\n${out}${err ? `\nstderr:\n${err}` : ""}`;
     },
