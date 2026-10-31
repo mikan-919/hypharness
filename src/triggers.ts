@@ -42,6 +42,20 @@ export function eligible(store: Store, agent: Agent, task: Pick<Task, "kind">) {
   return r ? r.kinds.includes(task.kind) : !Object.values(ROLES).some(x => x.kinds.includes(task.kind));
 }
 
+// Whether an agent worked on what a verify task checks: the task itself, any work under the goal and its subgoals, or the knowledge it recorded.
+export function didWork(store: Store, agent: string, target: string) {
+  if (target.startsWith("T-")) return !!store.get("select 1 from episodes where agent = ? and task = ?", agent, target);
+  if (target.startsWith("K-")) return !!store.get("select 1 from knowledge where id = ? and author = ?", target, agent);
+  return !!store.get(`with recursive sub(id) as (select ?2 union select g.id from goals g join sub on g.parent = sub.id)
+    select 1 from episodes e join tasks t on t.id = e.task where e.agent = ?1 and t.kind = 'work' and t.goal in (select id from sub) limit 1`, agent, target);
+}
+
+// Whether an agent may claim a task now: its role allows it, it is not excluded, and a verifier never checks its own work.
+export function mayTake(store: Store, agent: Agent, task: Task) {
+  if (!eligible(store, agent, task) || agent.id === task.exclude) return false;
+  return !(task.kind === "verify" && store.config.maxAgents > 1 && task.target && didWork(store, agent.id, task.target));
+}
+
 // Tools a role may not use; execute() rejects any tool missing from the agent's list.
 export function withheldTools(store: Store, agent: Agent) {
   const withheld = new Set<string>();
@@ -96,7 +110,7 @@ function organize(store: Store, author: string, domain: string, why: string) {
     goal: "G0", kind: "organize", author, assignee: d.steward, target: domain, budget: ORGANIZE_BUDGET,
     description: `${why}\nYou steward ${d.id} (${d.name}: ${d.description}), ${n(d.id)} knowledge items. Recent ones:\n${sample.map(s => `- ${s.gist}`).join("\n")}\n`
       + `Other domains: ${others.map(o => `${o.id} ${o.name} (n=${n(o.id)}, steward ${o.steward})`).join("; ") || "none"}.\n`
-      + `Reorganize only if it makes knowledge easier to find: domain_split by topic, domain_merge domains you steward, or domain_request another steward's domain to merge it. Then task_finish with what you changed, or why nothing needed changing. Budget: ${ORGANIZE_BUDGET} model calls.`,
+      + `Reorganize only if it makes knowledge easier to find: knowledge_merge items that record the same document or claim, domain_split by topic, domain_merge domains you steward, or domain_request another steward's domain to merge it. Then task_finish with what you changed, or why nothing needed changing. Budget: ${ORGANIZE_BUDGET} model calls.`,
   });
 }
 
@@ -207,10 +221,14 @@ export const STATE_TRIGGERS: StateTrigger[] = [
     scan(store) {
       const open = store.all<Task>("select * from tasks where status = 'open' and assignee is null and kind in ('work', 'verify')");
       for (const t of open) {
-        const takers = store.agents().filter(a => eligible(store, a, t) && a.id !== t.exclude);
+        const takers = store.agents().filter(a => mayTake(store, a, t));
         if (takers.some(a => a.status === "active")) continue;
         const dormant = takers.find(a => a.status === "dormant");
-        staff(store, dormant?.id ?? (t.exclude === "worker" ? "verifier" : "worker"));
+        if (dormant) { staff(store, dormant.id); continue; }
+        // Everyone who could take it did the work: a new verifier is staffed instead.
+        let id = "worker", n = 1;
+        for (let a = store.agent(id); a && (a.status === "merged" || !mayTake(store, a, t)); a = store.agent(id)) id = n++ === 1 ? "verifier" : `verifier-${n - 1}`;
+        staff(store, id);
       }
     },
   },

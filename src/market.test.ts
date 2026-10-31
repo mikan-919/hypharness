@@ -13,7 +13,7 @@ type Ctx = { messages: Message[] };
 const call = (name: string, args: Parameters<typeof fauxToolCall>[1]) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
 
 // Scripted market roles: the kind of the claimed task tells each role what to do.
-function market(opts: { budget: number; workerLoops?: boolean }) {
+function market(opts: { budget: number; workerLoops?: boolean; splits?: boolean }) {
   let split = false;
   const brain = (ctx: Ctx) => {
     const first = ctx.messages.find(m => m.role === "user")!.content as string | { text?: string }[];
@@ -33,6 +33,11 @@ function market(opts: { budget: number; workerLoops?: boolean }) {
     if (kind === "invest") return call("goal_fund", { goal: opening.match(/Goal (G-\w+): /)![1]!, budget: opts.budget, rationale: "one file write" });
     if (kind === "work") {
       if (opts.workerLoops) return call("file_list", {});
+      if (opening.includes("Part of task")) {
+        if (!used.includes("file_write")) return call("file_write", { path: "part.txt", content: "Bergen" });
+        return call("task_finish", { result: "part.txt" });
+      }
+      if (opts.splits && !used.includes("agent_split")) return call("agent_split", { parts: [{ description: "write part.txt", budget: 3 }], reason: "independent file" });
       if (!used.includes("file_write")) return call("file_write", { path: "answer.txt", content: "Oslo" });
       return call("task_finish", { result: "answer.txt" });
     }
@@ -131,4 +136,52 @@ test("centralization shows lead's share of calls, the agents, and the most domai
   for (const agent of ["lead", "lead", "lead", "worker"]) store.run("insert into usage(agent, task, input, output, cache_read, cache_write, prompt_chars, ms, at) values(?, 't', 1, 1, 0, 0, 0, 0, 0)", agent);
   store.run("insert into domains(id, name, description, steward, status) values('D1', 'a', 'a', 'lead', 'active'), ('D2', 'b', 'b', 'lead', 'active'), ('D3', 'c', 'c', 'x', 'retired')");
   expect(centralization(store.db)).toEqual({ leadShare: 0.75, agents: 1, maxDomainsPerSteward: 2 });
+});
+
+test("market: a worker splits off a part to a copy of itself, which does it on a share of the budget", async () => {
+  const { store, rt } = setup(market({ budget: 8, splits: true }));
+  expect((await runScheduler(rt)).status).toBe("done");
+  expect(readFileSync(join(rt.workspace, "part.txt"), "utf8")).toBe("Bergen");
+  const copy = store.agent("worker-2")!;
+  expect([copy.role, copy.parent]).toEqual([store.agent("worker")!.role, "worker"]);
+  const work = store.all<{ claimed_by: string; budget: number; status: string }>("select claimed_by, budget, status from tasks where kind = 'work' order by created_at");
+  expect(work).toEqual([{ claimed_by: "worker", budget: 5, status: "done" }, { claimed_by: "worker-2", budget: 3, status: "done" }]);
+  // Each part is critiqued on its own by the critic.
+  expect(store.get<{ n: number }>("select count(*) n from tasks where kind = 'critique' and status = 'done' and claimed_by = 'critic'")!.n).toBe(2);
+  // Neither the worker nor its copy verifies the goal they worked on; a verifier is staffed for it.
+  const verifiers = store.all<{ claimed_by: string }>("select claimed_by from tasks where kind = 'verify'").map(t => t.claimed_by);
+  expect(verifiers.length).toBeGreaterThan(0);
+  expect(verifiers.every(v => v === "verifier")).toBe(true);
+  expect(store.all<{ verified_by: string }>("select verified_by from goals where parent = 'G0'").map(g => g.verified_by)).toEqual(["verifier"]);
+  expect(store.all<{ detail: string }>("select detail from log where event = 'verified' and detail like '%\"self\"%'").every(l => JSON.parse(l.detail).self === false)).toBe(true);
+});
+
+test("agent_split checks the budget, and agent_merge folds a copy's memory into another of its role and retires it", () => {
+  const store = new Store(":memory:");
+  store.init("p", "", { ...defaultConfig, organization: "market" });
+  store.addAgent("worker", "worker: does funded work tasks and verifies results", "host");
+  store.writeMemory("worker", "sources in K-1");
+  const contextDir = mkdtempSync(join(tmpdir(), "hyph-ctx-"));
+  const ctx = (agent: string, task: string) => ({ store, agent: store.agent(agent)!, task: store.task(task)!, workspace: "", contextDir, episode: "e", messages: [] }) as ToolContext;
+  const task = store.addTask({ goal: "G0", kind: "work", description: "survey", author: "investor", budget: 6 });
+  expect(store.claim(task, "worker")).toBe(true);
+  const split = (parts: { description: string; budget?: number }[]) => tools.agent_split!.run(ctx("worker", task), { parts, reason: "parallel" });
+  expect(() => split([{ description: "a", budget: 6 }])).toThrow("6 left");
+  expect(() => split([{ description: "a" }])).toThrow("Give each part a budget");
+  expect(split([{ description: "a", budget: 2 }, { description: "b", budget: 2 }])).toContain("keeps 2 model calls");
+  expect(store.agents().map(a => a.id)).toEqual(["lead", "worker", "worker-2", "worker-3"]);
+  expect(store.memory("worker-3")!.memory).toBe("sources in K-1");
+
+  // worker-2 finishes its part and merges back; it is never reused, and the next split wakes the dormant worker-3 instead.
+  const part = store.get<{ id: string }>("select id from tasks where assignee = 'worker-2'")!.id;
+  expect(store.claim(part, "worker-2")).toBe(true);
+  store.writeMemory("worker-2", "part a in a.md");
+  expect(() => tools.agent_merge!.run(ctx("worker-2", part), { into: "lead", reason: "done" })).toThrow("not an agent of your role");
+  tools.agent_merge!.run(ctx("worker-2", part), { into: "worker", reason: "done" });
+  expect(store.agent("worker-2")!.status).toBe("merged");
+  expect(store.memory("worker")!.memory).toBe("sources in K-1\n\n## Merged from worker-2\npart a in a.md");
+  store.run("update agents set status = 'dormant' where id = 'worker-3'");
+  split([{ description: "c", budget: 1 }]);
+  expect(store.get<{ assignee: string }>("select assignee from tasks where description like 'Part of task %: c%'")!.assignee).toBe("worker-3");
+  expect(store.agent("worker-3")!.status).toBe("active");
 });

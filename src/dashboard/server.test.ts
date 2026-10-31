@@ -21,13 +21,22 @@ test("dashboard lists sessions read-only and refuses paths it did not discover",
   mkdirSync(join(dir, ".hyph", "run"), { recursive: true });
   const store = new Store(join(dir, ".hyph", "run", "state.sqlite"));
   store.init("Dashboard check", "", defaultConfig);
+  // Two workers on work tasks overlap in time (10-30 and 20-40); lead steers afterwards.
+  for (const [, task, kind] of [["worker", "T-a", "work"], ["worker-2", "T-b", "work"], ["lead", "T-c", "steer"]] as const) store.run("insert into tasks(id, goal, kind, description, status, author, created_at) values(?, 'G0', ?, '', 'done', 'x', 0)", task, kind);
+  for (const [agent, task, at, ms] of [["worker", "T-a", 20, 10], ["worker", "T-a", 30, 5], ["worker-2", "T-b", 40, 20], ["lead", "T-c", 60, 10]] as const)
+    store.run("insert into usage(agent, task, input, output, cache_read, cache_write, prompt_chars, ms, at) values(?, ?, 0, 0, 0, 0, 0, ?, ?)", agent, task, ms, at);
+  for (const [id, gist, source] of [["K-1", "Self-Rewarding Language Models", "https://arxiv.org/abs/2401.10020"], ["K-2", "x", "https://arxiv.org/html/2401.10020v2"], ["K-3", "other", "https://example.org"]])
+    store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, '', '', ?, 'hypothesis', 'worker', 0)", id, gist, source);
   store.db.close();
   const { proc, base } = await serve(dir);
   try {
     const sessions = await (await fetch(`${base}/api/sessions`)).json() as { id: string; purpose: string }[];
     expect(sessions.map(s => [s.id, s.purpose])).toEqual([[".hyph/run", "Dashboard check"]]);
-    const overview = await (await fetch(`${base}/api/overview?s=.hyph/run`)).json() as { agents: { id: string }[] };
+    const overview = await (await fetch(`${base}/api/overview?s=.hyph/run`)).json() as { agents: { id: string }[]; spans: { agent: string; start: number; end: number }[]; peak: object; duplicates: { key: string; items: { id: string }[] }[] };
     expect(overview.agents.map(a => a.id)).toEqual(["lead"]);
+    expect(overview.spans.map(s => [s.agent, s.start, s.end])).toEqual([["worker", 10, 30], ["worker-2", 20, 40], ["lead", 50, 60]]);
+    expect(overview.peak).toEqual({ agents: 2, work: 2 });
+    expect(overview.duplicates.map(g => [g.key, g.items.map(k => k.id)])).toEqual([["source https://arxiv.org/abs/2401.10020", ["K-1", "K-2"]]]);
     expect((await fetch(`${base}/api/overview?s=..`)).status).toBe(404);
     expect((await fetch(`${base}/api/file?s=.hyph/run&path=../state.sqlite`)).status).toBe(400);
   } finally {

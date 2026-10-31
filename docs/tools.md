@@ -50,7 +50,8 @@
 | `knowledge_add` | `gist`, `summary`, `raw`, `source`, `domain?` | 知識を出典付きで登録する。領域を指定するとその領域に結び付ける |
 | `knowledge_search` | `query`, `domain?`, `status?` | 知識を検索し、Gist だけを返す |
 | `knowledge_get` | `id`, `level` | 知識を Summary または Raw まで展開する |
-| `knowledge_verify` | `id` | 仮説の検証を別のエージェントに依頼する。結果は verified か rejected になる |
+| `knowledge_verify` | `id` | 仮説の検証を別のエージェントに依頼する。結果は verified か rejected になる。知識を登録した担当は検証を取らない |
+| `knowledge_merge` | `keep`, `duplicates`, `reason` | 同じ文書や同じ主張を記録した知識を1件にまとめる。重複側は `merged` になり、`merged_into` に残す側の ID を持ち、領域の結び付きは残す側に移る。検索結果には出なくなり、取得すると統合先を示す。検証済みの知識を未検証の知識にまとめることはできない |
 
 ## 担当領域（domain）
 
@@ -74,6 +75,8 @@
 | `agent_list` | なし | エージェントを役割・状態・負荷（取得中と割り当て済みのタスク数）付きで一覧する |
 | `agent_spawn` | `id`, `role`, `reason` | 新しいエージェントを作る。上限 `maxAgents` に達していると拒否される。理由はログに残る |
 | `agent_sleep` | `id`, `reason` | 自分が作ったエージェントか自分自身を休眠させる。文脈は残り、タスクを割り当てると起きる。lead は休眠できない |
+| `agent_split` | `parts`（`description`、`budget`）、`reason` | 自分の作業タスクの一部を、同じ役割で作業記憶を複製したエージェントに渡し、並列に進める。休眠中の同じ役割のエージェントがあれば起こして使い、なければ `worker-2` のように作る。予算付きのタスクでは各部分の予算を元のタスクの残りから差し引く。作業タスクでのみ使える |
+| `agent_merge` | `into`, `reason` | 自分を同じ役割の別のエージェントに統合する。自分の作業記憶は統合先の作業記憶の末尾に加わり、自分は `merged` になって以後は起こされない。ほかにタスクを持っている場合は拒否される |
 
 ## 作業ディレクトリと外部
 
@@ -86,7 +89,7 @@
 | `file_search` | `query`, `path?` | 文字列を含む行を大文字小文字を区別せずに探し、ファイル名と行番号付きで最大40件返す |
 | `file_write` | `path`, `content` | ファイルを書く。途中のディレクトリは作られる |
 | `shell` | `command` | bubblewrap 内の作業ディレクトリでシェルコマンドを実行する（60秒で打ち切り）。起動時に `--allow-shell` を指定し、bubblewrap がある場合だけ使える |
-| `web_search` | `objective`, `queries`, `max_results?`, `include_domains?`, `after_date?` | Parallel Search API に fast モードで検索を送り、関連順の URL と抜粋を返す（既定で8件）。各結果は、題名を要旨、抜粋を原資料、URL を出典とする未検証の知識として自動で登録され、結果に知識 ID が付く。同じ URL は1件だけ登録される。環境変数 `PARALLEL_API_KEY` がない起動では、モデルに渡す一覧から外れる |
+| `web_search` | `objective`, `queries`, `max_results?`, `include_domains?`, `after_date?` | Parallel Search API に fast モードで検索を送り、関連順の URL と抜粋を返す（既定で8件）。各結果は、題名を要旨、抜粋を原資料、URL を出典とする未検証の知識として自動で登録され、結果に知識 ID が付く。同じ文書は1件だけ登録される。arXiv の版違い（`abs`、`pdf`、`html` の各版）とミラー（ar5iv、alphaXiv、Hugging Face Papers）は `https://arxiv.org/abs/<ID>` に、そのほかの URL はフラグメント、`www.`、末尾の `/` を除いた形にそろえて照合する。20文字以上の題名が既存の知識の要旨と一致する場合も同じ文書とみなす。環境変数 `PARALLEL_API_KEY` がない起動では、モデルに渡す一覧から外れる |
 
 ## MCP のツール
 
