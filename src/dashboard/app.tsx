@@ -22,7 +22,7 @@ type Session = { id: string; purpose: string; modelCalls: number; rootStatus: st
 type Overview = {
   purpose: string; constraints: string; config: Row; modelCalls: number; totals: Row; organization?: { leadShare: number; agents: number; maxDomainsPerSteward: number };
   agents: Row[]; goals: Row[]; tasks: Row[]; knowledge: Row[]; domains: Row[]; usage: Row[]; log: Row[];
-  spans: Row[]; peak: { agents: number; work: number }; duplicates: { id: string; key: string; items: { id: string; gist: string }[] }[];
+  spans: Row[]; peak: { agents: number; work: number }; graph: Graph; duplicates: { id: string; key: string; items: { id: string; gist: string }[] }[];
 };
 type AgentDetail = { memory: { memory: string; version: number }; episodes: Row[]; history: Row[]; live: { episode: string; text: string } | null };
 
@@ -379,6 +379,123 @@ function Streams({ session }: { session: string }) {
   );
 }
 
+type GraphEdge = { from: string; to: string; kind: string; n: number; failed: number };
+type Graph = { nodes: { id: string; status: string }[]; edges: GraphEdge[] };
+const EDGE_KINDS: Record<string, { label: string; color: string }> = {
+  steer: { label: "指示", color: "#71717a" }, work: { label: "作業", color: "#059669" }, verify: { label: "検証", color: "#0d9488" },
+  invest: { label: "出資の審査", color: "#d97706" }, critique: { label: "批評", color: "#e11d48" }, judge: { label: "裁定", color: "#0284c7" },
+  organize: { label: "整理", color: "#78716c" }, spawn: { label: "生成", color: "#7c3aed" }, knowledge_verify: { label: "知識の検証", color: "#4f46e5" },
+};
+const kindOf = (kind: string) => EDGE_KINDS[kind] ?? { label: kind, color: "#a1a1aa" };
+const GW = 1000, GH = 620, NODE_R = 20;
+
+// A small force layout: nodes repel, edges pull toward a set length, and a weak pull keeps everything near the centre.
+// Nodes seen before start where they were, so a new agent does not reshuffle the picture.
+// ponytail: O(n²) per step, fine for the few dozen agents a run has; use a quadtree if runs reach hundreds.
+function layout(ids: string[], links: [string, string][], prev: Map<string, { x: number; y: number }>) {
+  const p = new Map(ids.map((id, i) => [id, prev.get(id) ?? { x: GW / 2 + 220 * Math.cos(i * 2.4), y: GH / 2 + 200 * Math.sin(i * 2.4) }]));
+  for (let step = 0; step < 300; step++) {
+    const f = new Map(ids.map(id => [id, { x: (GW / 2 - p.get(id)!.x) * 0.01, y: (GH / 2 - p.get(id)!.y) * 0.01 }]));
+    for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) {
+      const a = p.get(ids[i]!)!, b = p.get(ids[j]!)!, dx = a.x - b.x, dy = a.y - b.y, d2 = Math.max(dx * dx + dy * dy, 100), k = 40000 / d2 / Math.sqrt(d2);
+      f.get(ids[i]!)!.x += dx * k; f.get(ids[i]!)!.y += dy * k; f.get(ids[j]!)!.x -= dx * k; f.get(ids[j]!)!.y -= dy * k;
+    }
+    for (const [s, t] of links) {
+      const a = p.get(s)!, b = p.get(t)!, dx = b.x - a.x, dy = b.y - a.y, d = Math.max(Math.hypot(dx, dy), 1), k = (d - 170) * 0.02 / d;
+      f.get(s)!.x += dx * k; f.get(s)!.y += dy * k; f.get(t)!.x -= dx * k; f.get(t)!.y -= dy * k;
+    }
+    const cap = 30 * (1 - step / 300) + 1;
+    for (const id of ids) {
+      const v = f.get(id)!, n = Math.hypot(v.x, v.y), s = n > cap ? cap / n : 1, q = p.get(id)!;
+      p.set(id, { x: Math.min(GW - 50, Math.max(50, q.x + v.x * s)), y: Math.min(GH - 40, Math.max(30, q.y + v.y * s)) });
+    }
+  }
+  return p;
+}
+
+// Who asked whom to do what, drawn as agents and arrows; choosing an agent keeps only its arrows and lists them below.
+function AgentGraph({ graph }: { graph: Graph }) {
+  const [selected, setSelected] = useState<string>();
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  // The layout uses every arrow, so hiding a kind leaves the agents where they are.
+  const links = graph.edges.filter(e => e.from !== e.to), edges = links.filter(e => !hidden.has(e.kind));
+  const ids = graph.nodes.map(n => n.id);
+  const shape = `${ids.join()}|${links.map(e => `${e.from}>${e.to}`).join()}`;
+  const placed = useRef(new Map<string, { x: number; y: number }>());
+  const [pos, setPos] = useState(placed.current);
+  useEffect(() => { setPos(placed.current = layout(ids, links.map(e => [e.from, e.to]), placed.current)); }, [shape]);
+  const touches = (e: GraphEdge) => !selected || e.from === selected || e.to === selected;
+  // Arrows between one pair bend apart so each kind stays visible; the bend follows the pair, not the direction.
+  const pairs = new Map<string, GraphEdge[]>();
+  for (const e of edges) { const key = [e.from, e.to].sort().join("\n"); pairs.set(key, [...pairs.get(key) ?? [], e]); }
+  const kinds = [...new Set(graph.edges.map(e => e.kind))];
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>エージェントの関係</CardTitle>
+        <CardDescription>矢印はタスクを作った側から引き受けた側へ、生成した側から生成された側へ、知識を検証した側から書いた側へ向きます。太さは件数です。エージェントを選ぶと、その矢印だけを残します</CardDescription>
+        <div className="flex flex-wrap gap-2 pt-2">
+          {kinds.map(k => (
+            <button key={k} type="button" onClick={() => setHidden(h => { const n = new Set(h); n.has(k) ? n.delete(k) : n.add(k); return n; })}
+              className={`flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs ${hidden.has(k) ? "opacity-40" : ""}`}>
+              <span className="h-0.5 w-4" style={{ background: kindOf(k).color }} />{kindOf(k).label}
+            </button>
+          ))}
+        </div>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        <svg viewBox={`0 0 ${GW} ${GH}`} className="w-full rounded-md border bg-muted/30" onClick={() => setSelected(undefined)}>
+          <defs>{kinds.map(k => (
+            <marker key={k} id={`arrow-${k}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill={kindOf(k).color} />
+            </marker>
+          ))}</defs>
+          {[...pairs.values()].flatMap(group => group.map((e, i) => {
+            const a = pos.get(e.from), b = pos.get(e.to);
+            if (!a || !b) return null;
+            const [s, t] = [e.from, e.to].sort(), sa = pos.get(s!)!, sb = pos.get(t!)!;
+            const dx = sb.x - sa.x, dy = sb.y - sa.y, d = Math.max(Math.hypot(dx, dy), 1), off = (i - (group.length - 1) / 2) * 36;
+            const c = { x: (a.x + b.x) / 2 - dy / d * off, y: (a.y + b.y) / 2 + dx / d * off };
+            const trim = (from: { x: number; y: number }, to: { x: number; y: number }, r: number) => {
+              const l = Math.max(Math.hypot(to.x - from.x, to.y - from.y), 1); return { x: from.x + (to.x - from.x) / l * r, y: from.y + (to.y - from.y) / l * r };
+            };
+            const start = trim(a, c, NODE_R + 2), end = trim(b, c, NODE_R + 4), k = kindOf(e.kind);
+            return (
+              <path key={`${e.from}>${e.to}>${e.kind}`} d={`M${start.x},${start.y} Q${c.x},${c.y} ${end.x},${end.y}`} fill="none" stroke={k.color}
+                strokeWidth={1.5 + Math.log2(e.n)} strokeDasharray={e.kind === "spawn" ? "6 4" : undefined} markerEnd={`url(#arrow-${e.kind})`}
+                opacity={touches(e) ? 0.9 : 0.08}>
+                <title>{`${e.from} → ${e.to}: ${k.label} ${e.n}件${e.failed ? `（不合格・却下 ${e.failed}件）` : ""}`}</title>
+              </path>
+            );
+          }))}
+          {graph.nodes.map(n => {
+            const q = pos.get(n.id);
+            if (!q) return null;
+            const near = !selected || n.id === selected || edges.some(e => touches(e) && (e.from === n.id || e.to === n.id));
+            return (
+              <g key={n.id} transform={`translate(${q.x},${q.y})`} opacity={near ? 1 : 0.25} className="cursor-pointer"
+                onClick={ev => { ev.stopPropagation(); setSelected(n.id === selected ? undefined : n.id); }}>
+                <foreignObject x={-NODE_R} y={-NODE_R} width={NODE_R * 2} height={NODE_R * 2}>
+                  <div className={`rounded-full ${n.id === selected ? "ring-2 ring-foreground" : ""} ${n.status === "active" ? "" : "opacity-60"}`}><Avatar agent={n.id} size="size-10" /></div>
+                </foreignObject>
+                <text y={NODE_R + 14} textAnchor="middle" className="fill-foreground text-xs">{n.id}</text>
+                <title>{`${n.id}（${n.status}）`}</title>
+              </g>
+            );
+          })}
+        </svg>
+        <DataTable rows={edges.filter(touches).sort((x, y) => y.n - x.n)} empty="やり取りはまだありません" columns={[
+          { key: "from", label: "から" },
+          { key: "to", label: "へ" },
+          { key: "kind", label: "種類", render: r => kindOf(r.kind).label },
+          { key: "n", label: "件数", className: "text-right tabular-nums" },
+          { key: "failed", label: "不合格・却下", className: "text-right tabular-nums" },
+        ]} />
+      </CardContent>
+    </Card>
+  );
+}
+
 type RunInfo = { dir: string; kind: string; args: string[]; startedAt: number; endedAt: number | null; exitCode: number | null; running: boolean };
 
 async function post(url: string, body: unknown) {
@@ -577,6 +694,7 @@ function Dashboard({ session, onDeleted, readOnly = false }: { session: string; 
         <TabsList className="flex-wrap">
           <TabsTrigger value="agents">エージェント</TabsTrigger>
           <TabsTrigger value="streams">ストリーム</TabsTrigger>
+          <TabsTrigger value="graph">関係</TabsTrigger>
           <TabsTrigger value="files">成果物</TabsTrigger>
           <TabsTrigger value="telemetry">テレメトリ</TabsTrigger>
           <TabsTrigger value="tasks">タスク</TabsTrigger>
@@ -700,6 +818,7 @@ function Dashboard({ session, onDeleted, readOnly = false }: { session: string; 
           </Card>
         </TabsContent>
 
+        <TabsContent value="graph"><AgentGraph graph={o.graph} /></TabsContent>
         <TabsContent value="streams"><Streams session={session} /></TabsContent>
         <TabsContent value="files"><Files session={session} /></TabsContent>
         <TabsContent value="diagnostics"><SessionDiagnostics session={session} /></TabsContent>
