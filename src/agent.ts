@@ -3,6 +3,7 @@ import type { createModels } from "@earendil-works/pi-ai/models";
 import type { Agent, Store, Task } from "./db.ts";
 import { mirror, toolSchemas, tools, type ToolContext } from "./tools.ts";
 import { emit, isMarket, withheldTools } from "./triggers.ts";
+import type { McpTools } from "./mcp.ts";
 
 export type Runtime = {
   store: Store;
@@ -13,6 +14,7 @@ export type Runtime = {
   contextDir: string;
   log?: (line: string) => void;
   modelTimeoutMs?: number;
+  mcp?: McpTools;
 };
 
 // A provider connection that never answers would otherwise hold the whole run; a timed-out call counts as a model error.
@@ -80,11 +82,11 @@ async function execute(rt: Runtime, ctx: ToolContext, episode: string, call: Too
   let text: string, isError = false;
   try {
     const def = tools[call.name];
-    if (!def || !schemas.some(s => s.name === call.name)) throw new Error(`Unknown tool ${call.name}`);
+    if ((!def && !rt.mcp?.has(call.name)) || !schemas.some(s => s.name === call.name)) throw new Error(`Unknown tool ${call.name}`);
     const args = validateToolCall(schemas, call);
     // Database tools commit together with their op record; file and shell tools run outside the transaction.
     const value = store.tx(() => {
-      const v = def.run(ctx, args);
+      const v = def ? def.run(ctx, args) : rt.mcp!.call(call.name, args, ctx.agent.id);
       if (!(v instanceof Promise)) store.run("insert into ops(episode, call_id, result, is_error) values(?, ?, ?, 0)", episode, call.id, v);
       return v;
     });
@@ -112,7 +114,7 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
   const ctx: ToolContext = { store, agent, task, workspace: rt.workspace, contextDir: rt.contextDir, episode: id, messages };
   const system = systemPrompt(store, agent);
   const withheld = withheldTools(store, agent);
-  const schemas = toolSchemas().filter(s => !withheld.has(s.name));
+  const schemas = [...toolSchemas(), ...(rt.mcp?.schemas() ?? [])].filter(s => !withheld.has(s.name));
   const { maxSteps } = store.config;
   let nudged = false;
 

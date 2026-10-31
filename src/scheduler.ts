@@ -2,6 +2,7 @@ import { BudgetExhausted, runEpisode, type Runtime } from "./agent.ts";
 import { centralization, type Agent, type Goal, type Store, type Task } from "./db.ts";
 import { mirror } from "./tools.ts";
 import { eligible, scan } from "./triggers.ts";
+import { McpTools } from "./mcp.ts";
 
 // State triggers (src/triggers.ts), such as an idle goal going back to its owner.
 export const steer = scan;
@@ -54,6 +55,13 @@ export function report(store: Store, status: Report["status"], rounds: number, e
 }
 
 export async function runScheduler(rt: Runtime, maxRounds = Infinity): Promise<Report> {
+  const ownsMcp = !rt.mcp;
+  rt.mcp ??= await McpTools.open(rt.store, rt.workspace, rt.log ?? console.error);
+  try { return await schedule(rt, maxRounds); }
+  finally { if (ownsMcp) { await rt.mcp.close(); rt.mcp = undefined; } }
+}
+
+async function schedule(rt: Runtime, maxRounds: number): Promise<Report> {
   const { store } = rt;
   const started = Date.now();
   store.adoptRunning();
@@ -115,6 +123,13 @@ export async function runScheduler(rt: Runtime, maxRounds = Infinity): Promise<R
 
 // Resident work fills each slot as soon as an episode finishes; benchmark scheduling stays unchanged.
 export async function runWorkerPool(rt: Runtime, signal: AbortSignal, execute = runEpisode) {
+  const ownsMcp = !rt.mcp;
+  rt.mcp ??= await McpTools.open(rt.store, rt.workspace, rt.log ?? console.error);
+  try { return await workerPool(rt, signal, execute); }
+  finally { if (ownsMcp) { await rt.mcp.close(); rt.mcp = undefined; } }
+}
+
+async function workerPool(rt: Runtime, signal: AbortSignal, execute: typeof runEpisode) {
   const { store } = rt;
   const running = new Map<string, Promise<void>>(), retryAfter = new Map<string, number>();
   store.adoptRunning();
