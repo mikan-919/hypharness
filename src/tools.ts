@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "node
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { StringEnum, Type, type Message, type Static, type TSchema, type Tool } from "@earendil-works/pi-ai";
 import type { Agent, Goal, Store, Task } from "./db.ts";
-import { didWork, emit, MAX_DECLINES, requestVerification } from "./triggers.ts";
+import { didWork, emit, MAX_DECLINES, panelVotes, requestVerification } from "./triggers.ts";
 import { fetchPublicPage } from "./web-fetch.ts";
 import { sandboxShell } from "./sandbox.ts";
 import { recordToolKnowledge, type Embed } from "./resident-memory.ts";
@@ -42,6 +42,25 @@ function requireInvest(c: ToolContext, goal: string) {
   if (task.kind !== "invest" || task.target !== goal) fail(`Your current task ${task.id} is not the invest task for ${goal}`);
   if (c.store.goal(goal)?.status !== "open") fail(`Goal ${goal} is not open`);
   return task;
+}
+
+// Settles a funding vote once every investor of the panel has voted: a majority to fund funds the goal with the median of
+// their budgets, otherwise the goal is declined and goes back to its owner.
+function decideInvestment(c: ToolContext, task: Task) {
+  const votes = panelVotes(c.store, task);
+  if (!votes) return "Vote recorded; the decision waits for the other investors";
+  const goal = c.store.goal(task.target!)!;
+  const funds = votes.map(v => v.result!.match(/^funded (\d+): ([\s\S]*)$/)).filter(m => m !== null);
+  if (funds.length * 2 > votes.length) {
+    const budgets = funds.map(m => Number(m[1])).sort((x, y) => x - y), budget = budgets[Math.floor((budgets.length - 1) / 2)]!;
+    emit(c.store, c.agent.id, "goal_funded", { goal: goal.id, budget, rationale: funds.map(m => m[2]).join("\n") });
+    return `Investors funded ${goal.id} with ${budget} model calls (${funds.length} of ${votes.length} voted to fund)`;
+  }
+  const reason = votes.filter(v => v.result!.startsWith("declined: ")).map(v => v.result!.slice(10)).join(" / ");
+  c.store.run("update goals set status = 'dropped', feedback = ?, rev = rev + 1 where id = ?", `declined: ${reason}`, goal.id);
+  c.store.run("update tasks set status = 'failed', feedback = 'goal declined' where goal = ? and status = 'open'", goal.id);
+  emit(c.store, c.agent.id, "goal_declined", { goal: goal.id, reason });
+  return `Investors declined ${goal.id} (${funds.length} of ${votes.length} voted to fund)`;
 }
 
 function dynamicOnly(store: Store) {
@@ -260,27 +279,27 @@ export const tools: Record<string, Def<TSchema>> = {
 
   // --- Market: the investor's decisions (src/triggers.ts) ---
   goal_fund: def({
-    description: "Fund the goal of your current invest task with a model-call budget. A worker then does it within that budget; when the budget is spent the goal comes back to you.",
+    description: "Vote to fund the goal of your current invest task with a model-call budget. When a majority of the investors vote to fund, a worker does it within the median of their budgets; when that is spent the goal comes back to the investors.",
     parameters: Type.Object({ goal: Str("Goal ID of your invest task"), budget: Type.Integer({ minimum: 1, maximum: 200, description: "Model calls the work may use in total" }), rationale: Str("Why it should pay back, and what you expect") }),
     run(c, a) {
       const task = requireInvest(c, a.goal);
-      c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `funded ${a.budget}: ${a.rationale}`, task.id);
-      emit(c.store, c.agent.id, "goal_funded", { goal: a.goal, budget: a.budget, rationale: a.rationale });
-      return `Funded ${a.goal} with ${a.budget} model calls`;
+      return c.store.tx(() => {
+        c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `funded ${a.budget}: ${a.rationale}`, task.id);
+        return decideInvestment(c, task);
+      });
     },
   }),
   goal_decline: def({
-    description: `Decline the goal of your current invest task; it is dropped and its owner decides again. At most ${MAX_DECLINES} subgoals of the same goal can be declined.`,
+    description: `Vote to decline the goal of your current invest task; without a majority to fund, it is dropped and its owner decides again. At most ${MAX_DECLINES} subgoals of the same goal can be declined.`,
     parameters: Type.Object({ goal: Str("Goal ID of your invest task"), reason: Str("Why it is not worth funding") }),
     run(c, a) {
       const task = requireInvest(c, a.goal), goal = c.store.goal(a.goal)!;
       const declined = c.store.get<{ n: number }>("select count(*) n from goals where parent = ? and feedback like 'declined%'", goal.parent)!.n;
       if (declined >= MAX_DECLINES) fail(`${declined} subgoals of ${goal.parent} were already declined; fund this one with a small budget instead`);
-      c.store.run("update goals set status = 'dropped', feedback = ?, rev = rev + 1 where id = ?", `declined: ${a.reason}`, goal.id);
-      c.store.run("update tasks set status = 'failed', feedback = 'goal declined' where goal = ? and status = 'open'", goal.id);
-      c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `declined: ${a.reason}`, task.id);
-      emit(c.store, c.agent.id, "goal_declined", { goal: goal.id, reason: a.reason });
-      return `Declined ${goal.id}`;
+      return c.store.tx(() => {
+        c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `declined: ${a.reason}`, task.id);
+        return decideInvestment(c, task);
+      });
     },
   }),
 
@@ -338,11 +357,16 @@ export const tools: Record<string, Def<TSchema>> = {
         } else if (task.kind === "critique" || task.kind === "judge") {
           if (!a.verdict) fail(`${task.kind} tasks need a verdict`);
           c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `${a.verdict}: ${a.result}`, task.id);
-          // A critique that passes, and every ruling, decides the work; objections go to the evaluator first.
-          if (task.kind === "critique" && a.verdict === "fail") emit(c.store, c.agent.id, "objections_raised", { critique: task.id, target: task.target, objections: a.result });
-          else {
-            applyVerdict(c.store, c.agent.id, task.target!, a.verdict === "pass", a.result);
-            c.store.log(c.agent.id, "verified", { target: task.target, verdict: a.verdict, by: task.kind });
+          // The panel decides once every member has voted: any critic's objection goes to the evaluators, whose majority rules.
+          const votes = panelVotes(c.store, task);
+          if (votes) {
+            const fails = votes.filter(v => v.result!.startsWith("fail: ")), reasons = (vs: Task[]) => vs.map(v => `${v.claimed_by}: ${v.result!.replace(/^\w+: /, "")}`).join("\n");
+            if (task.kind === "critique" && fails.length) emit(c.store, c.agent.id, "objections_raised", { critique: task.panel ?? task.id, target: task.target, objections: reasons(fails) });
+            else {
+              const pass = fails.length * 2 <= votes.length;
+              applyVerdict(c.store, c.agent.id, task.target!, pass, reasons(pass ? votes.filter(v => !fails.includes(v)) : fails));
+              c.store.log(c.agent.id, "verified", { target: task.target, verdict: pass ? "pass" : "fail", by: task.kind, votes: votes.length, fails: fails.length });
+            }
           }
         } else if (task.kind === "verify") {
           if (!a.verdict) fail("Verify tasks need a verdict");

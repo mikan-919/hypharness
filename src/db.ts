@@ -61,6 +61,7 @@ export type Task = {
   author: string; assignee: string | null; exclude: string | null; target: string | null; claimed_by: string | null; lease_until: number | null;
   result: string | null; feedback: string | null; verified_by: string | null; rev: number;
   budget: number | null; // model calls a funded task may use across all its episodes
+  panel: string | null; // tasks of one capitalist panel share it; the decision waits for every member's vote
 };
 
 export class Store {
@@ -89,6 +90,7 @@ export class Store {
     this.db.exec(schema);
     // Added after the first release; older stores get the column here.
     if (!this.all<{ name: string }>("pragma table_info(tasks)").some(c => c.name === "budget")) this.db.run("alter table tasks add column budget int");
+    if (!this.all<{ name: string }>("pragma table_info(tasks)").some(c => c.name === "panel")) this.db.run("alter table tasks add column panel text");
     if (!this.all<{ name: string }>("pragma table_info(knowledge)").some(c => c.name === "merged_into")) this.db.run("alter table knowledge add column merged_into text");
   }
 
@@ -143,10 +145,10 @@ export class Store {
   task(id: string) { return this.get<Task>("select * from tasks where id = ?", id); }
   goal(id: string) { return this.get<Goal>("select * from goals where id = ?", id); }
 
-  addTask(t: { goal: string; kind: Task["kind"]; description: string; author: string; assignee?: string | null; exclude?: string | null; target?: string | null; budget?: number | null }) {
+  addTask(t: { goal: string; kind: Task["kind"]; description: string; author: string; assignee?: string | null; exclude?: string | null; target?: string | null; budget?: number | null; panel?: string | null }) {
     const id = this.id("T");
-    this.run("insert into tasks(id, goal, kind, description, status, author, assignee, exclude, target, budget, created_at) values(?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)",
-      id, t.goal, t.kind, t.description, t.author, t.assignee ?? null, t.exclude ?? null, t.target ?? null, t.budget ?? null, Date.now());
+    this.run("insert into tasks(id, goal, kind, description, status, author, assignee, exclude, target, budget, panel, created_at) values(?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)",
+      id, t.goal, t.kind, t.description, t.author, t.assignee ?? null, t.exclude ?? null, t.target ?? null, t.budget ?? null, t.panel ?? null, Date.now());
     if (t.assignee) this.run("update agents set status = 'active', idle = 0 where id = ? and status = 'dormant'", t.assignee);
     this.notify();
     return id;
