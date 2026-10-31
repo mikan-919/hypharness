@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { openResident, setOrder } from "./resident.ts";
 import { remember, type Embed } from "./resident-memory.ts";
-import { marketTick } from "./resident-market.ts";
+import { marketTick, rememberOrder } from "./resident-market.ts";
 import { initMarket } from "./resident-market.ts";
 
 const embed: Embed = async () => [1, 0];
@@ -21,6 +21,20 @@ for (const hasMemory of [false, true]) test(`an order produces work with ${hasMe
   expect(store.get<{ description: string }>("select description from goals where id != 'G0'")!.description).toBe("Write the report");
   expect(prompts[0]!.includes("existing memory")).toBe(hasMemory);
   expect(await marketTick(store, embed, llm)).toBe(false);
+  store.db.close();
+});
+
+// The market loop records each order as memory before it ticks, so an earlier order (or any memory) makes two rows;
+// the new order must still be proposed rather than wait for a discovery between memories.
+test("a new order produces work after earlier orders were remembered", async () => {
+  const store = openResident(":memory:");
+  setOrder(store, "て");
+  setOrder(store, "Write the report");
+  while (await rememberOrder(store, embed));
+  const faux = fauxProvider(), models = createModels(); models.setProvider(faux.provider);
+  faux.setResponses([fauxAssistantMessage('{"fund":true,"expected":1,"cost":1}'), fauxAssistantMessage('{"goal":"Write the report","score":0.9,"objection":"None"}')]);
+  expect(await marketTick(store, embed, { models, model: faux.getModel() })).toBe(true);
+  expect(store.get<{ description: string }>("select description from goals where id != 'G0'")!.description).toBe("Write the report");
   store.db.close();
 });
 

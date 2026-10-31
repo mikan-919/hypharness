@@ -177,7 +177,10 @@ export async function marketTick(store: Store, embed: Embed, llm: Llm) {
   initMarket(store);
   const rows = vectors(store).filter(v => store.get("select 1 from memory_vectors v left join chat c on c.id = v.chat_id where v.knowledge = ? and (v.chat_id is null or c.remembered = 1)", v.knowledge));
   if (!store.purpose) return false;
-  if (rows.length < 2) {
+  // Orders are remembered too, but they are not memories a discovery can come from: counting them would send every order
+  // after the first to the discovery path, where nothing proposes it.
+  const memories = rows.filter(r => !store.get("select 1 from knowledge where id = ? and source like 'order:%'", r.knowledge));
+  if (memories.length < 2) {
     const order = store.get<{ id: number }>("select id from log where event = 'order_changed' order by id desc limit 1");
     if (!order || store.meta(`order_proposal:${order.id}`)) return false;
     await roleStrategy(store, "memory-evaluator", (r, p) => ask(llm, store, r, p));

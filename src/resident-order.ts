@@ -23,12 +23,12 @@ export async function proposeOrder(store: Store, embed: Embed, ask: Ask) {
   const investment = await ask("memory-investor", `The user explicitly ordered: ${purpose}\nAvailable memory: ${evidence}\nCapital: ${state.capital}; credit: ${state.credit}. Decide whether a work proposal warrants investment. Return JSON {"fund":boolean,"expected":number,"cost":number}.`);
   if (store.purpose !== purpose || store.get<{ id: number }>("select id from log where event = 'order_changed' order by id desc limit 1")?.id !== order.id) return true;
   const expected = Number(investment.expected), cost = Number(investment.cost);
-  if (typeof investment.fund !== "boolean" || !Number.isFinite(expected) || expected < 0 || !Number.isFinite(cost) || cost <= 0) throw new Error("Invalid investment decision");
+  if (typeof investment.fund !== "boolean" || !Number.isFinite(expected) || expected < 0 || !Number.isFinite(cost) || cost <= 0) throw new Error(`Invalid investment decision: ${JSON.stringify(investment).slice(0, 300)}`);
   if (!investment.fund || expected / cost < 0.05) { store.setMeta(`order_proposal:${order.id}`, "declined"); return true; }
   const evaluated = await ask("memory-evaluator", `The user explicitly ordered: ${purpose}\nAvailable memory: ${evidence}\nThis is an actionable order, not a discovery claim: do not invent corroborating evidence. Evaluate feasibility and objections and propose work to fulfil it. Return JSON {"goal":string,"score":number from 0 to 1,"objection":string}.`);
   if (store.purpose !== purpose || store.get<{ id: number }>("select id from log where event = 'order_changed' order by id desc limit 1")?.id !== order.id) return true;
   const score = Number(evaluated.score);
-  if (!Number.isFinite(score) || score < 0 || score > 1 || typeof evaluated.goal !== "string") throw new Error("Invalid order evaluation");
+  if (!Number.isFinite(score) || score < 0 || score > 1 || typeof evaluated.goal !== "string") throw new Error(`Invalid order evaluation: ${JSON.stringify(evaluated).slice(0, 300)}`);
   store.tx(() => {
     let goal = "declined";
     if (score >= 0.5 && evaluated.goal && store.agents().length < store.config.maxAgents) {

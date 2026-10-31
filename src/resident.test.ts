@@ -54,7 +54,9 @@ test("knowledge tools assign results to the nearest domain", async () => {
 
 test("front waits on usage limits before retrying", async () => {
   let calls = 0, waited = 0;
-  const answer = await waitForFront(async () => ++calls === 1 ? fauxAssistantMessage("", { stopReason: "error", errorMessage: "usage limit" }) : fauxAssistantMessage("ok"), true, async ms => { waited = Number(ms); });
+  const waits: string[] = [];
+  const answer = await waitForFront(async () => ++calls === 1 ? fauxAssistantMessage("", { stopReason: "error", errorMessage: "usage limit" }) : fauxAssistantMessage("ok"), true, async ms => { waited = Number(ms); }, e => waits.push(e));
+  expect(waits).toEqual(["usage limit"]);
   expect(answer.stopReason).not.toBe("error");
   expect(calls).toBe(2);
   expect(waited).toBe(60_000);

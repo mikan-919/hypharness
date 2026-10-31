@@ -28,10 +28,12 @@ Do not claim to remember something you did not find. Reply in the user's languag
 export type ChatMessage = { id: number; role: "user" | "assistant"; text: string; at: number; remembered: number };
 export type ChatReply = { reply: string; calls: number; lookups: number; peakTokens: number; remembered: number };
 
-export async function waitForFront(call: () => Promise<AssistantMessage>, resident: boolean, sleep = Bun.sleep) {
+// A usage limit makes the resident front wait and retry; each wait is logged so the dashboard shows why no reply comes.
+export async function waitForFront(call: () => Promise<AssistantMessage>, resident: boolean, sleep = Bun.sleep, onWait?: (error: string) => void) {
   for (;;) {
     const result = await call();
     if (!resident || result.stopReason !== "error" || !/usage limit|quota|rate.limit/i.test(result.errorMessage ?? "")) return result;
+    onWait?.(result.errorMessage ?? "");
     await sleep(60_000);
   }
 }
@@ -94,7 +96,8 @@ export async function reply(llm: Llm, store: Store, text: string, embed?: Embed)
   for (let step = 0; step < MAX_STEPS && !answer; step++) {
     const started = performance.now();
     const r = await waitForFront(() => withTimeout(MODEL_TIMEOUT_MS, signal =>
-      llm.models.completeSimple(llm.model, { systemPrompt: system, messages, tools: step < MAX_STEPS - 1 ? schemas : [] }, { reasoning: llm.reasoning, sessionId: "front", signal })), resident);
+      llm.models.completeSimple(llm.model, { systemPrompt: system, messages, tools: step < MAX_STEPS - 1 ? schemas : [] }, { reasoning: llm.reasoning, sessionId: "front", signal })), resident,
+      undefined, error => store.log("front", "model_waiting", { error: error.slice(0, 300), retryInSeconds: 60 }));
     if (r.stopReason === "error" || r.stopReason === "aborted") throw new Error(`Model error: ${r.errorMessage}`);
     const u = r.usage;
     calls++;
