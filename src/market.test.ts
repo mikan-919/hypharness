@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
-import type { Runtime } from "./agent.ts";
+import { systemPrompt, type Runtime } from "./agent.ts";
 import { centralization, defaultConfig, Store } from "./db.ts";
 import { runScheduler } from "./scheduler.ts";
 import { tools, type ToolContext } from "./tools.ts";
@@ -184,4 +184,18 @@ test("agent_split checks the budget, and agent_merge folds a copy's memory into 
   split([{ description: "c", budget: 1 }]);
   expect(store.get<{ assignee: string }>("select assignee from tasks where description like 'Part of task %: c%'")!.assignee).toBe("worker-3");
   expect(store.agent("worker-3")!.status).toBe("active");
+});
+
+test("market prompts cast workers as innovators who argue their case and the market roles as capitalists who judge it", () => {
+  const store = new Store(":memory:");
+  store.init("p", "", { ...defaultConfig, organization: "market" });
+  for (const id of ["investor", "critic", "worker-2"]) store.addAgent(id, id, "host");
+  const prompt = (id: string) => systemPrompt(store, store.agent(id)!);
+  expect(prompt("worker-2")).toContain("You are an innovator");
+  expect(prompt("worker-2")).toContain("why it is promising");
+  for (const id of ["investor", "critic"]) expect(prompt(id)).toContain("You are a capitalist");
+  expect(prompt("lead")).toContain("You are lead");
+  const classic = new Store(":memory:");
+  classic.init("p", "", defaultConfig);
+  expect(systemPrompt(classic, classic.agent("lead")!)).not.toContain("capitalism");
 });
