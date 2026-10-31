@@ -19,6 +19,7 @@ type Session = { id: string; purpose: string; mode: string; modelCalls: number; 
 type Overview = {
   purpose: string; constraints: string; config: Row; modelCalls: number; totals: Row; organization?: { leadShare: number; agents: number; maxDomainsPerSteward: number };
   agents: Row[]; goals: Row[]; tasks: Row[]; knowledge: Row[]; domains: Row[]; usage: Row[]; log: Row[];
+  spans: Row[]; peak: { agents: number; work: number }; duplicates: { id: string; key: string; items: { id: string; gist: string }[] }[];
 };
 type AgentDetail = { memory: { memory: string; version: number }; episodes: Row[]; history: Row[]; live: { episode: string; text: string } | null };
 
@@ -45,7 +46,7 @@ function usePoll<T>(url: string | null, ms = REFRESH_MS) {
 
 const statusVariant: Record<string, "default" | "secondary" | "outline" | "destructive"> = {
   done: "default", verified: "default", accepted: "default", active: "default", claimed: "secondary", review: "secondary", running: "secondary",
-  open: "outline", hypothesis: "outline", dormant: "outline", failed: "destructive", rejected: "destructive", dropped: "destructive", expired: "destructive",
+  open: "outline", hypothesis: "outline", dormant: "outline", merged: "outline", failed: "destructive", rejected: "destructive", dropped: "destructive", expired: "destructive",
 };
 const Status = ({ value }: { value: string }) => <Badge variant={statusVariant[value] ?? "outline"}>{value}</Badge>;
 
@@ -83,6 +84,37 @@ function DataTable({ columns, rows, onSelect, selected, empty = "データなし
 
 const Clip = ({ text, width = "max-w-md" }: { text?: string | null; width?: string }) =>
   <span className={`block truncate ${width}`} title={text ?? ""}>{text ?? "-"}</span>;
+
+// One row per agent with a bar per task it worked on, placed on the run's time axis; work tasks are drawn darker.
+function Timeline({ spans, peak, agents }: { spans: Row[]; peak: Overview["peak"]; agents: Row[] }) {
+  const from = Math.min(...spans.map(s => s.start)), to = Math.max(...spans.map(s => s.end)), total = Math.max(to - from, 1);
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>稼働の時間軸</CardTitle>
+        <CardDescription>
+          {spans.length === 0 ? "まだモデル呼び出しがありません" : `${time(from)} 〜 ${time(to)} ／ 同時に動いた担当は最大 ${peak.agents}、同時に進んだ作業タスクは最大 ${peak.work} 件。濃い棒が作業タスク`}
+        </CardDescription>
+      </CardHeader>
+      {spans.length > 0 && (
+        <CardContent className="grid gap-1.5">
+          {agents.filter(a => spans.some(s => s.agent === a.id)).map(a => (
+            <div key={a.id} className="grid grid-cols-[8rem_1fr] items-center gap-2 text-xs">
+              <span className="truncate" title={a.id}>{a.id}</span>
+              <div className="relative h-4 rounded bg-muted">
+                {spans.filter(s => s.agent === a.id).map(s => (
+                  <div key={s.task} title={`${s.task} (${s.kind ?? "-"}) ${s.calls} 回 ${time(s.start)} 〜 ${time(s.end)}`}
+                    className={`absolute inset-y-0 rounded ${s.kind === "work" ? "bg-primary" : "bg-muted-foreground/40"}`}
+                    style={{ left: `${((s.start - from) / total) * 100}%`, width: `max(2px, ${((s.end - s.start) / total) * 100}%)` }} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      )}
+    </Card>
+  );
+}
 
 // Colors follow the agent (creation order), not its rank, so filtering never repaints a line.
 function seriesConfig(agents: Row[]): ChartConfig {
@@ -403,6 +435,7 @@ function Dashboard({ session, onDeleted }: { session: string; onDeleted: (dir: s
             </CardContent>
           </Card>
           {agent && <AgentPanel session={session} agent={agent} />}
+          <Timeline spans={o.spans} peak={o.peak} agents={o.agents} />
         </TabsContent>
 
         <TabsContent value="telemetry" className="grid gap-4">
@@ -468,7 +501,17 @@ function Dashboard({ session, onDeleted }: { session: string; onDeleted: (dir: s
               <DataTable rows={o.knowledge} columns={[
                 { key: "id", label: "ID" }, { key: "status", label: "状態", render: r => <Status value={r.status} /> },
                 { key: "gist", label: "Gist", render: r => <Clip text={r.gist} /> }, { key: "source", label: "出典", render: r => <Clip text={r.source} width="max-w-xs" /> },
-                { key: "author", label: "登録者" }, { key: "verified_by", label: "検証者" },
+                { key: "author", label: "登録者" }, { key: "verified_by", label: "検証者" }, { key: "merged_into", label: "統合先" },
+              ]} />
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader><CardTitle>重複の候補</CardTitle><CardDescription>同じ文書（正規化した出典）か、20文字以上の同じ Gist を持つ未統合の知識。エージェントが knowledge_merge でまとめると消えます</CardDescription></CardHeader>
+            <CardContent>
+              <DataTable rows={o.duplicates} empty="重複なし" columns={[
+                { key: "key", label: "一致した値", render: r => <Clip text={r.key} width="max-w-sm" /> },
+                { key: "items", label: "件数", render: r => r.items.length, className: "text-right tabular-nums" },
+                { key: "ids", label: "知識", render: r => <Clip text={r.items.map((k: { id: string }) => k.id).join(", ")} width="max-w-md" /> },
               ]} />
             </CardContent>
           </Card>

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
 import type { Message } from "@earendil-works/pi-ai";
-import { render, safePath } from "../tools.ts";
+import { canonicalUrl, render, safePath } from "../tools.ts";
 import { openModel } from "../auth.ts";
 import { history, openChat, organize, reply, WINDOW } from "../chat.ts";
 import { centralization, type Store } from "../db.ts";
@@ -43,8 +43,32 @@ async function session(id: string | null | undefined) {
 const meta = (d: Database, key: string) => (d.query("select value from meta where key = ?").get(key) as { value: string } | null)?.value;
 const all = (d: Database, sql: string, ...params: any[]) => d.query(sql).all(...params);
 
+// Stores from before knowledge_merge have no merged_into column; the dashboard opens them read-only, so it cannot add it.
+const merges = (d: Database) => all(d, "pragma table_info(knowledge)").some((c: any) => c.name === "merged_into");
+
+// Knowledge items not yet merged that name the same document or the same long gist, as knowledge_merge candidates.
+function duplicates(d: Database) {
+  const rows = all(d, `select id, gist, source from knowledge${merges(d) ? " where merged_into is null" : ""} order by created_at`) as { id: string; gist: string; source: string }[];
+  const groups = new Map<string, { id: string; gist: string }[]>();
+  for (const k of rows) {
+    const keys = [/^https?:\/\//.test(k.source) ? `source ${canonicalUrl(k.source)}` : null, k.gist.length >= 20 ? `gist ${k.gist.toLowerCase()}` : null];
+    for (const key of keys) if (key) groups.set(key, [...groups.get(key) ?? [], { id: k.id, gist: k.gist }]);
+  }
+  return [...groups].filter(([, items]) => items.length > 1).map(([key, items]) => ({ id: key, key, items }));
+}
+
+// Most spans that overlap at one moment: how many tasks really progressed at the same time.
+function peakConcurrency(spans: { start: number; end: number }[]) {
+  const edges = spans.flatMap(s => [[s.start, 1], [s.end, -1]] as const).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let now = 0, peak = 0;
+  for (const [, step] of edges) peak = Math.max(peak, now += step);
+  return peak;
+}
+
 function overview(d: Database) {
   const config = JSON.parse(meta(d, "config") ?? "{}");
+  // One span per agent and task: from the start of its first model call to the end of its last.
+  const spans = all(d, "select u.agent, u.task, t.kind, min(u.at - u.ms) start, max(u.at) end, count(*) calls from usage u left join tasks t on t.id = u.task group by u.agent, u.task order by start") as { kind: string | null; start: number; end: number }[];
   return {
     purpose: meta(d, "purpose"), constraints: meta(d, "constraints"), config, modelCalls: Number(meta(d, "model_calls") ?? 0), organization: centralization(d),
     totals: d.query("select count(*) calls, coalesce(sum(input),0) input, coalesce(sum(output),0) output, coalesce(sum(cache_read),0) cacheRead, coalesce(sum(cache_write),0) cacheWrite, coalesce(max(input + cache_read + cache_write),0) maxPromptTokens, coalesce(sum(ms),0) ms, min(at) firstAt, max(at) lastAt from usage").get(),
@@ -57,7 +81,9 @@ function overview(d: Database) {
       from agents a join context c on c.agent = a.id order by a.created_at`),
     goals: all(d, "select * from goals order by created_at"),
     tasks: all(d, "select id, goal, kind, description, status, author, assignee, exclude, target, claimed_by, result, feedback, verified_by, created_at from tasks order by created_at desc limit 500"),
-    knowledge: all(d, "select id, gist, source, status, author, verified_by, created_at from knowledge order by created_at desc limit 500"),
+    knowledge: all(d, `select id, gist, source, status, author, verified_by, ${merges(d) ? "merged_into" : "null merged_into"}, created_at from knowledge order by created_at desc limit 500`),
+    duplicates: duplicates(d),
+    spans, peak: { agents: peakConcurrency(spans), work: peakConcurrency(spans.filter(s => s.kind === "work")) },
     domains: all(d, "select d.*, (select count(*) from domain_knowledge where domain = d.id) knowledge from domains d"),
     usage: all(d, "select id, agent, task, input, output, cache_read cacheRead, cache_write cacheWrite, ms, at from usage order by id desc limit 2000").reverse(),
     log: all(d, "select * from log order by id desc limit 500"),
