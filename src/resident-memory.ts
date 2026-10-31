@@ -21,15 +21,31 @@ export function distance(a: number[], b: number[]) {
   return 1 - dot / Math.sqrt(aa * bb);
 }
 
-// A sentence ends at 。！？!? or at a full stop followed by a space; a line break does not end one, so Markdown headings,
-// rules and list markers stay with the text after them. A piece with no letter or digit joins its neighbour.
-// The pieces keep every character: joined, they are the text.
-export function sentences(text: string) {
-  const out: string[] = [];
-  for (const piece of text.match(/.*?(?:[。！？!?]+|\.(?=\s|$))\s*|.+/gsu) ?? []) {
-    if (out.length && (!/[\p{L}\p{N}]/u.test(piece) || !/[\p{L}\p{N}]/u.test(out.at(-1)!))) out[out.length - 1] += piece;
-    else out.push(piece);
+// Markup that carries no content: quote markers, bullets, rules and emphasis.
+const plain = (lines: string[]) => lines.map(l => l.replace(/^\s*(?:>\s?)+/, "").replace(/^\s*(?:[-*+]\s+|(?:-{3,}|\*{3,}|_{3,})\s*$)/, "").trimEnd())
+  .filter(l => l.trim()).join("\n").replace(/\*\*|__/g, "").trim();
+
+// One memory per paragraph (blocks between blank lines). A Markdown heading is not a memory of its own: it labels the
+// paragraphs under it, as the path of headings above them. text is the paragraph without markup, raw as it was written.
+// ponytail: a very long paragraph is embedded only as far as the embedding model reads; split long ones if retrieval misses them
+export function paragraphs(text: string) {
+  const out: { text: string; raw: string }[] = [], path: { level: number; title: string }[] = [];
+  let lines: string[] = [];
+  const flush = () => {
+    const body = plain(lines);
+    if (/[\p{L}\p{N}]/u.test(body)) out.push({ text: path.length ? `[${path.map(h => h.title).join(" > ")}] ${body}` : body, raw: lines.join("\n").trim() });
+    lines = [];
+  };
+  for (const line of text.split("\n")) {
+    const heading = /^\s*(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      flush();
+      while (path.length && path.at(-1)!.level >= heading[1]!.length) path.pop();
+      path.push({ level: heading[1]!.length, title: plain([heading[2]!]) });
+    } else if (!line.trim()) flush();
+    else lines.push(line);
   }
+  flush();
   return out;
 }
 
@@ -80,13 +96,13 @@ export function distanceThreshold(values: number[], quantile = 0.75) {
 
 // What the user said, or an order, is a verified record; an assistant's reply is only a hypothesis until checked.
 export async function remember(store: Store, embed: Embed, text: string, source: string, chatId?: number, status: "verified" | "hypothesis" = "verified") {
-  const pieces = sentences(text);
-  const embeddings = await Promise.all(pieces.map(piece => embed(piece, "passage")));
+  const pieces = paragraphs(text);
+  const embeddings = await Promise.all(pieces.map(piece => embed(piece.text, "passage")));
   return store.tx(() => {
     const ids: string[] = [];
     for (let i = 0; i < pieces.length; i++) {
       const piece = pieces[i]!, vector = embeddings[i]!, domain = nearestDomain(store, vector), id = store.id("K");
-      store.run("insert into knowledge(id, gist, summary, raw, source, status, author, verified_by, created_at) values(?, ?, ?, ?, ?, ?, 'ingest', ?, ?)", id, piece, piece, piece, source, status, status === "verified" ? "ingest" : null, Date.now());
+      store.run("insert into knowledge(id, gist, summary, raw, source, status, author, verified_by, created_at) values(?, ?, ?, ?, ?, ?, 'ingest', ?, ?)", id, piece.text, piece.text, piece.raw, source, status, status === "verified" ? "ingest" : null, Date.now());
       store.run("insert into domain_knowledge(domain, knowledge) values(?, ?)", domain, id);
       store.run("insert into memory_vectors(knowledge, vector, chat_id) values(?, ?, ?)", id, JSON.stringify(vector), chatId ?? null);
       ids.push(id);
