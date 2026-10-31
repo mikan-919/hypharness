@@ -195,6 +195,34 @@ function AgentPanel({ session, agent }: { session: string; agent: Row }) {
   );
 }
 
+type Stream = { id: string; agent: string; task: string; kind: string | null; description: string | null; steps: number; text: string };
+
+// One episode's context as it grows; it follows the newest step unless the reader has scrolled up.
+function StreamCard({ stream }: { stream: Stream }) {
+  const ref = useRef<HTMLPreElement>(null), follow = useRef(true);
+  useEffect(() => { if (follow.current) ref.current?.scrollTo(0, ref.current.scrollHeight); }, [stream.text]);
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">{stream.agent} <Badge variant="secondary">{stream.kind ?? "-"}</Badge> <span className="text-muted-foreground text-sm font-normal">{stream.steps} ステップ</span></CardTitle>
+        <CardDescription><Clip text={`${stream.task}: ${stream.description ?? ""}`} width="max-w-full" /></CardDescription>
+      </CardHeader>
+      <CardContent>
+        <pre ref={ref} onScroll={e => { const el = e.currentTarget; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}
+          className="h-96 overflow-auto rounded-md border p-3 text-xs whitespace-pre-wrap">{stream.text}</pre>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Every agent's episode in progress side by side, refreshed as the agents take steps.
+function Streams({ session }: { session: string }) {
+  const list = usePoll<Stream[]>(`/api/streams?s=${enc(session)}`, 2000);
+  if (!list) return <div className="text-muted-foreground">読み込み中…</div>;
+  if (!list.length) return <div className="text-muted-foreground">実行中のエピソードはありません</div>;
+  return <div className="grid gap-4 xl:grid-cols-2">{list.map(s => <StreamCard key={s.id} stream={s} />)}</div>;
+}
+
 type RunInfo = { dir: string; kind: string; args: string[]; startedAt: number; endedAt: number | null; exitCode: number | null; running: boolean };
 
 async function post(url: string, body: unknown) {
@@ -364,14 +392,15 @@ function Files({ session }: { session: string }) {
   );
 }
 
-function Dashboard({ session, onDeleted }: { session: string; onDeleted: (dir: string) => void }) {
+// A read-only dashboard (the resident process's view) shows the state but not the run controls.
+function Dashboard({ session, onDeleted, readOnly = false }: { session: string; onDeleted: (dir: string) => void; readOnly?: boolean }) {
   const o = usePoll<Overview>(`/api/overview?s=${encodeURIComponent(session)}`);
   const [agentId, setAgentId] = useState<string>();
   const [taskStatus, setTaskStatus] = useState("all");
   const [tab, setTab] = useState(() => location.hash.slice(1) || "agents");
   useEffect(() => { history.replaceState(null, "", `#${tab}`); }, [tab]);
   useEffect(() => setAgentId(undefined), [session]);
-  if (!o) return <div className="grid gap-6"><RunControl session={session} onDeleted={onDeleted} /><div className="text-muted-foreground">状態を読み込み中…</div></div>;
+  if (!o) return <div className="grid gap-6">{!readOnly && <RunControl session={session} onDeleted={onDeleted} />}<div className="text-muted-foreground">状態を読み込み中…</div></div>;
   const t = o.totals, root = o.goals.find(g => g.id === "G0");
   const work = o.tasks.filter(x => x.kind === "work");
   const agent = o.agents.find(a => a.id === agentId);
@@ -379,7 +408,7 @@ function Dashboard({ session, onDeleted }: { session: string; onDeleted: (dir: s
 
   return (
     <div className="grid gap-6">
-      <RunControl session={session} o={o} onDeleted={onDeleted} />
+      {!readOnly && <RunControl session={session} o={o} onDeleted={onDeleted} />}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">最上位目的 {root && <Status value={root.status} />}</CardTitle>
@@ -404,6 +433,7 @@ function Dashboard({ session, onDeleted }: { session: string; onDeleted: (dir: s
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="flex-wrap">
           <TabsTrigger value="agents">エージェント</TabsTrigger>
+          <TabsTrigger value="streams">ストリーム</TabsTrigger>
           <TabsTrigger value="files">成果物</TabsTrigger>
           <TabsTrigger value="telemetry">テレメトリ</TabsTrigger>
           <TabsTrigger value="tasks">タスク</TabsTrigger>
@@ -527,6 +557,7 @@ function Dashboard({ session, onDeleted }: { session: string; onDeleted: (dir: s
           </Card>
         </TabsContent>
 
+        <TabsContent value="streams"><Streams session={session} /></TabsContent>
         <TabsContent value="files"><Files session={session} /></TabsContent>
         <TabsContent value="diagnostics"><SessionDiagnostics session={session} /></TabsContent>
 
@@ -1121,14 +1152,14 @@ function Chat({ onOpen }: { onOpen: (id: string) => void }) {
         <Kpi label="記憶の件数" value={num.format(info.memory.knowledge)} note={`domain ${info.memory.domains} 件・整理待ち ${info.memory.organizing} 件`} />
         <Kpi label="直前の応答" value={last ? `${last.calls} 回` : "-"} note={last ? `検索 ${last.lookups} 回・記憶へ移した発言 ${last.remembered} 件` : "モデル呼び出しの回数"} />
         <Kpi label="直前のピーク入力" value={last ? num.format(last.peakTokens) : "-"} note="応答中の1回の呼び出しの最大入力トークン" />
-        {n > 0 && !info.resident && <Button variant="outline" onClick={() => onOpen(info.dir)}>記憶の中身を見る</Button>}
+        {n > 0 && <Button variant="outline" onClick={() => onOpen(info.dir)}>記憶の中身を見る</Button>}
       </div>
     </div>
   );
 }
 
 function App() {
-  const resident = usePoll<ChatInfo>("/api/chat")?.resident;
+  const chat = usePoll<ChatInfo>("/api/chat"), resident = chat?.resident;
   // A deleted run stays hidden until the next poll drops it, so it is not selected again in between.
   const [deleted, setDeleted] = useState<string>();
   const list = usePoll<Session[]>("/api/sessions")?.filter(s => !deleted || (s.id !== deleted && !s.id.startsWith(`${deleted}/`)));
@@ -1143,16 +1174,17 @@ function App() {
     if (!list?.length || (session && list.some(s => s.id === session))) return;
     const child = session && list.find(s => s.id.startsWith(`${session}/`));
     if (child) setSession(child.id);
-    else if (!session) setSession([...list].sort((a, b) => (b.lastAt ?? 0) - (a.lastAt ?? 0))[0]!.id);
-  }, [list, session]);
+    // The resident process's own session comes first; otherwise the most recently active one.
+    else if (!session) setSession(list.find(s => resident && s.id === chat?.dir)?.id ?? [...list].sort((a, b) => (b.lastAt ?? 0) - (a.lastAt ?? 0))[0]!.id);
+  }, [list, session, resident]);
   return (
     <div className="mx-auto grid max-w-[1600px] gap-6 p-4 md:p-6">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold">hypharness</h1>
-        {!resident && <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-        <Button variant={creating ? "secondary" : "default"} onClick={() => setCreating(!creating)}>新規実行</Button>
-        <Button variant={view === "chat" ? "secondary" : "outline"} onClick={() => toggle("chat")}>チャット</Button>
-        <Button variant={view === "rsi" ? "secondary" : "outline"} onClick={() => toggle("rsi")}>自己改善</Button>
+        {chat && <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+        {!resident && <Button variant={creating ? "secondary" : "default"} onClick={() => setCreating(!creating)}>新規実行</Button>}
+        <Button variant={view === "chat" ? "secondary" : "outline"} onClick={() => toggle("chat")}>{resident && view === "chat" ? "監視" : "チャット"}</Button>
+        {!resident && <Button variant={view === "rsi" ? "secondary" : "outline"} onClick={() => toggle("rsi")}>自己改善</Button>}
         {list && list.length > 0 && (
           <Select value={session} onValueChange={leaveRsi}>
             <SelectTrigger className="w-full sm:w-[28rem]" aria-label="セッション"><SelectValue placeholder="セッション" /></SelectTrigger>
@@ -1164,9 +1196,9 @@ function App() {
         </div>}
       </header>
       {!resident && creating && <NewRun onClose={() => setCreating(false)} onStarted={dir => { setCreating(false); setSession(dir); }} />}
-      {resident || view === "chat" ? <Chat onOpen={leaveRsi} /> : view === "rsi" ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
+      {view === "chat" ? <Chat onOpen={leaveRsi} /> : view === "rsi" && !resident ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
         {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
-        {session && <Dashboard session={session} onDeleted={dir => { setDeleted(dir); setSession(undefined); }} />}
+        {session && <Dashboard session={session} readOnly={!!resident} onDeleted={dir => { setDeleted(dir); setSession(undefined); }} />}
       </>}
     </div>
   );
