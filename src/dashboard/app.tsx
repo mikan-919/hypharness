@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ArrowDown, ChevronRight, CircleCheck, CircleX, Info, LoaderCircle, Wrench } from "lucide-react";
+import { ArrowDown, BookOpen, Brain, ChevronRight, CircleCheck, CircleX, Coins, ExternalLink, FilePen, FileText, Globe, Info, ListChecks, LoaderCircle, Merge, Search, Split, Target, Users, Wrench } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -211,33 +213,99 @@ function Avatar({ agent, size = "size-8" }: { agent: string; size?: string }) {
   return <div className={`${size} ${ROLE_COLORS[roleOf(agent)] ?? "bg-zinc-500"} flex shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white uppercase`}>{agent.slice(0, 2)}</div>;
 }
 
-// The argument a reader looks for first (the path written, the query searched, the verdict given), on one line.
-const KEY_ARGS = ["path", "url", "queries", "query", "id", "goal", "verdict", "budget", "description", "objective", "content", "result", "note"];
-function argSummary(args: Record<string, unknown>) {
-  const key = KEY_ARGS.find(k => args[k] !== undefined) ?? Object.keys(args)[0];
-  if (!key) return "";
-  const v = args[key], text = Array.isArray(v) ? v.join(", ") : typeof v === "string" ? v : JSON.stringify(v);
-  return text.replace(/\s+/g, " ").slice(0, 120);
+// Agents' text is untrusted: react-markdown renders it as React elements, never as raw HTML, and drops unsafe URLs.
+function Md({ text }: { text: string }) {
+  return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ node: _, ...props }) => <a {...props} target="_blank" rel="noreferrer" /> }}>{text}</ReactMarkdown></div>;
+}
+const Pre = ({ text, error = false }: { text: string; error?: boolean }) =>
+  <pre className={`max-h-96 overflow-auto rounded-md bg-background p-3 text-xs whitespace-pre-wrap ${error ? "text-destructive" : ""}`}>{text || "(空)"}</pre>;
+const str = (v: unknown) => Array.isArray(v) ? v.join(", ") : typeof v === "string" ? v : v === undefined ? "" : JSON.stringify(v);
+const isMd = (path: unknown) => typeof path === "string" && /\.(md|markdown)$/i.test(path);
+const Caption = ({ children }: { children: React.ReactNode }) => <div className="mb-1 text-xs text-muted-foreground">{children}</div>;
+function Verdict({ value }: { value: unknown }) {
+  if (value !== "pass" && value !== "fail") return null;
+  return <Badge variant={value === "pass" ? "default" : "destructive"}>{value === "pass" ? "合格" : "不合格"}</Badge>;
 }
 
-function ToolStep({ item, pending }: { item: Extract<StreamItem, { type: "tool" }>; pending: boolean }) {
-  const icon = pending ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
-    : item.error ? <CircleX className="size-4 text-destructive" /> : item.result === undefined ? <Wrench className="size-4 text-muted-foreground" /> : <CircleCheck className="size-4 text-emerald-600" />;
+// How each tool reads in the conversation: an icon, what it did in words, the one argument that says the most, and,
+// opened, its arguments and result laid out for that tool rather than as raw JSON.
+type Tool = Extract<StreamItem, { type: "tool" }>;
+type ToolView = { icon: React.ComponentType<{ className?: string }>; label: string; summary?: (a: Record<string, unknown>) => string; body?: (t: Tool) => React.ReactNode };
+const TOOL_VIEWS: Record<string, ToolView> = {
+  file_write: { icon: FilePen, label: "ファイルを書く", summary: a => str(a.path), body: t => <>{isMd(t.args.path) ? <Md text={str(t.args.content)} /> : <Pre text={str(t.args.content)} />}</> },
+  file_read: { icon: FileText, label: "ファイルを読む", summary: a => str(a.path), body: t => {
+    if (t.result === undefined || t.error) return null;
+    const [head, ...rest] = t.result.split("\n"), body = rest.join("\n");
+    return <><Caption>{head}</Caption>{isMd(t.args.path) ? <Md text={body} /> : <Pre text={body} />}</>;
+  } },
+  file_list: { icon: FileText, label: "ファイルの一覧", summary: a => str(a.path) || "." },
+  file_search: { icon: Search, label: "ファイルを検索", summary: a => str(a.query) },
+  web_search: { icon: Search, label: "Web を検索", summary: a => str(a.queries), body: t => {
+    if (t.result === undefined || t.error) return null;
+    const hits = t.result.split("\n\n").map(block => /^\[(\d+)\] (K-\S+) (.*)\n(\S+)\n?([\s\S]*)$/.exec(block)).filter(m => m !== null);
+    return <div className="grid gap-2">
+      {typeof t.args.objective === "string" && <Caption>目的: {t.args.objective}</Caption>}
+      {hits.map(([, n, id, title, url, excerpt]) => (
+        <div key={n} className="rounded-md border bg-background p-2.5">
+          <a href={url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-sm font-medium hover:underline">{title}<ExternalLink className="size-3 shrink-0" /></a>
+          <div className="truncate text-xs text-emerald-700 dark:text-emerald-400">{url} <span className="text-muted-foreground">・{id}</span></div>
+          <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{excerpt}</p>
+        </div>
+      ))}
+      {!hits.length && <Pre text={t.result} />}
+    </div>;
+  } },
+  web_fetch: { icon: Globe, label: "ページを取得", summary: a => str(a.url) },
+  knowledge_add: { icon: BookOpen, label: "知識を記録", summary: a => str(a.gist), body: t => <div className="grid gap-1.5 text-sm">
+    <div className="font-medium">{str(t.args.gist)}</div><div className="text-muted-foreground">{str(t.args.summary)}</div><Caption>出典: {str(t.args.source)}</Caption>
+  </div> },
+  knowledge_search: { icon: Search, label: "知識を検索", summary: a => str(a.query) },
+  knowledge_get: { icon: BookOpen, label: "知識を開く", summary: a => `${str(a.id)}（${a.level === "raw" ? "原文" : "要約"}）` },
+  knowledge_verify: { icon: BookOpen, label: "知識の検証を依頼", summary: a => str(a.id) },
+  knowledge_merge: { icon: Merge, label: "知識を統合", summary: a => `${str(a.duplicates)} → ${str(a.keep)}` },
+  goal_create: { icon: Target, label: "目標を作る", summary: a => str(a.description), body: t => <Md text={str(t.args.description)} /> },
+  goal_complete: { icon: Target, label: "目標を提出", summary: a => str(a.id), body: t => <><Caption>成果物</Caption><Md text={str(t.args.deliverable)} /></> },
+  goal_update: { icon: Target, label: "目標を書き換える", summary: a => a.drop ? `${str(a.id)} を取りやめ` : str(a.description), body: t => <Md text={str(t.args.description ?? "（取りやめ）")} /> },
+  goal_fund: { icon: Coins, label: "出資に投票", summary: a => `${str(a.budget)} 回`, body: t => <Md text={str(t.args.rationale)} /> },
+  goal_decline: { icon: Coins, label: "見送りに投票", summary: a => str(a.reason), body: t => <Md text={str(t.args.reason)} /> },
+  task_finish: { icon: ListChecks, label: "タスクを終える", summary: a => str(a.result), body: t => <Md text={str(t.args.result)} /> },
+  task_release: { icon: ListChecks, label: "タスクを返す", summary: a => str(a.note), body: t => <Md text={str(t.args.note)} /> },
+  task_create: { icon: ListChecks, label: "タスクを作る", summary: a => str(a.description), body: t => <Md text={str(t.args.description)} /> },
+  memory_write: { icon: Brain, label: "作業記憶を書き直す", summary: a => str(a.content), body: t => <Md text={str(t.args.content)} /> },
+  memory_edit: { icon: Brain, label: "作業記憶を直す", summary: a => str(a.new), body: t => <div className="grid gap-2 text-xs">
+    <pre className="rounded-md bg-red-500/10 p-2 whitespace-pre-wrap">- {str(t.args.old)}</pre><pre className="rounded-md bg-emerald-500/10 p-2 whitespace-pre-wrap">+ {str(t.args.new)}</pre>
+  </div> },
+  context_edit: { icon: Brain, label: "文脈を要約する", summary: a => `#${str(a.from)}–#${str(a.to)}: ${str(a.note)}` },
+  agent_split: { icon: Split, label: "分裂する", summary: a => str(a.reason) },
+  agent_merge: { icon: Merge, label: "統合する", summary: a => `→ ${str(a.into)}` },
+  agent_spawn: { icon: Users, label: "エージェントを作る", summary: a => str(a.id) },
+  news: { icon: Users, label: "他の担当の動きを見る" },
+};
+
+function ToolStep({ item, pending }: { item: Tool; pending: boolean }) {
+  const view: ToolView = TOOL_VIEWS[item.name] ?? { icon: Wrench, label: item.name };
+  const Icon = view.icon, summary = (view.summary?.(item.args) ?? str(Object.values(item.args)[0])).replace(/\s+/g, " ").slice(0, 140);
+  const custom = view.body?.(item), consumed = custom != null && (item.name === "file_read" || item.name === "web_search");
+  const status = pending ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
+    : item.error ? <CircleX className="size-4 text-destructive" /> : item.result === undefined ? null : <CircleCheck className="size-4 text-emerald-600" />;
   return (
-    <details className="group rounded-lg border bg-muted/30 open:bg-muted/50">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-sm">
-        <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
-        {icon}
-        <span className="font-mono font-medium">{item.name}</span>
-        <span className="min-w-0 truncate text-muted-foreground">{argSummary(item.args)}</span>
-        {pending && <span className="ml-auto shrink-0 text-xs text-muted-foreground">実行中…</span>}
+    <details className="group rounded-xl border bg-card open:shadow-sm">
+      <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3 py-2 text-sm [&::-webkit-details-marker]:hidden">
+        <Icon className="size-4 shrink-0 text-muted-foreground" />
+        <span className="shrink-0 font-medium">{view.label}</span>
+        <span className="min-w-0 truncate text-muted-foreground">{summary}</span>
+        <span className="ml-auto flex shrink-0 items-center gap-2">
+          {item.name === "task_finish" && <Verdict value={item.args.verdict} />}
+          {pending && <span className="text-xs text-muted-foreground">実行中…</span>}
+          {status}
+          <ChevronRight className="size-4 text-muted-foreground transition-transform group-open:rotate-90" />
+        </span>
       </summary>
-      <div className="grid gap-2 border-t px-3 py-2 text-xs">
-        <div><div className="mb-1 text-muted-foreground">引数</div><pre className="max-h-60 overflow-auto rounded bg-background p-2 whitespace-pre-wrap">{JSON.stringify(item.args, null, 2)}</pre></div>
-        {item.result !== undefined && <div>
-          <div className="mb-1 text-muted-foreground">{item.error ? "エラー" : "結果"}{item.context && ` ・ ${item.context}`}</div>
-          <pre className={`max-h-80 overflow-auto rounded bg-background p-2 whitespace-pre-wrap ${item.error ? "text-destructive" : ""}`}>{item.result || "(空)"}</pre>
-        </div>}
+      <div className="grid gap-3 border-t px-3 py-3">
+        {custom ?? <><Caption>引数</Caption><Pre text={JSON.stringify(item.args, null, 2)} /></>}
+        {item.result !== undefined && !consumed && <div><Caption>{item.error ? "エラー" : "結果"}{item.context && ` ・ ${item.context}`}</Caption><Pre text={item.result} error={item.error} /></div>}
+        {consumed && item.context && <Caption>{item.context}</Caption>}
+        <div className="font-mono text-[11px] text-muted-foreground">{item.name}</div>
       </div>
     </details>
   );
@@ -264,16 +332,16 @@ function Conversation({ session, id }: { session: string; id: string }) {
         </div>
       </div>
       <div ref={ref} onScroll={e => { const el = e.currentTarget; setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 60); }} className="relative min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto grid max-w-3xl gap-4 px-4 py-6">
+        <div className="mx-auto grid max-w-3xl grid-cols-[minmax(0,1fr)] gap-4 px-4 py-6">
           {s.items.map((item, i) => item.type === "task" ? (
             <details key={i} className="rounded-2xl bg-muted px-4 py-3 text-sm">
               <summary className="cursor-pointer font-medium">タスクの指示（作業記憶と目標を含む）</summary>
-              <div className="mt-2 whitespace-pre-wrap">{item.text}</div>
+              <div className="mt-3"><Md text={item.text} /></div>
             </details>
           ) : item.type === "note" ? (
             <div key={i} className="flex items-start gap-2 text-xs text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" /><span className="whitespace-pre-wrap">{item.text}</span></div>
           ) : item.type === "text" ? (
-            <div key={i} className="flex gap-3"><Avatar agent={s.agent} size="size-7" /><div className="min-w-0 pt-1 text-sm leading-relaxed whitespace-pre-wrap">{item.text}</div></div>
+            <div key={i} className="flex gap-3"><Avatar agent={s.agent} size="size-7" /><div className="min-w-0 flex-1 pt-1"><Md text={item.text} /></div></div>
           ) : (
             <div key={item.id} className="pl-10"><ToolStep item={item} pending={running && item === lastTool && item.result === undefined} /></div>
           ))}
