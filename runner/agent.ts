@@ -107,6 +107,7 @@ export async function respond({
   toolbox,
   message,
   onDelta,
+  loop = false,
 }: {
   models: Models
   model: Model
@@ -114,8 +115,15 @@ export async function respond({
   toolbox: Toolbox
   message: string
   onDelta: (delta: string) => void
+  // ループからの依頼。依頼文に状況がすべて入っているため、記憶から履歴を足さず、依頼文も記憶に残さない
+  loop?: boolean
 }) {
-  const { instructions, messages } = agent.context(message)
+  const { instructions, messages } = loop
+    ? {
+        instructions: INSTRUCTIONS,
+        messages: [{ role: 'user' as const, content: message }],
+      }
+    : agent.context(message)
   const context: Context = {
     systemPrompt: instructions,
     messages: messages.map((m) => toPiMessage(m, model)),
@@ -139,7 +147,7 @@ export async function respond({
       (block): block is ToolCall => block.type === 'toolCall',
     )
     if (!calls.length) {
-      agent.remember('user', message)
+      if (!loop) agent.remember('user', message)
       agent.remember('assistant', text)
       return text
     }

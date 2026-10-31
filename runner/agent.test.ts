@@ -69,3 +69,35 @@ test('respond はツールを実行して結果を返し、最終回答だけを
     { role: 'assistant', content: '書きました' },
   ])
 })
+
+test('ループの依頼は記憶から履歴を送らず、依頼文を記憶に残さない', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hyph-'))
+  const agent = openAgent(dir, 'market')
+  agent.remember('user', '前の会話')
+  const faux = fauxProvider()
+  const models = createModels()
+  models.setProvider(faux.provider)
+  let sent = 0
+  faux.setResponses([
+    (context) => {
+      sent = context.messages.filter((m) => m.role !== 'system').length
+      return fauxAssistantMessage([fauxText('採点しました')])
+    },
+  ])
+  await respond({
+    models,
+    model: faux.getModel(),
+    agent,
+    toolbox: createToolbox(agent.db, new Database(':memory:'), dir),
+    message: '長い状況の説明',
+    onDelta: () => {},
+    loop: true,
+  })
+  expect(sent).toBe(1)
+  expect(
+    agent.db.query('SELECT role, content FROM memories ORDER BY id').all(),
+  ).toEqual([
+    { role: 'user', content: '前の会話' },
+    { role: 'assistant', content: '採点しました' },
+  ])
+})

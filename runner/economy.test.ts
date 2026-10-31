@@ -91,12 +91,18 @@ test('過半数の投票と相手の同意で合併し、2人以上の投票で�
   expect(e.pool(companies[0].id).map((t) => t.body)).toEqual(['a の仕事'])
 })
 
-test('メッセージは同僚全員に送れて、未読と既読を区別する', () => {
+test('メッセージは1人宛てで未読と既読を区別し、進捗は誰も起こさない掲示板に出す', () => {
   const e = setup()
-  e.sendMessage('worker-1', 'all', '相談したい')
+  e.sendMessage('worker-1', 'worker-2', '相談したい')
   expect(e.unread('worker-2').map((m) => m.content)).toEqual(['相談したい'])
+  expect(e.unread('worker-3')).toEqual([])
+  expect(() => e.sendMessage('worker-1', 'all', 'x')).toThrow()
+  expect(() => e.sendMessage('worker-1', 'worker-1', 'x')).toThrow()
+  e.postBoard('worker-3', 'task1 を終えた')
+  expect(e.board(e.companies()[0].id).map((b) => b.content)).toEqual([
+    'task1 を終えた',
+  ])
   expect(e.unread('worker-1')).toEqual([])
-  expect(e.unread('worker-4')).toEqual([])
   e.markRead(e.unread('worker-2').map((m) => m.id))
   expect(e.unread('worker-2')).toEqual([])
   expect(() => e.sendMessage('worker-1', 'nobody', 'x')).toThrow()
@@ -110,4 +116,16 @@ test('資本が尽きた会社は解散し、不正な操作は拒否する', ()
   expect(e.workerCompany('worker-1')).toBeNull()
   expect(() => e.invest('investor-1', 999, 10)).toThrow()
   expect(() => e.scoreIdea(1, 11, '')).toThrow()
+})
+
+test('investor が1期に使えるのは期の初めの資金の30%まで', () => {
+  const e = setup()
+  const [a, b] = e.companies()
+  e.invest('investor-1', a.id, 20)
+  expect(() => e.invest('investor-1', b.id, 11)).toThrow('残りの上限 10.0')
+  e.invest('investor-1', b.id, 10)
+  e.settle()
+  // 次の期は、残りの資金 70 の30%まで
+  expect(() => e.invest('investor-1', a.id, 22)).toThrow()
+  e.invest('investor-1', a.id, 21)
 })

@@ -143,6 +143,7 @@ async function start(url: string | undefined) {
       ...c,
       workers: economy.workersOf(c.id),
       pool: economy.pool(c.id),
+      board: economy.board(c.id),
     })),
     investors: economy.investors(),
     ideas: economy.latestIdeas(),
@@ -181,6 +182,7 @@ async function start(url: string | undefined) {
               toolbox: withTools(toolbox, tools),
               message: prompt,
               onDelta: () => {},
+              loop: true,
             })
           },
           // ファイルが消えていても採点は続ける

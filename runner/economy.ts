@@ -8,6 +8,8 @@ const FOUNDING_CAPITAL = 30
 const INVESTOR_CASH = 100
 const INITIAL_COMPANIES = 2
 const INITIAL_INVESTORS = 2
+// investor が1期に使える、期の初めの資金に対する割合
+const INVEST_SHARE = 0.3
 
 export type Company = {
   id: number
@@ -24,6 +26,7 @@ export type Idea = {
   body: string
   file: string | null
   score: number | null
+  entry: string | null
   cycle: number
 }
 export type Message = {
@@ -88,15 +91,30 @@ export function openEconomy(path: string) {
       to_agent TEXT NOT NULL,
       content TEXT NOT NULL,
       read INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS board (
+      id INTEGER PRIMARY KEY,
+      company_id INTEGER NOT NULL,
+      from_agent TEXT NOT NULL,
+      content TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS investments (
+      investor TEXT NOT NULL,
+      company_id INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      cycle INTEGER NOT NULL
     );`)
-  // 採点済みのアイデアを精算に1回だけ使うための印。古い DB には列を足す
-  if (
-    !db
-      .query<{ name: string }, []>('PRAGMA table_info(ideas)')
-      .all()
-      .some((c) => c.name === 'settled')
-  ) {
+  // 古い DB には列を足す。settled は採点済みのアイデアを精算に1回だけ使うための印、
+  // entry はアイデアの根拠になる共有コンテキストのラベル
+  const ideaColumns = db
+    .query<{ name: string }, []>('PRAGMA table_info(ideas)')
+    .all()
+    .map((c) => c.name)
+  if (!ideaColumns.includes('settled')) {
     db.run('ALTER TABLE ideas ADD COLUMN settled INTEGER NOT NULL DEFAULT 0')
+  }
+  if (!ideaColumns.includes('entry')) {
+    db.run('ALTER TABLE ideas ADD COLUMN entry TEXT')
   }
 
   const meta = (key: string) =>
@@ -296,20 +314,21 @@ export function openEconomy(path: string) {
         task.id,
       )
     },
+    // entry は根拠になる共有コンテキストのラベル（S…）。市場はその Summary を見て評価する
     postIdea(
       worker: string,
-      idea: { title: string; body: string; file?: string },
+      idea: { title: string; body: string; entry?: string },
     ) {
       const companyId = workerCompany(worker)
       if (companyId === null) throw new Error('所属する会社がありません')
       db.query(
-        'INSERT INTO ideas (company_id, worker, title, body, file, cycle) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO ideas (company_id, worker, title, body, entry, cycle) VALUES (?, ?, ?, ?, ?, ?)',
       ).run(
         companyId,
         worker,
         idea.title,
         idea.body,
-        idea.file ?? null,
+        idea.entry ?? null,
         cycle(),
       )
     },
@@ -324,22 +343,43 @@ export function openEconomy(path: string) {
         .run(score, reason, id)
       if (!changes) throw new Error(`未採点のアイデア ${id} はありません`)
     },
-    // to に all を指定すると、同じ会社のほかの worker 全員に送る
+    // メッセージは届いた相手を起こすため、1人の相手への質問や依頼に限る。進捗は掲示板に出す
     sendMessage(from: string, to: string, content: string) {
-      const companyId = workerCompany(from)
-      const recipients =
-        to === 'all' && companyId !== null
-          ? workersOf(companyId).filter((w) => w !== from)
-          : [to]
-      for (const r of recipients) {
-        if (!db.query('SELECT 1 FROM workers WHERE name = ?').get(r)) {
-          throw new Error(`${r} という worker はいません`)
-        }
-        db.query(
-          'INSERT INTO messages (from_agent, to_agent, content) VALUES (?, ?, ?)',
-        ).run(from, r, content)
+      if (to === from) throw new Error('自分には送れません')
+      if (!db.query('SELECT 1 FROM workers WHERE name = ?').get(to)) {
+        throw new Error(`${to} という worker はいません`)
       }
+      db.query(
+        'INSERT INTO messages (from_agent, to_agent, content) VALUES (?, ?, ?)',
+      ).run(from, to, content)
     },
+    // 会社の掲示板。誰も起こさず、次に動くときに読まれる
+    postBoard(from: string, content: string) {
+      const companyId = workerCompany(from)
+      if (companyId === null) throw new Error('所属する会社がありません')
+      db.query(
+        'INSERT INTO board (company_id, from_agent, content) VALUES (?, ?, ?)',
+      ).run(companyId, from, content)
+    },
+    board: (companyId: number, limit = 10) =>
+      db
+        .query<
+          { id: number; from_agent: string; content: string },
+          [number, number]
+        >(
+          'SELECT id, from_agent, content FROM board WHERE company_id = ? ORDER BY id DESC LIMIT ?',
+        )
+        .all(companyId, limit)
+        .reverse(),
+    // 市場の採点の目安にする、採点済みのアイデアの分布
+    scoreSummary: () =>
+      db
+        .query<{ score: number; n: number }, []>(
+          'SELECT score, COUNT(*) AS n FROM ideas WHERE score IS NOT NULL GROUP BY score ORDER BY score',
+        )
+        .all(),
+    nextSettleAt: () => Number(meta('next_settle_at') ?? 0),
+    setNextSettleAt: (at: number) => setMeta('next_settle_at', String(at)),
     vote(
       worker: string,
       vote: { kind: 'merge' | 'split'; target?: number; philosophy?: string },
@@ -358,11 +398,24 @@ export function openEconomy(path: string) {
             'SELECT cash FROM investors WHERE name = ?',
           )
           .get(investor)?.cash ?? 0
-      if (!(amount > 0 && amount <= cash)) {
-        throw new Error(`投資額は 0 より大きく、手元の資金 ${cash} 以下です`)
+      // 1期に使えるのは、期の初めの資金の一定割合まで。一度に全額を賭けて判断の余地をなくさないため
+      const spent =
+        db
+          .query<{ total: number | null }, [string, number]>(
+            'SELECT SUM(amount) AS total FROM investments WHERE investor = ? AND cycle = ?',
+          )
+          .get(investor, cycle())?.total ?? 0
+      const limit = (cash + spent) * INVEST_SHARE - spent
+      if (!(amount > 0 && amount <= limit + 1e-9)) {
+        throw new Error(
+          `投資額は 0 より大きく、この期の残りの上限 ${limit.toFixed(1)} 以下です（期の初めの資金の ${INVEST_SHARE * 100}% まで）`,
+        )
       }
       if (!company(companyId)) throw new Error('投資先の会社がありません')
       db.transaction(() => {
+        db.query(
+          'INSERT INTO investments (investor, company_id, amount, cycle) VALUES (?, ?, ?, ?)',
+        ).run(investor, companyId, amount, cycle())
         db.query('UPDATE investors SET cash = cash - ? WHERE name = ?').run(
           amount,
           investor,

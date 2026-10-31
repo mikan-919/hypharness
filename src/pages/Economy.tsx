@@ -20,6 +20,7 @@ type Status = {
     value: number
     workers: string[]
     pool: { id: number; body: string }[]
+    board: { id: number; from_agent: string; content: string }[]
   }[]
   investors: { name: string; cash: number }[]
   ideas: {
@@ -139,6 +140,16 @@ export default function Economy(props: PageProps<'Economy'>) {
             <p>設計思想: {c.philosophy || '未設定'}</p>
             <p>worker: {c.workers.join(', ') || 'なし'}</p>
             <p>タスクプール（未着手 {c.pool.length}件）</p>
+            {c.board.length > 0 && (
+              <details>
+                <summary>掲示板（{c.board.length}件）</summary>
+                {c.board.map((b) => (
+                  <p key={b.id} className='whitespace-pre-wrap'>
+                    {b.from_agent}: {b.content}
+                  </p>
+                ))}
+              </details>
+            )}
             {c.pool.length > 0 && (
               <ul className='list-disc pl-5'>
                 {c.pool.map((t) => (
@@ -183,7 +194,7 @@ export default function Economy(props: PageProps<'Economy'>) {
       </section>
 
       <section className='flex flex-col gap-1 text-sm'>
-        <h2 className='font-bold'>worker 同士のメッセージ</h2>
+        <h2 className='font-bold'>worker 同士のメッセージ（質問・依頼）</h2>
         {status.messages.map((m) => (
           <p key={m.id} className='whitespace-pre-wrap'>
             {m.from_agent} → {m.to_agent}: {m.content}

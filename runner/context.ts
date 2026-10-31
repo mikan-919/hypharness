@@ -96,6 +96,8 @@ export function openContexts(shared: Database) {
 
   return {
     sharedEntries: () => list(shared, 'shared_entries', 'S'),
+    sharedEntry: (label: string) =>
+      /^S\d+$/.test(label) ? find(shared, label) : null,
     ownEntries: (ownDb: Database) => list(own(ownDb), 'context_entries', 'O'),
     pendingGifts: (agent: string) =>
       shared

@@ -72,6 +72,12 @@ const companyList = (e: Economy) =>
     )
     .join('\n')
 
+const boardLines = (e: Economy, companyId: number) =>
+  e
+    .board(companyId)
+    .map((b) => `- ${b.from_agent}: ${b.content}`)
+    .join('\n') || '（まだありません）'
+
 // 各エージェントの「今やること」を状況から組み立てる。やることがなければ null を返し、モデルを呼ばない
 type TurnDeps = Pick<LoopDeps, 'economy' | 'agent' | 'readFile' | 'contexts'>
 
@@ -119,18 +125,46 @@ async function roleTurn(
     if (!ideas.length) return null
     const listing = await Promise.all(
       ideas.map(async (i) => {
-        const file = i.file ? await readFile(i.file) : null
-        return `- id ${i.id}（会社 ${i.company_id}、${i.worker}）${i.title}: ${i.body}${file ? `\n  ファイルの内容: ${file.slice(0, 1000)}` : ''}`
+        // 根拠のエントリーがあれば、その Summary（引用付き）を見せる
+        const entry = i.entry ? contexts.sharedEntry(i.entry) : null
+        const file = !entry && i.file ? await readFile(i.file) : null
+        const evidence = entry
+          ? `\n  根拠 [${entry.label}]: ${entry.summary}`
+          : file
+            ? `\n  ファイルの内容: ${file.slice(0, 1000)}`
+            : '\n  根拠: なし'
+        return `- id ${i.id}（会社 ${i.company_id}、${i.worker}）${i.title}: ${i.body}${evidence}`
       }),
     )
+    const scored = e
+      .latestIdeas(40)
+      .filter((i) => i.score !== null)
+      .slice(0, 15)
+      .map((i) => `- ${i.score}点: ${i.title}（会社 ${i.company_id}）`)
+      .join('\n')
+    const distribution = e
+      .scoreSummary()
+      .map((s) => `${s.score}点×${s.n}`)
+      .join('、')
     return {
       key: ideas.map((i) => i.id).join(','),
-      prompt: `あなたは市場です。利用者の目的に照らして、アイデアの価値を見極めてください。
+      prompt: `あなたは市場です。利用者の目的に照らして、アイデアの価値を見極めてください。採点は会社の売上になり、投資家の判断材料になります。差をつけないと良い会社が育ちません。
 利用者の目的: ${goal}
+
+採点の基準（相対評価）:
+- 5点: これまでのアイデアの平均的な水準
+- 8点以上: 目的に直接効き、具体的で、既存のアイデアにない新しさがある。全体の1〜2割だけに付ける
+- 3点以下: 抽象的、根拠がない、または既存のアイデアの言い換え
+- 既存のアイデアとほぼ同じ内容は、そのぶん3点以上減点する
+- 根拠のエントリーが無いアイデアは、具体性を低く見る
+これまでの採点の分布: ${distribution || 'まだありません'}
+比較用の、最近の採点済みアイデア:
+${scored || '（まだありません）'}
+
 未採点のアイデア:
 ${listing.join('\n')}
 
-すべてのアイデアを score_idea で 0〜10 点で採点してください。目的への寄与、具体性、新しさを見てください。`,
+すべてのアイデアを score_idea で 0〜10 の整数で採点してください。`,
       tools: [
         tool(
           'score_idea',
@@ -155,7 +189,8 @@ ${listing.join('\n')}
 
   const investor = e.investors().find((i) => i.name === name)
   if (investor) {
-    if (investor.cash < 1) return null
+    // 最初の精算までは会社の価値が分からないため、投資の判断をしない
+    if (cycle <= 1 || investor.cash < 1) return null
     const stakes = e
       .stakesOf(name)
       .map((s) => `- 会社 ${s.company_id}: ${s.amount.toFixed(1)}`)
@@ -171,7 +206,7 @@ ${stakes || '（ありません）'}
 会社の一覧:
 ${companyList(e) || '（ありません）'}
 
-伸びると考える会社に invest で投資してください。投資しない判断もできます。`,
+伸びると考える会社に invest で投資してください。1期に使えるのは期の初めの資金の30%までです。価値の差を見て配分し、投資しない判断もできます。`,
       tools: [
         tool(
           'invest',
@@ -213,8 +248,10 @@ ${companyList(e) || '（ありません）'}
 ${pool.map((t) => `- ${t.body}`).join('\n') || '（ありません）'}
 最近のアイデアと市場の評価:
 ${ideas || '（まだありません）'}
+会社の掲示板:
+${boardLines(e, c.id)}
 
-設計思想に沿って、会社のタスクプールに add_task で仕事を足してください。worker は自分でプールから仕事を選びます。手の空いている worker は ${Math.max(needed, 0)} 人です。`,
+設計思想に沿って、会社のタスクプールに add_task で仕事を足してください。評価の高い方向を伸ばし、既存のアイデアと重ならない仕事にしてください。worker は自分でプールから仕事を選びます。手の空いている worker は ${Math.max(needed, 0)} 人です。`,
       tools: [
         tool(
           'set_philosophy',
@@ -275,11 +312,24 @@ ${
 ${messages.map((m) => `- ${m.from_agent}: ${m.content}`).join('\n') || '（ありません）'}
 受け取ったエントリー（decide_gift で自分用コンテキストに入れるか決める）:
 ${gifts.map((g) => `- id ${g.id}（${g.from_agent} から）: ${g.gist}`).join('\n') || '（ありません）'}
+会社の掲示板:
+${boardLines(e, c.id)}
+全社の最近のアイデア（重なる案は出さない）:
+${
+  e
+    .latestIdeas(15)
+    .map(
+      (i) =>
+        `- ${i.title}（会社 ${i.company_id}、評価 ${i.score ?? '未評価'}）`,
+    )
+    .join('\n') || '（まだありません）'
+}
 会社の一覧:
 ${companyList(e)}
 
-成果は post_idea で登録し、詳しい内容は file_write でファイルに書いてください。
-同僚との相談は send_message で行えます（to に all で全員）。
+成果は context_add（scope: shared）で共有コンテキストに残し、そのラベル（S…）を entry に付けて post_idea で市場に出してください。長い内容は file_write でファイルに書き、context_add の file で指せます。
+共有 DB は、ほかのエージェントとの調整用のデータにだけ使い、成果を置かないでください。
+進捗の報告は post_board で会社の掲示板に出してください（誰も起こしません）。send_message は特定の同僚への質問や依頼だけに使ってください（相手を起こします）。
 ほかの会社との合併や、会社の分裂に賛成なら vote で投票できます。`,
     done: () => e.markRead(messages.map((m) => m.id)),
     tools: [
@@ -303,26 +353,41 @@ ${companyList(e)}
       ),
       tool(
         'post_idea',
-        '成果をアイデアとして登録する。市場が評価する',
+        '成果をアイデアとして登録する。市場が根拠のエントリーとあわせて評価する',
         Type.Object({
           title: Type.String(),
           body: Type.String(),
-          file: Type.Optional(
-            Type.String({ description: '詳しい内容を書いたファイルのパス' }),
-          ),
+          entry: Type.String({
+            description: '根拠になる共有コンテキストのラベル（S…）',
+          }),
         }),
         (args) => {
+          const entry = text(args.entry, 'entry')
+          if (!contexts.sharedEntry(entry)) {
+            throw new Error(
+              `${entry} は共有コンテキストにありません。先に context_add（scope: shared）で残してください`,
+            )
+          }
           e.postIdea(name, {
             title: text(args.title, 'title'),
             body: text(args.body, 'body'),
-            file: typeof args.file === 'string' ? args.file : undefined,
+            entry,
           })
           return 'アイデアを登録しました'
         },
       ),
       tool(
+        'post_board',
+        '会社の掲示板に進捗を書く。誰も起こさず、同僚が次に動くときに読む',
+        Type.Object({ content: Type.String() }),
+        (args) => {
+          e.postBoard(name, text(args.content, 'content'))
+          return '掲示板に書きました'
+        },
+      ),
+      tool(
         'send_message',
-        'worker にメッセージを送る。to に all を指定すると同じ会社の全員に送る',
+        '同僚1人にメッセージを送る。相手を起こすので、質問や依頼にだけ使う',
         Type.Object({ to: Type.String(), content: Type.String() }),
         (args) => {
           e.sendMessage(
@@ -408,24 +473,27 @@ export function startLoops(d: LoopDeps) {
       if (!running.has(name)) running.set(name, loop(name))
     }
   }
-  let nextSettleAt = Date.now() + settleMs
-  const supervisor = setInterval(supervise, idle)
-  const settler = setInterval(() => {
-    d.economy.settle()
-    nextSettleAt = Date.now() + settleMs
-    d.log(`精算しました。第${d.economy.cycle()}期に入ります`)
+  // 次の精算の時刻は DB に置き、停止や再起動をまたいでも引き継ぐ。止めていた間に過ぎていれば、すぐに精算する
+  if (!d.economy.nextSettleAt())
+    d.economy.setNextSettleAt(Date.now() + settleMs)
+  const tick = () => {
+    if (Date.now() >= d.economy.nextSettleAt()) {
+      d.economy.settle()
+      d.economy.setNextSettleAt(Date.now() + settleMs)
+      d.log(`精算しました。第${d.economy.cycle()}期に入ります`)
+    }
     supervise()
-  }, settleMs)
+  }
+  const supervisor = setInterval(tick, idle)
   supervise()
   d.log(`ループを始めました（第${d.economy.cycle()}期）`)
 
   return {
-    nextSettleAt: () => nextSettleAt,
+    nextSettleAt: () => d.economy.nextSettleAt(),
     // 動いている途中のエージェントは、今の依頼を終えてから止まる
     async stop() {
       stopped = true
       clearInterval(supervisor)
-      clearInterval(settler)
       await Promise.all(running.values())
       d.log('ループを止めました')
     },

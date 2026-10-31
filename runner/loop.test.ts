@@ -46,9 +46,11 @@ test('やることがあるときだけ turn を返し、状況が変わると k
   after?.done?.()
   expect(e.unread('worker-1')).toEqual([])
 
-  expect((await turnFor('investor-1', d))?.key).toBe('cycle-1')
-  e.invest('investor-1', a.id, 100)
+  // investor は最初の精算までは動かない
   expect(await turnFor('investor-1', d)).toBeNull()
+  e.db.query('UPDATE companies SET capital = 200').run()
+  e.settle()
+  expect((await turnFor('investor-1', d))?.key).toBe('cycle-2')
 })
 
 test('各エージェントが自分のループで動き、精算で期が進み、止められる', async () => {
@@ -75,7 +77,23 @@ test('各エージェントが自分のループで動き、精算で期が進�
           if (first) await use(tools, 'claim_task', { id: first.id })
           return '引き受けた'
         }
-        await use(tools, 'post_idea', { title: `${name}の案`, body: '本文' })
+        const added = String(
+          await use(tools, 'context_add', {
+            scope: 'shared',
+            gist: `${name}の要点`,
+            summary: '- 「猫の写真を整理する」',
+            raw: '猫の写真を整理する',
+          }),
+        )
+        const entry = added.split(' ')[0]
+        await use(tools, 'post_idea', {
+          title: `${name}の案`,
+          body: '本文',
+          entry,
+        })
+        expect(() =>
+          use(tools, 'post_idea', { title: 'x', body: 'y', entry: 'S999' }),
+        ).toThrow()
         await use(tools, 'finish_task', { result: '終えた' })
       } else if (name === 'market') {
         for (const i of e.unscoredIdeas()) {
@@ -129,4 +147,24 @@ test('全員のプロンプトに2層のコンテキストが入り、受け取�
 
   const received = await turnFor('worker-1', d)
   expect(received?.prompt).toContain('worker-2 から）: 要点')
+})
+
+test('精算の時刻は DB に残り、止めている間に過ぎていれば再開した直後に精算する', async () => {
+  const e = openEconomy(':memory:')
+  e.setGoal('目的')
+  const run = () =>
+    startLoops({
+      ...deps(e),
+      log: () => {},
+      idleMs: 5,
+      settleMs: 60_000,
+      ask: async () => '了解',
+    })
+  await run().stop()
+  expect(e.nextSettleAt()).toBeGreaterThan(Date.now())
+  e.setNextSettleAt(Date.now() - 1)
+  const loops = run()
+  await Bun.sleep(30)
+  await loops.stop()
+  expect(e.cycle()).toBe(2)
 })
