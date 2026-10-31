@@ -21,9 +21,13 @@ const resolveHost: Resolve = async host => {
   const ip = host.replace(/^\[|\]$/g, ""), family = isIP(ip);
   return family ? [{ address: ip, family }] : dnsLookup(host, { all: true, verbatim: true });
 };
-const getPage: Get = (url, address) => new Promise((resolve, reject) => {
+export const getPage: Get = (url, address) => new Promise((resolve, reject) => {
   const req = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
-    lookup: (_host, _options, callback) => callback(null, address.address, address.family as 4 | 6),
+    // The connection goes only to the address checked above. The client may ask for every address (all: true), which
+    // takes an array; answering it with a single address leaves the address undefined.
+    lookup: (_host, options, callback) => options.all
+      ? (callback as unknown as (e: null, a: Address[]) => void)(null, [address])
+      : callback(null, address.address, address.family as 4 | 6),
     timeout: 60_000,
     headers: { accept: "text/html, text/plain;q=0.9" },
   }, res => {
@@ -40,6 +44,7 @@ const getPage: Get = (url, address) => new Promise((resolve, reject) => {
   req.on("error", reject);
   req.end();
 });
+
 
 export async function fetchPublicPage(input: string, resolve: Resolve = resolveHost, get: Get = getPage) {
   let url = new URL(input);

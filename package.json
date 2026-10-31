@@ -6,7 +6,6 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "check": "tsrs --noEmit",
-    "bench": "bun run src/index.ts bench",
     "rsi": "bun run scripts/rsi.ts",
     "dashboard": "bun run src/index.ts serve",
     "test": "bun test"

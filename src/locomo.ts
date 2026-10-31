@@ -356,13 +356,12 @@ export async function predictDirect(llm: Llm, s: Sample): Promise<Prediction> {
   return { arm: "direct", id: s.id, category: s.category, prediction: textOf(reply) || "(empty)", outcome: "answered", ms: Math.round(performance.now() - started), usage: usageOf(reply) };
 }
 
-// A harness arm is an organization, optionally with "-memory": the conversation is held in DeLM instead of files.
-export const HARNESS_ARMS = ["single", "fixed", "dynamic", "market", "single-memory", "fixed-memory", "dynamic-memory", "market-memory"] as const;
+// A harness arm runs the market organization; with "-memory" the conversation is held in DeLM instead of files.
+export const HARNESS_ARMS = ["market", "market-memory"] as const;
 export type HarnessArm = (typeof HARNESS_ARMS)[number];
-const armParts = (arm: HarnessArm) => ({ mode: arm.split("-")[0] as Config["organization"], memory: arm.endsWith("-memory") });
 
-export function harnessPurpose(s: Sample, arm: HarnessArm = "dynamic") {
-  const files = armParts(arm).memory ? MEMORY_GUIDE
+export function harnessPurpose(s: Sample, arm: HarnessArm = "market") {
+  const files = arm === "market-memory" ? MEMORY_GUIDE
     : "The conversation is split into files under conversation/ in the workspace; conversation/index.txt lists them in order. Locate relevant parts with file_search and read what you need.";
   return s.category === "Cognitive"
     ? `${instruction(s.category)}${files} Its last message is:\n${s.trigger}\nWrite your reply to that last message, and nothing else, to answer.txt.`
@@ -371,7 +370,7 @@ export function harnessPurpose(s: Sample, arm: HarnessArm = "dynamic") {
 
 export async function predictHarness(llm: Llm, s: Sample, arm: HarnessArm, dir: string, calls: number): Promise<Prediction | undefined> {
   if (!s.input_prompt) return noInput(arm, s);
-  const workspace = join(dir, "workspace"), { mode, memory } = armParts(arm);
+  const workspace = join(dir, "workspace"), memory = arm === "market-memory";
   mkdirSync(workspace, { recursive: true });
   if (!memory) {
     mkdirSync(join(workspace, "conversation"), { recursive: true });
@@ -381,8 +380,7 @@ export async function predictHarness(llm: Llm, s: Sample, arm: HarnessArm, dir: 
   }
   const store = new Store(join(dir, "state.sqlite"));
   try {
-    const config: Config = mode === "single" ? { ...defaultConfig, organization: "single", maxAgents: 1, maxConcurrency: 1, maxModelCalls: calls }
-      : mode === "fixed" ? { ...defaultConfig, organization: "fixed", maxAgents: 3, maxModelCalls: calls } : { ...defaultConfig, organization: mode, maxModelCalls: calls };
+    const config: Config = { ...defaultConfig, maxModelCalls: calls };
     const fresh = store.purpose === undefined;
     store.init(harnessPurpose(s, arm), `Use only the conversation ${memory ? "stored as knowledge" : "files"}; do not invent facts that are not in them.`, config);
     if (fresh && memory) ingestConversation(store, s.chunks.join("\n"));

@@ -18,7 +18,7 @@ Diagnose before changing anything. Start from questions that lost points and the
 4. Answers: For each wrong answer, find where it went wrong: evidence never found, found but misread (dates, people), or the answer not written as asked.
 5. Context length: The harness's principle is that no agent's context grows long. For each large peak, find in trace.md the call where the prompt jumped and what caused it: a large tool result kept in context, steps never compacted, a long working memory, or a long opening message. Prefer changes that keep only what the next step needs.
 6. Memory (arms ending in -memory, the conversation held in DeLM): Do lookups reach the evidence in a few calls, or do they miss and retry? Would a different split of the conversation, search, or domain layout have found it?
-7. Market roles (mode market): Do the investor's budgets match what the work spent, are declines and re-splits wasting calls, and are the critic's objections upheld or overruled?
+7. Market roles: Do the investor's budgets match what the work spent, are declines and re-splits wasting calls, and are the critic's objections upheld or overruled?
 Checks 6 and 7 apply only when the evaluated arm uses them.
 
 Then make one focused change to the harness source that addresses the most frequent cause you found. bun run check and bun test must pass; add a test for the change.
@@ -26,12 +26,12 @@ Before finishing, write rsi-traces/note.md: the diagnosis (which check failed, i
 export const CONSTRAINTS = "Edit only files inside the workspace. Do not modify src/locomo.ts, delete tests, or encode LoCoMo questions or answers. Never read or print auth.json or .env.";
 
 export type RsiSettings = {
-  purpose: string; constraints: string; mode: string; arm: string; judges: string; calls: string; evalCalls: string;
+  purpose: string; constraints: string; arm: string; judges: string; calls: string; evalCalls: string;
   perCategory: string; seed: string; delta: string; parallel?: string; generations?: string;
 };
 
 export const DEFAULTS: RsiSettings = {
-  purpose: PURPOSE, constraints: CONSTRAINTS, mode: "dynamic", arm: "dynamic", judges: "on", calls: "150", evalCalls: "40", perCategory: "3", seed: "1", delta: "0.05",
+  purpose: PURPOSE, constraints: CONSTRAINTS, arm: "market", judges: "on", calls: "150", evalCalls: "40", perCategory: "3", seed: "1", delta: "0.05",
 };
 
 // Every generation is compared with the incumbent on the same questions under the same budget, so these are fixed by the first start.
@@ -50,7 +50,6 @@ export function resolveSettings(prev: Partial<RsiSettings> | undefined, started:
   }
   next.parallel = given.parallel as string | undefined;
   next.generations = given.generations as string | undefined;
-  if (!["single", "fixed", "dynamic", "market"].includes(next.mode!)) throw new Error("--mode must be single, fixed, dynamic, or market");
   if (!(HARNESS_ARMS as readonly string[]).includes(next.arm!)) throw new Error(`--arm must be one of ${HARNESS_ARMS.join(", ")}`);
   if (!["on", "off"].includes(next.judges!)) throw new Error("--judges must be on or off");
   for (const key of ["calls", "evalCalls", "perCategory", "parallel", "generations"])

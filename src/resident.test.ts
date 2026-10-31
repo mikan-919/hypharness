@@ -1,8 +1,13 @@
 import { expect, test } from "bun:test";
 import { openResident, setOrder } from "./resident.ts";
-import { runWorkerPool } from "./scheduler.ts";
+import { runScheduler, runWorkerPool } from "./scheduler.ts";
+import { call, openingOf } from "./fixtures/market-brain.ts";
+import { PANEL } from "./triggers.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Runtime } from "./agent.ts";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { history, reply, waitForFront } from "./chat.ts";
 import { tools, type ToolContext } from "./tools.ts";
 import { remember } from "./resident-memory.ts";
@@ -139,4 +144,34 @@ test("in resident memory the user's words are a verified record and the assistan
     { source: "chat:1", status: "verified", verified_by: "ingest" },
     { source: "chat:2", status: "hypothesis", verified_by: null },
   ]);
+});
+
+test("in the resident market, an explorer that owns a goal steers it: it splits, investors fund, a worker does it, and it is verified", async () => {
+  const store = openResident(":memory:");
+  setOrder(store, "write answer.txt");
+  store.addAgent("explorer-1", "Explorer who proposed this goal; own and carry it out", "host");
+  store.run("insert into goals(id, parent, description, status, owner, created_at) values('G1', 'G0', 'write answer.txt', 'open', 'explorer-1', 1)");
+  let split = false;
+  const faux = fauxProvider(), models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses(Array(80).fill((ctx: { messages: Message[] }) => {
+    const opening = openingOf(ctx.messages), used = ctx.messages.filter(m => m.role === "toolResult").map(m => m.toolName);
+    const kind = opening.match(/## Current task \S+ \((\w+)/)![1];
+    if (kind === "steer" && opening.includes("Goal G1 has no pending work") && !split) {
+      if (!used.includes("goal_create")) return call("goal_create", { parent: "G1", description: "write answer.txt with Oslo" });
+      split = true;
+      return call("task_finish", { result: "split" });
+    }
+    if (kind === "steer") return used.includes("goal_complete") ? call("task_finish", { result: "submitted" }) : call("goal_complete", { id: opening.match(/Goal (G\S*) has no pending work/)![1]!, deliverable: "answer.txt" });
+    if (kind === "invest") return call("goal_fund", { goal: opening.match(/Goal (G-\w+): /)![1]!, budget: 5, rationale: "one file" });
+    if (kind === "work") return used.includes("file_write") ? call("task_finish", { result: "answer.txt" }) : call("file_write", { path: "answer.txt", content: "Oslo" });
+    return call("task_finish", { result: "checked", verdict: "pass" });
+  }));
+  const dir = mkdtempSync(join(tmpdir(), "hyph-resident-"));
+  await runScheduler({ store, models, model: faux.getModel(), workspace: dir, contextDir: join(dir, "contexts") }, 40);
+  expect(store.goal("G1")!.status).toBe("done");
+  expect(store.goal("G1")!.verified_by).not.toBe("explorer-1");
+  expect(store.all<{ claimed_by: string }>("select claimed_by from tasks where kind = 'work'").map(t => t.claimed_by)).toEqual(["worker"]);
+  expect(store.get<{ n: number }>("select count(*) n from tasks where kind = 'invest'")!.n).toBe(PANEL);
+  store.db.close();
 });

@@ -6,13 +6,13 @@ import { HARNESS_ARMS } from "../locomo.ts";
 // the harness state lives in that directory, so a stopped run resumes from the same state.
 
 export type RsiRequest = {
-  purpose?: string; constraints?: string; mode?: string; arm?: string; judges?: boolean;
+  purpose?: string; constraints?: string; arm?: string; judges?: boolean;
   calls?: number; evalCalls?: number; generations?: number; perCategory?: number; parallel?: number; seed?: number; delta?: number;
 };
 
 export type RunRequest = {
-  kind: "run" | "bench";
-  purpose?: string; constraints?: string; mode?: string; arm?: string;
+  kind: "run";
+  purpose?: string; constraints?: string;
   calls?: number; agents?: number; concurrency?: number; rounds?: number;
   allowShell?: boolean; check?: string;
 };
@@ -35,16 +35,15 @@ const positive = (v: unknown, name: string) => {
 
 // Translates a validated request into CLI flags; the harness applies the same checks again.
 export function harnessArgs(r: RunRequest, dir: string, resume: boolean) {
-  if (r.kind !== "run" && r.kind !== "bench") throw new Error("kind must be run or bench");
+  if (r.kind !== "run") throw new Error("kind must be run");
   const purpose = typeof r.purpose === "string" ? r.purpose.trim() : "";
   if (!resume && !purpose) throw new Error("purpose is required");
-  if (r.mode !== undefined && !["single", "fixed", "dynamic", "market"].includes(r.mode)) throw new Error("mode must be single, fixed, dynamic, or market");
-  const args = r.kind === "bench" ? ["bench", purpose] : resume ? ["run"] : ["run", purpose];
+  const args = resume ? ["run"] : ["run", purpose];
   const flags: [string, string | undefined][] = [
     ["--dir", dir], ["--calls", positive(r.calls, "calls")], ["--agents", positive(r.agents, "agents")],
     ["--concurrency", positive(r.concurrency, "concurrency")], ["--rounds", positive(r.rounds, "rounds")],
     ["--constraints", typeof r.constraints === "string" && r.constraints.trim() ? r.constraints.trim() : undefined],
-    ["--mode", resume ? undefined : r.mode], ["--check", typeof r.check === "string" && r.check.trim() ? r.check.trim() : undefined],
+    ["--check", typeof r.check === "string" && r.check.trim() ? r.check.trim() : undefined],
   ];
   for (const [flag, value] of flags) if (value !== undefined) args.push(flag, value);
   if (r.allowShell === true) args.push("--allow-shell");
@@ -91,8 +90,6 @@ export function startRsi(dir: string, r: RsiRequest) {
     args.push("--delta", String(r.delta));
   }
   // Left out, the loop keeps what the previous start used.
-  if (r.mode !== undefined && !["single", "fixed", "dynamic", "market"].includes(r.mode)) throw new Error("mode must be single, fixed, dynamic, or market");
-  if (r.mode !== undefined) args.push("--mode", r.mode);
   if (r.arm !== undefined && !(HARNESS_ARMS as readonly string[]).includes(r.arm)) throw new Error(`arm must be one of ${HARNESS_ARMS.join(", ")}`);
   if (r.arm !== undefined) args.push("--arm", r.arm);
   if (r.judges !== undefined) args.push("--judges", r.judges === true ? "on" : "off");

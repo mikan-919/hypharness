@@ -49,7 +49,7 @@ function market(opts: { budget: number; workerLoops?: boolean; splits?: boolean 
 function setup(m: ReturnType<typeof market>) {
   const dir = mkdtempSync(join(tmpdir(), "hyph-market-"));
   const store = new Store(join(dir, "state.sqlite"));
-  store.init("Answer in answer.txt", "", { ...defaultConfig, organization: "market", maxModelCalls: 60 });
+  store.init("Answer in answer.txt", "", { ...defaultConfig, maxModelCalls: 60 });
   mkdirSync(join(dir, "workspace"), { recursive: true });
   const faux = fauxProvider(), models = createModels();
   models.setProvider(faux.provider);
@@ -87,7 +87,7 @@ test("market: a task that spends its budget fails and goes back to the investors
 
 test("market: investors vote; a majority funds with the median budget, and only a limited number of subgoals can be declined", () => {
   const store = new Store(":memory:");
-  store.init("p", "", { ...defaultConfig, organization: "market" });
+  store.init("p", "", defaultConfig);
   const lead = store.agent("lead")!;
   const ctx = (agent: string, task: string) => ({ store, agent: store.agent(agent)!, task: store.task(task)!, workspace: "", contextDir: "", episode: "e", messages: [] }) as ToolContext;
   const subgoal = () => {
@@ -120,7 +120,7 @@ test("market: investors vote; a majority funds with the median budget, and only 
 
 test("market: any critic's objection goes to the evaluators, whose majority ruling decides the work and the critics' record", () => {
   const store = new Store(":memory:");
-  store.init("p", "", { ...defaultConfig, organization: "market" });
+  store.init("p", "", defaultConfig);
   store.addAgent("worker", "worker", "host");
   const ctx = (agent: string, task: string) => ({ store, agent: store.agent(agent)!, task: store.task(task)!, workspace: "", contextDir: "", episode: "e", messages: [] }) as ToolContext;
   // Each member of the open panel of this kind votes in turn.
@@ -150,7 +150,7 @@ test("market: any critic's objection goes to the evaluators, whose majority ruli
 
 test("market: every funded task gets an innovator of its own, so funded goals proceed in parallel", () => {
   const store = new Store(":memory:");
-  store.init("p", "", { ...defaultConfig, organization: "market" });
+  store.init("p", "", defaultConfig);
   const tasks = [1, 2, 3].map(i => store.addTask({ goal: "G0", kind: "work", description: `part ${i}`, author: "investor", budget: 5 }));
   steer(store);
   expect(store.agents().filter(a => a.id.startsWith("worker")).map(a => a.id)).toEqual(["worker", "worker-2", "worker-3"]);
@@ -189,7 +189,7 @@ test("market: a worker splits off a part to a copy of itself, which does it on a
 
 test("agent_split checks the budget, and agent_merge folds a copy's memory into another of its role and retires it", () => {
   const store = new Store(":memory:");
-  store.init("p", "", { ...defaultConfig, organization: "market" });
+  store.init("p", "", defaultConfig);
   store.addAgent("worker", "worker: does funded work tasks and verifies results", "host");
   store.writeMemory("worker", "sources in K-1");
   const contextDir = mkdtempSync(join(tmpdir(), "hyph-ctx-"));
@@ -219,14 +219,34 @@ test("agent_split checks the budget, and agent_merge folds a copy's memory into 
 
 test("market prompts cast workers as innovators who argue their case and the market roles as capitalists who judge it", () => {
   const store = new Store(":memory:");
-  store.init("p", "", { ...defaultConfig, organization: "market" });
+  store.init("p", "", defaultConfig);
   for (const id of ["investor", "critic", "worker-2"]) store.addAgent(id, id, "host");
   const prompt = (id: string) => systemPrompt(store, store.agent(id)!);
   expect(prompt("worker-2")).toContain("You are an innovator");
   expect(prompt("worker-2")).toContain("why it is promising");
   for (const id of ["investor", "critic"]) expect(prompt(id)).toContain("You are a capitalist");
   expect(prompt("lead")).toContain("You are lead");
-  const classic = new Store(":memory:");
-  classic.init("p", "", defaultConfig);
-  expect(systemPrompt(classic, classic.agent("lead")!)).not.toContain("capitalism");
+});
+
+test("a goal its owner narrows keeps its original description, and verification judges against it", () => {
+  const store = new Store(":memory:");
+  store.init("p", "", defaultConfig);
+  store.addAgent("explorer-1", "explorer", "host");
+  store.run("insert into goals(id, parent, description, status, owner, created_at) values('G1', 'G0', 'Compare STOP and Gödel Agent from the full papers, with every table', 'open', 'explorer-1', 1)");
+  const steer = store.addTask({ goal: "G1", kind: "steer", description: "Goal G1 has no pending work.", author: "host", assignee: "explorer-1" });
+  expect(store.claim(steer, "explorer-1")).toBe(true);
+  const ctx = { store, agent: store.agent("explorer-1")!, task: store.task(steer)!, workspace: "", contextDir: "", episode: "e", messages: [] } as unknown as ToolContext;
+  tools.goal_update!.run(ctx, { id: "G1", rev: 0, description: "Compare them from search excerpts only" });
+  tools.goal_update!.run(ctx, { id: "G1", rev: 1, description: "Compare them from one excerpt" });
+  expect(store.goal("G1")).toMatchObject({ description: "Compare them from one excerpt", origin: "Compare STOP and Gödel Agent from the full papers, with every table" });
+  tools.goal_complete!.run(ctx, { id: "G1", deliverable: "reports/compare.md" });
+  const verify = store.get<{ description: string }>("select description from tasks where kind = 'verify' and target = 'G1'")!.description;
+  expect(verify).toContain("Original goal, before its owner refined it: Compare STOP and Gödel Agent from the full papers, with every table");
+  expect(verify).toContain("cannot be done here (not merely that it was not done)");
+  // A goal never refined is verified as written.
+  store.run("insert into goals(id, parent, description, status, owner, created_at) values('G2', 'G0', 'Write a.txt', 'open', 'explorer-1', 2)");
+  const steer2 = store.addTask({ goal: "G2", kind: "steer", description: "Goal G2 has no pending work.", author: "host", assignee: "explorer-1" });
+  expect(store.claim(steer2, "explorer-1")).toBe(true);
+  tools.goal_complete!.run({ ...ctx, task: store.task(steer2)! } as ToolContext, { id: "G2", deliverable: "a.txt" });
+  expect(store.get<{ description: string }>("select description from tasks where kind = 'verify' and target = 'G2'")!.description).not.toContain("Original goal");
 });

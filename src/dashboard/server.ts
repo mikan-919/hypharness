@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
 import type { Message } from "@earendil-works/pi-ai";
-import { canonicalUrl, render, safePath } from "../tools.ts";
+import { canonicalUrl, render, safePath, titleKey } from "../tools.ts";
 import { openModel } from "../auth.ts";
 import { history, openChat, organize, reply, WINDOW } from "../chat.ts";
 import { centralization, type Store } from "../db.ts";
@@ -51,7 +51,7 @@ function duplicates(d: Database) {
   const rows = all(d, `select id, gist, source from knowledge${merges(d) ? " where merged_into is null" : ""} order by created_at`) as { id: string; gist: string; source: string }[];
   const groups = new Map<string, { id: string; gist: string }[]>();
   for (const k of rows) {
-    const keys = [/^https?:\/\//.test(k.source) ? `source ${canonicalUrl(k.source)}` : null, k.gist.length >= 20 ? `gist ${k.gist.toLowerCase()}` : null];
+    const keys = [/^https?:\/\//.test(k.source) ? `source ${canonicalUrl(k.source)}` : null, titleKey(k.gist).length >= 20 ? `title ${titleKey(k.gist)}` : null];
     for (const key of keys) if (key) groups.set(key, [...groups.get(key) ?? [], { id: k.id, gist: k.gist }]);
   }
   return [...groups].filter(([, items]) => items.length > 1).map(([key, items]) => ({ id: key, key, items }));
@@ -276,7 +276,7 @@ const server = Bun.serve({
     "/": index,
     "/api/sessions": guard(async () => Response.json(await Promise.all((await sessions()).map(async id => {
       const d = (await session(id))!.db;
-      return { id, purpose: meta(d, "purpose"), mode: JSON.parse(meta(d, "config") ?? "{}").organization, modelCalls: Number(meta(d, "model_calls") ?? 0),
+      return { id, purpose: meta(d, "purpose"), modelCalls: Number(meta(d, "model_calls") ?? 0),
         rootStatus: (d.query("select status from goals where id = 'G0'").get() as { status: string } | null)?.status,
         lastAt: (d.query("select max(at) at from log").get() as { at: number | null }).at };
     })))),
@@ -296,7 +296,7 @@ const server = Bun.serve({
     "/api/file": guard(async req => { const p = params(req), s = await session(p.get("s")); return json(s && await file(join(s.id, "workspace"), p.get("path") ?? "")); }),
     "/api/runs": {
       GET: guard(() => Response.json(runs.list())),
-      // Starts a new session (or a bench group) in a new directory under the data directory.
+      // Starts a new session in a new directory under the data directory.
       POST: guard(async req => {
         const body = await req.json() as runs.RunRequest & { name?: string };
         if (typeof body.name !== "string" || !NAME.test(body.name)) throw new Error("name must be 1-40 lowercase letters, digits, '-' or '_'");

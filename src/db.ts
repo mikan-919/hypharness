@@ -3,10 +3,9 @@ import { Database } from "bun:sqlite";
 // Shared state of the whole organization (DeLM) and each agent's persistent context (CLM).
 // Every multi-row change runs inside a transaction; single-row ownership changes use conditional UPDATEs.
 
+// The organization is a market (src/triggers.ts): lead only splits goals; panels of investors fund each subgoal with
+// a call budget, workers do funded work, panels of critics object to results and panels of evaluators rule.
 export type Config = {
-  // market: lead only splits goals; an investor funds each subgoal with a call budget, workers do funded work,
-  // a critic objects to results and an evaluator rules (src/triggers.ts).
-  organization: "single" | "fixed" | "dynamic" | "market";
   maxAgents: number;
   maxConcurrency: number;
   maxModelCalls: number;
@@ -14,12 +13,12 @@ export type Config = {
   memoryLimit: number; // characters of working memory per agent
   toolOutputLimit: number;
   leaseMs: number;
-  idleRounds: number; // rounds without work before a dynamic agent goes dormant
+  idleRounds: number; // rounds without work before an agent other than lead goes dormant
   allowShell: boolean;
 };
 
 export const defaultConfig: Config = {
-  organization: "dynamic", maxAgents: Infinity, maxConcurrency: Infinity, maxModelCalls: Infinity, maxSteps: 16,
+  maxAgents: Infinity, maxConcurrency: Infinity, maxModelCalls: Infinity, maxSteps: 16,
   memoryLimit: 6000, toolOutputLimit: 4000, leaseMs: 10 * 60_000, idleRounds: 3, allowShell: false,
 };
 
@@ -27,7 +26,7 @@ const schema = `
 create table if not exists meta(key text primary key, value text not null);
 create table if not exists agents(id text primary key, role text not null, status text not null, parent text, idle int not null default 0, created_at int not null);
 create table if not exists goals(id text primary key, parent text, description text not null, status text not null, owner text not null,
-  deliverable text, feedback text, verified_by text, rev int not null default 0, created_at int not null);
+  deliverable text, feedback text, verified_by text, rev int not null default 0, created_at int not null, origin text);
 create table if not exists tasks(id text primary key, goal text not null, kind text not null, description text not null, status text not null,
   author text not null, assignee text, exclude text, target text, claimed_by text, lease_until int, result text, feedback text,
   verified_by text, rev int not null default 0, created_at int not null);
@@ -55,7 +54,9 @@ export function centralization(db: Database) {
 }
 
 export type Agent = { id: string; role: string; status: "active" | "dormant" | "merged"; parent: string | null; idle: number };
-export type Goal = { id: string; parent: string | null; description: string; status: "open" | "review" | "done" | "dropped"; owner: string; deliverable: string | null; feedback: string | null; verified_by: string | null; rev: number };
+export type Goal = { id: string; parent: string | null; description: string; status: "open" | "review" | "done" | "dropped"; owner: string; deliverable: string | null; feedback: string | null; verified_by: string | null; rev: number;
+  origin: string | null; // the description before the owner first refined it; verification still judges against it
+};
 export type Task = {
   id: string; goal: string; kind: "work" | "verify" | "steer" | "invest" | "critique" | "judge" | "organize"; description: string; status: "open" | "claimed" | "review" | "done" | "failed";
   author: string; assignee: string | null; exclude: string | null; target: string | null; claimed_by: string | null; lease_until: number | null;
@@ -90,6 +91,7 @@ export class Store {
     this.db.exec(schema);
     // Added after the first release; older stores get the column here.
     if (!this.all<{ name: string }>("pragma table_info(tasks)").some(c => c.name === "budget")) this.db.run("alter table tasks add column budget int");
+    if (!this.all<{ name: string }>("pragma table_info(goals)").some(c => c.name === "origin")) this.db.run("alter table goals add column origin text");
     if (!this.all<{ name: string }>("pragma table_info(tasks)").some(c => c.name === "panel")) this.db.run("alter table tasks add column panel text");
     if (!this.all<{ name: string }>("pragma table_info(knowledge)").some(c => c.name === "merged_into")) this.db.run("alter table knowledge add column merged_into text");
   }
@@ -126,10 +128,6 @@ export class Store {
       this.setMeta("config", JSON.stringify(config));
       this.setMeta("model_calls", "0");
       this.addAgent("lead", "lead: owns the top-level purpose, plans, organizes, and delivers", null, "agent_initialized");
-      if (config.organization === "fixed") {
-        this.addAgent("worker", "worker: carries out assigned work and produces artifacts", "lead", "agent_initialized");
-        this.addAgent("reviewer", "reviewer: verifies results and knowledge independently", "lead", "agent_initialized");
-      }
       this.run("insert into goals(id, parent, description, status, owner, created_at) values('G0', null, ?, 'open', 'lead', ?)", purpose, Date.now());
     });
   }

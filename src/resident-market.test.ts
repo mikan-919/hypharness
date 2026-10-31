@@ -164,3 +164,30 @@ test("a dormant steward can replace a low-capital strategy with a mutation", asy
   expect(store.get<{ active: number }>("select active from memory_stewards where domain = 'D-sleep'")!.active).toBe(0);
   store.db.close();
 });
+
+test("an order is not paired with a finding, and the evaluator sees the goals already taken on", async () => {
+  const store = openResident(":memory:"), embed: Embed = async text => text.includes("STOP") ? [1, 0.1] : [1, 0.2];
+  setOrder(store, "Survey self-improvement papers");
+  while (await rememberOrder(store, embed));
+  store.setMeta("order_proposal:1", "G1");
+  store.addAgent("explorer-1", "explorer", "host");
+  store.run("insert into goals(id, parent, description, status, owner, created_at) values('G1', 'G0', 'Survey the papers and write a report', 'open', 'explorer-1', 1)");
+  await remember(store, embed, "STOP improves its own scaffolding.", "https://arxiv.org/abs/2310.02304");
+  const faux = fauxProvider(), models = createModels();
+  models.setProvider(faux.provider);
+  const prompts: string[] = [];
+  faux.setResponses([
+    ctx => { prompts.push(String(ctx.messages.at(-1)!.content)); return fauxAssistantMessage('{"fund":true,"expected":1,"cost":1}'); },
+    ctx => { prompts.push(String(ctx.messages.at(-1)!.content)); return fauxAssistantMessage(JSON.stringify({ hypothesis: "h", objection: "o", score: 0.9, goal: "", mandate: "m", strategy: "s" })); },
+  ]);
+  const llm = { models, model: faux.getModel() };
+  // The order and one finding make no pair, so nothing is evaluated.
+  expect(await marketTick(store, embed, llm)).toBe(false);
+  expect(prompts).toHaveLength(0);
+  await remember(store, embed, "Gödel Agent rewrites its own logic.", "https://arxiv.org/abs/2410.04444");
+  expect(await marketTick(store, embed, llm)).toBe(true);
+  expect(prompts.at(-1)).toContain("Goals already taken on:\n- G1 [open] Survey the papers and write a report");
+  expect(store.all<{ first: string; second: string }>("select first, second from discoveries").flatMap(d => [d.first, d.second])
+    .every(id => !store.get("select 1 from knowledge where id = ? and source like 'order:%'", id))).toBe(true);
+  store.db.close();
+});

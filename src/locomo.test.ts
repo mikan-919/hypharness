@@ -2,9 +2,10 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "@earendil-works/pi-ai";
 import { Store } from "./db.ts";
 import { ingestConversation, splitSentences } from "./memory.ts";
+import { call, marketBrain } from "./fixtures/market-brain.ts";
 import { buildSamples, judgePrompt, labelToScore, parseJudge, predictHarness, runLocomo, selectSamples, SOURCE, type LocomoItem, type PlusItem } from "./locomo.ts";
 
 const conversation = {
@@ -106,22 +107,16 @@ test("provider errors are never scored, and a rerun completes without duplicates
 
 test("harness arm reads the split conversation and answers through answer.txt", async () => {
   const sample = buildSamples(locomo, plus)[0]!;
-  const brain = (ctx: { messages: Message[] }) => {
-    const used = ctx.messages.filter(m => m.role === "toolResult").map(m => m.toolName);
-    const first = ctx.messages.find(m => m.role === "user")!.content;
-    const opening = typeof first === "string" ? first : first.map(b => (b as { text?: string }).text ?? "").join("");
-    const call = (name: string, args: Parameters<typeof fauxToolCall>[1]) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
-    if (opening.includes("(verify")) return call("task_finish", { result: "answer.txt checked", verdict: "pass" });
+  const brain = marketBrain(["answer from the conversation"], (_, used) => {
     if (!used.includes("file_read")) return call("file_read", { path: "conversation/index.txt" });
     if (used.filter(u => u === "file_read").length < 2) return call("file_read", { path: "conversation/part-001.txt" });
     if (!used.includes("file_write")) return call("file_write", { path: "answer.txt", content: "Oslo" });
-    if (!used.includes("goal_complete")) return call("goal_complete", { id: "G0", deliverable: "answer.txt" });
-    return call("task_finish", { result: "submitted" });
-  };
+    return call("task_finish", { result: "answer.txt" });
+  });
   const dir = mkdtempSync(join(tmpdir(), "locomo-harness-"));
-  const llm = llmWith(Array(30).fill(brain));
-  const p = await predictHarness(llm, sample, "single", dir, 20);
-  expect(p).toMatchObject({ arm: "single", prediction: "Oslo", outcome: "done" });
+  const llm = llmWith(Array(60).fill(brain));
+  const p = await predictHarness(llm, sample, "market", dir, 40);
+  expect(p).toMatchObject({ arm: "market", prediction: "Oslo", outcome: "done" });
   expect(await Bun.file(join(dir, "workspace", "conversation", "index.txt")).text()).toStartWith("part-001.txt: DATE: 1:00 pm on 1 May, 2023");
 });
 
@@ -140,20 +135,14 @@ test("memory arm finds the conversation as knowledge, one sentence per item and 
   ingestConversation(plusStore, plusSample.chunks.join("\n"));
   expect(plusStore.all<{ gist: string }>("select gist from knowledge").map(k => k.gist)).toContain("Ann: I'm allergic to peanuts.");
 
-  const brain = (ctx: { messages: Message[] }) => {
-    const used = ctx.messages.filter(m => m.role === "toolResult").map(m => m.toolName);
-    const first = ctx.messages.find(m => m.role === "user")!.content;
-    const opening = typeof first === "string" ? first : first.map(b => (b as { text?: string }).text ?? "").join("");
-    const call = (name: string, args: Parameters<typeof fauxToolCall>[1]) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
-    if (opening.includes("(verify")) return call("task_finish", { result: "answer.txt checked", verdict: "pass" });
+  const brain = marketBrain(["answer from the conversation"], (_, used) => {
     if (!used.includes("knowledge_search")) return call("knowledge_search", { query: "moved" });
     if (!used.includes("file_write")) return call("file_write", { path: "answer.txt", content: "Oslo" });
-    if (!used.includes("goal_complete")) return call("goal_complete", { id: "G0", deliverable: "answer.txt" });
-    return call("task_finish", { result: "submitted" });
-  };
+    return call("task_finish", { result: "answer.txt" });
+  });
   const dir = mkdtempSync(join(tmpdir(), "locomo-memory-"));
-  const p = await predictHarness(llmWith(Array(30).fill(brain)), sample!, "dynamic-memory", dir, 20);
-  expect(p).toMatchObject({ arm: "dynamic-memory", prediction: "Oslo" });
+  const p = await predictHarness(llmWith(Array(60).fill(brain)), sample!, "market-memory", dir, 40);
+  expect(p).toMatchObject({ arm: "market-memory", prediction: "Oslo" });
   expect(existsSync(join(dir, "workspace", "conversation"))).toBe(false);
   const answering = new Store(join(dir, "state.sqlite"));
   const search = answering.get<{ result: string }>("select result from ops where result like '%Oslo%'");

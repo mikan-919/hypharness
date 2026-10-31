@@ -63,10 +63,6 @@ function decideInvestment(c: ToolContext, task: Task) {
   return `Investors declined ${goal.id} (${funds.length} of ${votes.length} voted to fund)`;
 }
 
-function dynamicOnly(store: Store) {
-  if (store.config.organization !== "dynamic" && store.config.organization !== "market") fail(`Agent composition is fixed in ${store.config.organization} mode`);
-}
-
 
 function applyVerdict(store: Store, verifier: string, target: string, pass: boolean, reason: string) {
   if (target.startsWith("T-")) {
@@ -109,10 +105,26 @@ export function canonicalUrl(url: string) {
   return u.href.replace(/\/$/, "");
 }
 
-// A page already recorded: the same document, or the same title when it is long enough to name one work
-// (a proceedings copy of an arXiv paper). A merged item resolves to the item it was merged into.
+// A page title reduced to the work it names: without the arXiv ID in front, GitHub's "owner/repo:" prefix, or a site
+// name after a separator (" | OpenReview", " - Microsoft Research", " · GitHub"), in lower case without punctuation.
+// ponytail: a trailing segment after a separator is taken for a site name, so "X - Part 1" and "X - Part 2" share a key
+export function titleKey(title: string) {
+  let t = title.toLowerCase().replace(/^\[\d{4}\.\d{4,5}(?:v\d+)?\]\s*/, "").replace(/^github - [^/\s]+\/[^:\s]+:\s*/, "");
+  for (let m; (m = /\s+[|·–—-]\s+[^|·–—]{1,40}$/.exec(t)) && m.index >= 20;) t = t.slice(0, m.index);
+  return t.replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+// A page already recorded: the same document, or a title naming the same work when it is long enough to name one
+// (a proceedings, publisher or repository copy of an arXiv paper). A merged item resolves to the item it was merged into.
+// ponytail: titles are compared by scanning recorded pages; index the key if knowledge grows past a few thousand rows
 export function knownPage(store: Store, url: string, title: string) {
-  return store.get<{ id: string }>("select coalesce(merged_into, id) id from knowledge where source = ?1 or (length(?2) >= 20 and lower(gist) = lower(?2)) order by created_at limit 1", canonicalUrl(url), title)?.id;
+  const same = store.get<{ id: string }>("select coalesce(merged_into, id) id from knowledge where source = ? order by created_at limit 1", canonicalUrl(url));
+  if (same) return same.id;
+  const key = titleKey(title);
+  if (key.length < 20) return undefined;
+  const pages = store.all<{ id: string; gist: string; merged_into: string | null }>("select id, gist, merged_into from knowledge where source like 'http%' order by created_at");
+  const hit = pages.find(p => titleKey(p.gist) === key);
+  return hit ? hit.merged_into ?? hit.id : undefined;
 }
 
 const line = (t: Task) => `${t.id} [${t.kind}/${t.status}] goal=${t.goal}${t.assignee ? ` assignee=${t.assignee}` : ""}${t.claimed_by ? ` by=${t.claimed_by}` : ""}: ${t.description.slice(0, 160)}`;
@@ -230,7 +242,7 @@ export const tools: Record<string, Def<TSchema>> = {
     },
   }),
   goal_update: def({
-    description: "Refine the description of a goal you own, or drop it (its open tasks fail). The top-level goal G0 cannot be changed.",
+    description: "Refine the description of a goal you own, or drop it (its open tasks fail). The top-level goal G0 cannot be changed. The original description stays on record, and verification still judges the work against it: narrowing a goal does not lower what it must achieve.",
     parameters: Type.Object({ id: Str("Goal ID"), rev: Type.Integer({ description: "Revision from goal_list" }), description: Opt(Type.String()), drop: Opt(Type.Boolean()) }),
     run(c, a) {
       const goal = requireGoal(c.store, a.id);
@@ -238,7 +250,7 @@ export const tools: Record<string, Def<TSchema>> = {
       requireOwner(goal, c.agent);
       if (goal.status !== "open") fail(`Goal ${goal.id} is ${goal.status}`);
       c.store.tx(() => {
-        if (c.store.run("update goals set description = ?, status = ?, rev = rev + 1 where id = ? and rev = ?", a.description ?? goal.description, a.drop ? "dropped" : "open", goal.id, a.rev) !== 1) fail(`Revision conflict: goal is at rev ${goal.rev}; re-read it with goal_list`);
+        if (c.store.run("update goals set description = ?, status = ?, origin = coalesce(origin, ?), rev = rev + 1 where id = ? and rev = ?", a.description ?? goal.description, a.drop ? "dropped" : "open", a.description !== undefined && a.description !== goal.description ? goal.description : null, goal.id, a.rev) !== 1) fail(`Revision conflict: goal is at rev ${goal.rev}; re-read it with goal_list`);
         if (a.drop) c.store.run("update tasks set status = 'failed', feedback = 'goal dropped' where goal = ? and status = 'open'", goal.id);
         c.store.log(c.agent.id, a.drop ? "goal_dropped" : "goal_refined", { id: goal.id, description: a.description });
       });
@@ -599,7 +611,6 @@ export const tools: Record<string, Def<TSchema>> = {
     description: "Create a new agent with its own persistent context. Only when existing or dormant agents cannot be reused and the expected benefit exceeds the cost of another agent.",
     parameters: Type.Object({ id: Type.String({ pattern: "^[a-z][a-z0-9-]{1,30}$" }), role: Str("Responsibility and expertise"), reason: Str("Why no existing agent can do this") }),
     run(c, a) {
-      dynamicOnly(c.store);
       return c.store.tx(() => {
         const n = c.store.get<{ n: number }>("select count(*) n from agents")!.n;
         if (n >= c.store.config.maxAgents) fail(`Agent limit ${c.store.config.maxAgents} reached; reuse a dormant agent with task_assign`);
@@ -614,7 +625,6 @@ export const tools: Record<string, Def<TSchema>> = {
     description: "Put an agent you created (or yourself) to sleep when it is no longer useful. Its context is kept; assigning it a task wakes it.",
     parameters: Type.Object({ id: Type.String(), reason: Type.String() }),
     run(c, a) {
-      dynamicOnly(c.store);
       const target = c.store.agent(a.id) ?? fail(`Unknown agent ${a.id}`);
       if (target.id === "lead") fail("lead cannot sleep");
       if (target.id !== c.agent.id && target.parent !== c.agent.id) fail(`Only ${target.parent} or ${target.id} can put it to sleep`);
@@ -633,7 +643,6 @@ export const tools: Record<string, Def<TSchema>> = {
       reason: Str("Why these parts go faster or better in parallel"),
     }),
     run(c, a) {
-      dynamicOnly(c.store);
       const task = requireCurrent(c);
       if (task.kind !== "work") fail("Only a work task can be split");
       const budgeted = task.budget !== null;
@@ -673,7 +682,6 @@ export const tools: Record<string, Def<TSchema>> = {
     description: "Merge yourself into another agent of the same role when you are no longer needed as a separate agent: your working memory is appended to its memory and you retire for good. Finish your current task afterwards.",
     parameters: Type.Object({ into: Str("Agent of your role that takes over your memory"), reason: Str("Why a separate agent is no longer worth it") }),
     run(c, a) {
-      dynamicOnly(c.store);
       const target = c.store.agent(a.into) ?? fail(`Unknown agent ${a.into}`);
       if (target.id === c.agent.id) fail("Cannot merge into yourself");
       if (target.role !== c.agent.role || target.status === "merged") fail(`${a.into} is not an agent of your role that can take you over`);

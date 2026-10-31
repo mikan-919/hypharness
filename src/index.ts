@@ -13,14 +13,13 @@ const { values: opts, positionals } = parseArgs({
     dir: { type: "string", default: ".hyph" },
     port: { type: "string", default: "4321" },
     constraints: { type: "string", default: "" },
-    mode: { type: "string", default: "dynamic" },
     calls: { type: "string" },
     agents: { type: "string" },
     concurrency: { type: "string" },
     rounds: { type: "string" },
     "allow-shell": { type: "boolean", default: false },
     check: { type: "string" },
-    arms: { type: "string", default: "direct,dynamic" },
+    arms: { type: "string", default: "direct,market" },
     "per-category": { type: "string", default: "2" },
     "harness-concurrency": { type: "string", default: "1" },
     categories: { type: "string" },
@@ -42,21 +41,13 @@ function open(dir: string) {
   return { store: new Store(join(dir, "state.sqlite")), workspace: resolve(dir, "workspace"), contextDir: resolve(dir, "contexts") };
 }
 
-function configFor(mode: string): Config {
-  if (mode === "single") return { ...defaultConfig, organization: "single", maxAgents: 1, maxConcurrency: 1 };
-  if (mode === "fixed") return { ...defaultConfig, organization: "fixed", maxAgents: 3 };
-  if (mode === "dynamic") return { ...defaultConfig };
-  if (mode === "market") return { ...defaultConfig, organization: "market" };
-  throw new Error("--mode must be single, fixed, dynamic, or market");
-}
-
-// Host-side permissions and budgets come from this run's flags; the purpose and organization mode stay as stored.
+// Host-side permissions and budgets come from this run's flags; the purpose stays as stored.
 function applyFlags(store: Store, base: Config) {
   store.setMeta("config", JSON.stringify({
     ...base, allowShell: opts["allow-shell"],
     maxModelCalls: int(opts.calls, "calls") ?? base.maxModelCalls,
-    maxAgents: base.organization === "single" ? 1 : int(opts.agents, "agents") ?? base.maxAgents,
-    maxConcurrency: base.organization === "single" ? 1 : int(opts.concurrency, "concurrency") ?? base.maxConcurrency,
+    maxAgents: int(opts.agents, "agents") ?? base.maxAgents,
+    maxConcurrency: int(opts.concurrency, "concurrency") ?? base.maxConcurrency,
   }));
 }
 
@@ -113,28 +104,10 @@ if (command === "serve") {
     console.log(r.reply);
     process.stdout.write("> ");
   }
-} else if (command === "bench") {
-  const purpose = rest.join(" ").trim();
-  if (!purpose) throw new Error("bench requires a purpose");
-  const llm = await openModel();
-  const root = join(opts.dir!, `bench-${Date.now()}`);
-  const results: Record<string, unknown> = {};
-  for (const mode of ["single", "fixed", "dynamic", "market"]) {
-    const env = open(join(root, mode));
-    env.store.init(purpose, opts.constraints!, configFor(mode));
-    applyFlags(env.store, env.store.config);
-    log(`== ${mode}`);
-    const r = await runScheduler({ ...env, ...llm, log }, int(opts.rounds, "rounds"));
-    results[mode] = { ...r, verified: env.store.goal("G0")!.verified_by !== null, checkExit: await checkWorkspace(env.workspace) };
-    env.store.db.close();
-  }
-  await Bun.write(join(root, "report.json"), JSON.stringify(results, null, 2));
-  console.table(results);
-  console.log(`report: ${join(root, "report.json")}`);
 } else if (command === "run") {
   const purpose = rest.join(" ").trim();
   const env = open(opts.dir!);
-  if (purpose) env.store.init(purpose, opts.constraints!, configFor(opts.mode!));
+  if (purpose) env.store.init(purpose, opts.constraints!, defaultConfig);
   else if (!env.store.purpose) throw new Error("Give a purpose to start, e.g. bun run start 'Write a CLI that ...'");
   applyFlags(env.store, env.store.config);
   const rt: Runtime = { ...env, ...(await openModel()), log };

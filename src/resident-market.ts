@@ -195,16 +195,17 @@ export async function marketTick(store: Store, embed: Embed, llm: Llm) {
   const purpose = store.purpose;
   const query = await embed(purpose, "query");
   const knowledge = new Map(store.all<{ id: string; raw: string }>("select id, raw from knowledge").map(k => [k.id, k.raw]));
-  const byId = new Map(rows.map(row => [row.knowledge, row]));
+  // An order is the purpose itself: paired with a finding it only restates work already under way, so pairs come from other memories.
+  const byId = new Map(memories.map(row => [row.knowledge, row]));
   const discoveries = store.all<{ first: string; second: string }>("select first, second from discoveries");
   const domainDistances = new Map<string, number[]>();
-  for (const a of rows) for (const b of rows) if (a.domain === b.domain && a.knowledge < b.knowledge) {
+  for (const a of memories) for (const b of memories) if (a.domain === b.domain && a.knowledge < b.knowledge) {
     const distances = domainDistances.get(a.domain) ?? [];
     distances.push(distance(a.vector, b.vector)); domainDistances.set(a.domain, distances);
   }
   const candidates: Candidate[] = [];
-  for (let i = 0; i < rows.length; i++) for (let j = i + 1; j < rows.length; j++) {
-    const a = rows[i]!, b = rows[j]!, [first, second] = [a.knowledge, b.knowledge].sort() as [string, string];
+  for (let i = 0; i < memories.length; i++) for (let j = i + 1; j < memories.length; j++) {
+    const a = memories[i]!, b = memories[j]!, [first, second] = [a.knowledge, b.knowledge].sort() as [string, string];
     if (store.get("select 1 from discoveries where first = ? and second = ?", first, second)) continue;
     if (store.get("select 1 from market_declines where first = ? and second = ? and purpose = ?", first, second, store.purpose)) continue;
     const duplicateThreshold = distanceThreshold(domainDistances.get(a.domain) ?? [], 0.1);
@@ -235,12 +236,14 @@ export async function marketTick(store: Store, embed: Embed, llm: Llm) {
   const investment = await ask(llm, store, "memory-investor", `Purpose: ${store.purpose}\nEvidence:\n${selected.text}\nCapital: ${state.capital}; steward credit: ${state.credit}; estimated relevance: ${selected.score}. Your strategy: ${investor.strategy}. Estimate the benefit and cost of evaluating this combination. Return JSON {"fund":boolean,"expected":number,"cost":number}; both numbers must be nonnegative and cost must be positive.`);
   if (store.purpose !== purpose) return true;
   const expected = Number(investment.expected), cost = Number(investment.cost);
-  if (typeof investment.fund !== "boolean" || !Number.isFinite(expected) || expected < 0 || !Number.isFinite(cost) || cost <= 0) throw new Error("Invalid investment decision");
+  if (typeof investment.fund !== "boolean" || !Number.isFinite(expected) || expected < 0 || !Number.isFinite(cost) || cost <= 0) throw new Error(`Invalid investment decision: ${JSON.stringify(investment).slice(0, 300)}`);
   if (!investment.fund || expected / cost < 0.05) {
     store.run("insert or ignore into market_declines(first, second, purpose) values(?, ?, ?)", selected.first, selected.second, store.purpose);
     return true;
   }
-  const result = await ask(llm, store, "memory-evaluator", `Purpose: ${store.purpose}\nCandidate evidence:\n${selected.text}\nNeighbouring candidates:\n${neighbours.map(n => n.text).join("\n---\n")}\nMandate: ${state.mandate}\nSteward strategy: ${state.strategy}\nEvaluator strategy: ${evaluator.strategy}\nEvaluate whether the candidate connects both pieces to the purpose, adds evidence beyond existing discoveries and survives counterarguments. If it identifies actionable work, provide a goal; otherwise use an empty goal. Return JSON {"hypothesis":string,"objection":string,"score":number from 0 to 1,"goal":string,"mandate":string,"strategy":string}.`);
+  // The evaluator sees the goals already taken on, so a combination that only restates one of them makes no new goal.
+  const goals = store.all<{ id: string; status: string; description: string }>("select id, status, description from goals where parent = 'G0' and status != 'dropped' order by created_at");
+  const result = await ask(llm, store, "memory-evaluator", `Purpose: ${store.purpose}\nCandidate evidence:\n${selected.text}\nNeighbouring candidates:\n${neighbours.map(n => n.text).join("\n---\n")}\nGoals already taken on:\n${goals.map(g => `- ${g.id} [${g.status}] ${g.description.slice(0, 300)}`).join("\n") || "none"}\nMandate: ${state.mandate}\nSteward strategy: ${state.strategy}\nEvaluator strategy: ${evaluator.strategy}\nEvaluate whether the candidate connects both pieces to the purpose, adds evidence beyond existing discoveries and survives counterarguments. If it identifies actionable work that none of the goals above already covers, provide a goal; otherwise use an empty goal. Return JSON {"hypothesis":string,"objection":string,"score":number from 0 to 1,"goal":string,"mandate":string,"strategy":string}.`);
   if (store.purpose !== purpose) return true;
   const hypothesis = typeof result.hypothesis === "string" ? result.hypothesis.slice(0, 1000) : "";
   const objection = typeof result.objection === "string" ? result.objection.slice(0, 1000) : "";
