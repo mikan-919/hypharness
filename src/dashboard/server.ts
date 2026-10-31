@@ -7,6 +7,10 @@ import { render, safePath } from "../tools.ts";
 import { openModel } from "../auth.ts";
 import { history, openChat, organize, reply, WINDOW } from "../chat.ts";
 import { centralization, type Store } from "../db.ts";
+import { openResident, setOrder } from "../resident.ts";
+import { localEmbed } from "../resident-memory.ts";
+import { runMemoryMarket } from "../resident-market.ts";
+import { runWorkerPool } from "../scheduler.ts";
 import type { Llm } from "../locomo.ts";
 import { DEFAULTS } from "../../scripts/rsi-defaults.ts";
 import { collect, diagnose, traceMarkdown, type Stats } from "../../scripts/rsi-traces.ts";
@@ -14,9 +18,10 @@ import * as runs from "./runs.ts";
 import index from "./index.html";
 
 // The harness UI: views every state under the data directory and starts, resumes, and stops runs.
-const { values: opts } = parseArgs({ options: { dir: { type: "string", default: ".hyph" }, port: { type: "string", default: "4321" } } });
+const { values: opts, positionals } = parseArgs({ allowPositionals: true, options: { dir: { type: "string", default: ".hyph" }, port: { type: "string", default: "4321" }, "allow-shell": { type: "boolean", default: false }, concurrency: { type: "string" } } });
 const root = opts.dir!;
 const port = Number(opts.port);
+const resident = positionals[0] === "serve";
 const open = new Map<string, Database>();
 const rel = (path: string) => relative(".", path) || ".";
 
@@ -103,13 +108,25 @@ const params = (req: Request) => new URL(req.url).searchParams;
 // the Host header blocks DNS rebinding, and Origin plus a JSON body blocks cross-site form posts.
 const hosts = [`127.0.0.1:${port}`, `localhost:${port}`];
 // The front chat (src/chat.ts) keeps its log and memory in <dir>/chat; the model is opened on the first message.
-const chatDir = rel(join(root, "chat"));
+const chatDir = rel(join(root, resident ? "main" : "chat"));
 let chatStore: Store | undefined, chatLlm: Llm | undefined, chatQueue: Promise<unknown> = Promise.resolve();
-const chatOpen = () => chatStore ??= (mkdirSync(chatDir, { recursive: true }), openChat(join(chatDir, "state.sqlite")));
+const embed = localEmbed();
+const chatOpen = () => chatStore ??= (mkdirSync(chatDir, { recursive: true }), resident ? openResident(join(chatDir, "state.sqlite")) : openChat(join(chatDir, "state.sqlite")));
 function chatView() {
   if (!chatStore && !existsSync(join(chatDir, "state.sqlite"))) return { dir: chatDir, window: WINDOW, messages: [], memory: { knowledge: 0, domains: 0, organizing: 0 } };
   const s = chatOpen();
-  return { dir: chatDir, window: WINDOW, messages: history(s), memory: s.get("select (select count(*) from knowledge) knowledge, (select count(*) from domains where status = 'active') domains, (select count(*) from tasks where kind = 'organize' and status in ('open', 'claimed')) organizing") };
+  return { dir: chatDir, window: WINDOW, resident, purpose: s.purpose, messages: history(s), memory: s.get("select (select count(*) from knowledge) knowledge, (select count(*) from domains where status = 'active') domains, (select count(*) from tasks where kind = 'organize' and status in ('open', 'claimed')) organizing") };
+}
+
+if (resident) {
+  const store = chatOpen(), concurrency = opts.concurrency ? Number(opts.concurrency) : 4;
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error("concurrency must be a positive integer");
+  store.setMeta("config", JSON.stringify({ ...store.config, maxConcurrency: concurrency, maxModelCalls: Infinity, allowShell: opts["allow-shell"] }));
+  mkdirSync(join(chatDir, "workspace"), { recursive: true });
+  chatLlm = await openModel();
+  const controller = new AbortController();
+  void runWorkerPool({ store, ...chatLlm, workspace: join(chatDir, "workspace"), contextDir: join(chatDir, "contexts"), log: console.log }, controller.signal).catch(e => console.error(`worker pool: ${e}`));
+  void runMemoryMarket(store, embed, chatLlm, controller.signal).catch(e => console.error(`memory market: ${e}`));
 }
 
 function guard(handler: (req: Request) => Response | Promise<Response>) {
@@ -300,12 +317,19 @@ const server = Bun.serve({
       POST: guard(async req => {
         const { text } = await req.json() as { text?: unknown };
         if (typeof text !== "string" || !text.trim() || text.length > 20_000) throw new Error("text must be 1-20000 characters");
-        const next = chatQueue.then(async () => reply(chatLlm ??= await openModel(), chatOpen(), text.trim()));
+        const next = chatQueue.then(async () => reply(chatLlm ??= await openModel(), chatOpen(), resident ? text : text.trim(), resident ? embed : undefined));
         // Stewards organize memory after the reply is sent; the next reply waits for them.
-        chatQueue = next.then(() => organize(chatLlm!, chatOpen(), chatDir)).catch(e => console.error(`chat organize: ${e}`));
+        chatQueue = next.then(() => resident ? undefined : organize(chatLlm!, chatOpen(), chatDir)).catch(e => console.error(`chat organize: ${e}`));
         return Response.json({ ...(await next), ...chatView() });
       }),
     },
+    "/api/order": { POST: guard(async req => {
+      if (!resident) throw new Error("The resident process is not running");
+      const { purpose } = await req.json() as { purpose?: unknown };
+      if (typeof purpose !== "string" || !purpose.trim() || purpose.length > 20_000) throw new Error("purpose must be 1-20000 characters");
+      setOrder(chatOpen(), purpose);
+      return Response.json({ purpose });
+    }) },
     "/api/output": guard(req => json(runs.output(params(req).get("dir") ?? ""))),
     // Output of runs from before this server started, kept in the session's run.log.
     "/api/runlog": guard(async req => {

@@ -3,6 +3,8 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { StringEnum, Type, type Message, type Static, type TSchema, type Tool } from "@earendil-works/pi-ai";
 import type { Agent, Goal, Store, Task } from "./db.ts";
 import { emit, MAX_DECLINES, requestVerification } from "./triggers.ts";
+import { fetchPublicPage } from "./web-fetch.ts";
+import { sandboxShell } from "./sandbox.ts";
 
 // messages is the caller's live context for the current episode; context_edit changes it in place.
 export type ToolContext = { store: Store; agent: Agent; task: Task; workspace: string; contextDir: string; episode: string; messages: Message[] };
@@ -32,6 +34,12 @@ function requireSteward(store: Store, id: string, agent: Agent) {
   if (domain.status !== "active") fail(`Domain ${id} is ${domain.status}`);
   if (domain.steward !== agent.id) fail(`Domain ${id} is stewarded by ${domain.steward}`);
   return domain;
+}
+
+function assignResidentDomain(store: Store, knowledge: string) {
+  if (store.meta("resident") !== "1") return;
+  const domain = store.get<{ id: string }>("select id from domains where status = 'active' order by id limit 1") ?? fail("No active memory domain");
+  store.run("insert into domain_knowledge(domain, knowledge) values(?, ?)", domain.id, knowledge);
 }
 
 function requireInvest(c: ToolContext, goal: string) {
@@ -181,6 +189,7 @@ export const tools: Record<string, Def<TSchema>> = {
     run(c, a) {
       const parent = requireGoal(c.store, a.parent);
       if (parent.status !== "open") fail(`Goal ${parent.id} is ${parent.status}`);
+      if (c.store.meta("resident") === "1") requireOwner(parent, c.agent);
       const id = c.store.id("G");
       c.store.run("insert into goals(id, parent, description, status, owner, created_at) values(?, ?, ?, 'open', ?, ?)", id, a.parent, a.description, c.agent.id, Date.now());
       emit(c.store, c.agent.id, "goal_created", { id, parent: a.parent });
@@ -362,6 +371,7 @@ export const tools: Record<string, Def<TSchema>> = {
         if (a.domain) requireSteward(c.store, a.domain, c.agent);
         c.store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, ?, ?, ?, 'hypothesis', ?, ?)", id, a.gist, a.summary, a.raw, a.source, c.agent.id, Date.now());
         if (a.domain) c.store.run("insert into domain_knowledge(domain, knowledge) values(?, ?)", a.domain, id);
+        else assignResidentDomain(c.store, id);
       });
       c.store.log(c.agent.id, "knowledge_added", { id, gist: a.gist });
       return `Recorded ${id} as hypothesis; use knowledge_verify to have it checked`;
@@ -551,6 +561,22 @@ export const tools: Record<string, Def<TSchema>> = {
   }),
 
   // --- External information ---
+  web_fetch: def({
+    description: "Fetch a public HTTP(S) page and record its text as unverified knowledge.",
+    parameters: Type.Object({ url: Str("Public HTTP(S) URL") }),
+    async run(c, a) {
+      const page = await fetchPublicPage(a.url);
+      const id = c.store.tx(() => {
+        const id = c.store.id("K");
+        c.store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, ?, ?, ?, 'hypothesis', ?, ?)",
+          id, page.url, page.text.slice(0, 500), page.text, page.url, c.agent.id, Date.now());
+        assignResidentDomain(c.store, id);
+        c.store.log(c.agent.id, "knowledge_added", { id, gist: page.url, from: "web_fetch" });
+        return id;
+      });
+      return `${id} ${page.url}\n${page.text}`.slice(0, c.store.config.toolOutputLimit);
+    },
+  }),
   web_search: def({
     description: "Search the web with Parallel. Returns ranked URLs with excerpts. Each result is recorded as unverified knowledge with the URL as source (one item per URL; its ID is shown), so check knowledge_search before searching again.",
     parameters: Type.Object({
@@ -589,6 +615,7 @@ export const tools: Record<string, Def<TSchema>> = {
         const id = c.store.id("K");
         c.store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, ?, ?, ?, 'hypothesis', ?, ?)",
           id, r.title, r.excerpt.slice(0, 500), r.excerpt, r.url, c.agent.id, Date.now());
+        assignResidentDomain(c.store, id);
         c.store.log(c.agent.id, "knowledge_added", { id, gist: r.title, from: "web_search" });
         return id;
       }));
@@ -644,11 +671,11 @@ export const tools: Record<string, Def<TSchema>> = {
     },
   }),
   shell: def({
-    description: "Run a shell command in the workspace (60 s timeout). Requires host permission (--allow-shell).",
+    description: "Run a shell command in an isolated workspace (60 s timeout). Requires host permission (--allow-shell) and bubblewrap.",
     parameters: Type.Object({ command: Type.String() }),
     async run(c, a) {
       if (!c.store.config.allowShell) fail("Shell is not permitted by the host; start the harness with --allow-shell to grant it");
-      const proc = Bun.spawn(["sh", "-c", a.command], { cwd: c.workspace, stdout: "pipe", stderr: "pipe", timeout: 60_000 });
+      const proc = Bun.spawn(sandboxShell(c.workspace, a.command), { stdout: "pipe", stderr: "pipe", timeout: 60_000 });
       const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
       return `exit ${code}\n${out}${err ? `\nstderr:\n${err}` : ""}`;
     },
@@ -659,6 +686,7 @@ export const tools: Record<string, Def<TSchema>> = {
 export function toolSchemas(): Tool[] {
   return Object.entries(tools)
     .filter(([name]) => name !== "web_search" || process.env.PARALLEL_API_KEY)
+    .filter(([name]) => name !== "shell" || Bun.which("bwrap"))
     .map(([name, t]) => ({ name, description: t.description, parameters: t.parameters }));
 }
 

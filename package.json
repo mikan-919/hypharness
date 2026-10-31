@@ -8,7 +8,7 @@
     "check": "tsrs --noEmit",
     "bench": "bun run src/index.ts bench",
     "rsi": "bun run scripts/rsi.ts",
-    "dashboard": "bun run src/dashboard/server.ts",
+    "dashboard": "bun run src/index.ts serve",
     "test": "bun test"
   },
   "devDependencies": {
@@ -21,6 +21,8 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^1.4.0",
+    "@huggingface/transformers": "4.3.2",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.64.0",

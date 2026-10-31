@@ -3,6 +3,7 @@ import type { createModels } from "@earendil-works/pi-ai/models";
 import type { Agent, Store, Task } from "./db.ts";
 import { mirror, toolSchemas, tools, type ToolContext } from "./tools.ts";
 import { emit, isMarket, withheldTools } from "./triggers.ts";
+import type { McpTools } from "./mcp.ts";
 
 export type Runtime = {
   store: Store;
@@ -13,6 +14,7 @@ export type Runtime = {
   contextDir: string;
   log?: (line: string) => void;
   modelTimeoutMs?: number;
+  mcp?: McpTools;
 };
 
 // A provider connection that never answers would otherwise hold the whole run; a timed-out call counts as a model error.
@@ -38,7 +40,7 @@ export function systemPrompt(store: Store, agent: Agent) {
   const c = store.config;
   return `You are agent "${agent.id}" in an autonomous multi-agent organization.
 Role: ${agent.role}
-Top-level purpose (fixed; you may reinterpret how to reach it, never what it is): ${store.purpose}
+Top-level purpose (only the user may change it): ${store.purpose}
 Constraints: ${store.meta("constraints") || "none"}
 Organization: ${c.organization} mode, ${Number.isFinite(c.maxAgents) ? `at most ${c.maxAgents}` : "no limit on the number of"} agents. Shell access: ${c.allowShell ? "granted" : "not granted"}.
 
@@ -80,11 +82,11 @@ async function execute(rt: Runtime, ctx: ToolContext, episode: string, call: Too
   let text: string, isError = false;
   try {
     const def = tools[call.name];
-    if (!def || !schemas.some(s => s.name === call.name)) throw new Error(`Unknown tool ${call.name}`);
+    if ((!def && !rt.mcp?.has(call.name)) || !schemas.some(s => s.name === call.name)) throw new Error(`Unknown tool ${call.name}`);
     const args = validateToolCall(schemas, call);
     // Database tools commit together with their op record; file and shell tools run outside the transaction.
     const value = store.tx(() => {
-      const v = def.run(ctx, args);
+      const v = def ? def.run(ctx, args) : rt.mcp!.call(call.name, args, ctx.agent.id);
       if (!(v instanceof Promise)) store.run("insert into ops(episode, call_id, result, is_error) values(?, ?, ?, 0)", episode, call.id, v);
       return v;
     });
@@ -112,7 +114,7 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
   const ctx: ToolContext = { store, agent, task, workspace: rt.workspace, contextDir: rt.contextDir, episode: id, messages };
   const system = systemPrompt(store, agent);
   const withheld = withheldTools(store, agent);
-  const schemas = toolSchemas().filter(s => !withheld.has(s.name));
+  const schemas = [...toolSchemas(), ...(rt.mcp?.schemas() ?? [])].filter(s => !withheld.has(s.name));
   const { maxSteps } = store.config;
   let nudged = false;
 
@@ -165,7 +167,12 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
     const u = reply.usage;
     store.run("insert into usage(agent, task, input, output, cache_read, cache_write, prompt_chars, ms, at) values(?, ?, ?, ?, ?, ?, ?, ?, ?)",
       agent.id, task.id, u.input, u.output, u.cacheRead, u.cacheWrite, system.length + JSON.stringify(messages).length, Math.round(performance.now() - started), Date.now());
-    if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(`Model error: ${reply.errorMessage}`);
+    if (reply.stopReason === "error" || reply.stopReason === "aborted") {
+      if (store.meta("resident") === "1" && /usage limit|quota|rate.limit/i.test(reply.errorMessage ?? "")) {
+        store.setMeta("model_calls", String(Math.max(0, Number(store.meta("model_calls")) - 1)));
+      }
+      throw new Error(`Model error: ${reply.errorMessage}`);
+    }
     messages.push(reply);
     save();
   }
