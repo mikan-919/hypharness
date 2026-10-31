@@ -26,10 +26,18 @@ export default function Home({ user, runnerConnected }: PageProps<'Home'>) {
 }
 
 function RunnerSetup({ connected }: { connected: boolean }) {
-  const [token, setToken] = useState('')
+  const [code, setCode] = useState('')
+  const [notice, setNotice] = useState('')
 
-  const issue = async () => {
-    setToken((await post<{ token: string }>('/runner/token')).token)
+  const approve = async (e: FormEvent) => {
+    e.preventDefault()
+    try {
+      await post('/runner/pairings/approve', { code })
+      setCode('')
+      setNotice('承認しました。ランナーが接続するまで数秒かかります。')
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e))
+    }
   }
 
   return (
@@ -37,17 +45,21 @@ function RunnerSetup({ connected }: { connected: boolean }) {
       <p>
         {connected
           ? 'ランナーが接続中です。'
-          : 'ランナーが未接続のため、エージェントは応答できません。'}
+          : 'ランナーが未接続のため、エージェントは応答できません。手元で bun run runner を実行し、表示されたコードを入力してください。'}
       </p>
-      {token ? (
-        <pre className='overflow-x-auto rounded-lg bg-muted p-3'>
-          {`bun run runner login\nbun run runner setup ${location.origin} ${token}\nbun run runner`}
-        </pre>
-      ) : (
-        <Button variant='outline' onClick={issue}>
-          ランナー用トークンを発行
+      <form className='flex gap-2' onSubmit={approve}>
+        <Input
+          aria-label='ランナーのコード'
+          placeholder='ランナーのコード'
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          required
+        />
+        <Button type='submit' variant='outline'>
+          承認
         </Button>
-      )}
+      </form>
+      {notice && <p>{notice}</p>}
     </section>
   )
 }

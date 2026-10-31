@@ -18,49 +18,86 @@ const CONFIG = join(DIR, 'config.json')
 const AUTH = join(DIR, 'auth.json')
 const AGENTS = join(DIR, 'agents')
 const MODEL = 'gpt-6.1-sol'
+const DEFAULT_URL = 'http://localhost:5173'
+const PAIRING_POLL_MS = 3000
 const RECONNECT_MS = 5000
 
 type Config = { url: string; token: string }
 type Request = { id: string; agent: string; message: string }
 
-const [command, ...args] = process.argv.slice(2)
+// 使い方: bun run runner [URL] / bun run runner login
+// 初回は ChatGPT へのサインインと、Worker とのペアリングをこのコマンドの中で行う
+const [arg] = process.argv.slice(2)
+await mkdir(DIR, { recursive: true, mode: 0o700 })
+if (arg === 'login') await login()
+else await start(arg)
 
-if (command === 'login') {
+async function login() {
   // pi-ai の CLI はカレントディレクトリの auth.json にログイン情報を書く
-  await mkdir(DIR, { recursive: true, mode: 0o700 })
-  const login = Bun.spawn(
+  const child = Bun.spawn(
     ['bunx', '@earendil-works/pi-ai', 'login', 'openai'],
     {
       cwd: DIR,
       stdio: ['inherit', 'inherit', 'inherit'],
     },
   )
-  process.exit(await login.exited)
-} else if (command === 'setup') {
-  const [url, token] = args
-  if (!url || !token) {
-    console.error('使い方: bun run runner setup <URL> <トークン>')
-    process.exit(1)
-  }
-  await mkdir(DIR, { recursive: true, mode: 0o700 })
-  await writeJson(CONFIG, { url, token } satisfies Config)
-  console.log(`${CONFIG} に保存しました`)
-} else if (command === undefined) {
-  await start()
-} else {
-  console.error('使い方: bun run runner [login | setup <URL> <トークン>]')
-  process.exit(1)
+  if ((await child.exited) !== 0) throw new Error('サインインに失敗しました')
 }
 
-async function start() {
-  const config: Config = await Bun.file(CONFIG).json()
+// Worker にペアリングを申し込み、利用者がホーム画面でコードを承認したらトークンを受け取って保存する
+async function pair(url: string): Promise<Config> {
+  const response = await fetch(`${url}/runner/pairings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  })
+  if (!response.ok) {
+    throw new Error(
+      `ペアリングを始められませんでした (${response.status}): ${await response.text()}`,
+    )
+  }
+  const { id, code } = (await response.json()) as { id: string; code: string }
+  console.log(
+    `${url} にログインし、ホーム画面で次のコードを入力してください: ${code}`,
+  )
+  while (true) {
+    await Bun.sleep(PAIRING_POLL_MS)
+    const claim = await fetch(`${url}/runner/pairings/claim`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    })
+    const result = (await claim.json()) as {
+      token?: string
+      name?: string
+      error?: string
+    }
+    if (result.token) {
+      // 意図しないアカウントに紐付いていないか、利用者が確かめられるよう名前を出す
+      console.log(`${result.name} のアカウントとペアリングしました`)
+      const config = { url, token: result.token }
+      await writeJson(CONFIG, config)
+      return config
+    }
+    if (!claim.ok) throw new Error(result.error ?? `${claim.status}`)
+  }
+}
+
+async function start(url: string | undefined) {
   const models = createModels({ credentials: fileStore(AUTH) })
   models.setProvider(openaiProvider())
-  if (!(await models.getAuth('openai'))) {
-    throw new Error('bun run runner login で ChatGPT にサインインしてください')
-  }
+  if (!(await models.getAuth('openai'))) await login()
   const model = models.getModel('openai', MODEL)
   if (!model) throw new Error(`未対応のモデルです: ${MODEL}`)
+
+  const saved: Config | undefined = (await Bun.file(CONFIG).exists())
+    ? await Bun.file(CONFIG).json()
+    : undefined
+  // 保存済みと別の URL を指定したときは、そちらとペアリングし直す
+  const config =
+    saved && (url === undefined || url === saved.url)
+      ? saved
+      : await pair(url ?? DEFAULT_URL)
 
   await mkdir(AGENTS, { recursive: true, mode: 0o700 })
   const agents = new Map<string, ReturnType<typeof openAgent>>()

@@ -9,6 +9,9 @@ import {
 } from '@simplewebauthn/server'
 
 const CHALLENGE_TTL = 5 * 60_000
+const PAIRING_TTL = 10 * 60_000
+// 読み違えやすい 0 O 1 I を除いた32文字。8文字で 40 ビットになる
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const SESSION_TTL = 30 * 24 * 60 * 60_000
 
 export type User = { id: string; name: string }
@@ -49,6 +52,12 @@ export class Accounts extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS runner_tokens (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL UNIQUE REFERENCES users(id)
+      );
+      CREATE TABLE IF NOT EXISTS runner_pairings (
+        id TEXT PRIMARY KEY,
+        code TEXT NOT NULL UNIQUE,
+        user_id TEXT REFERENCES users(id),
+        expires INTEGER NOT NULL
       );
     `)
   }
@@ -174,8 +183,63 @@ export class Accounts extends DurableObject<Env> {
     return row ?? null
   }
 
+  // ランナーのペアリング: ランナーが申し込んでコードを表示し、利用者がログインした画面でコードを承認する。
+  // id はランナーだけが知る値で、承認後にこれと引き換えにトークンを受け取る
+  async startPairing() {
+    this.ctx.storage.sql.exec(
+      'DELETE FROM runner_pairings WHERE expires <= ?',
+      Date.now(),
+    )
+    const id = crypto.randomUUID()
+    const code = [...crypto.getRandomValues(new Uint8Array(8))]
+      .map((b) => CODE_CHARS[b % CODE_CHARS.length])
+      .join('')
+    this.ctx.storage.sql.exec(
+      'INSERT INTO runner_pairings (id, code, expires) VALUES (?, ?, ?)',
+      await hash(id),
+      code,
+      Date.now() + PAIRING_TTL,
+    )
+    return { id, code }
+  }
+
+  approvePairing(code: string, userId: string) {
+    const { rowsWritten } = this.ctx.storage.sql.exec(
+      'UPDATE runner_pairings SET user_id = ? WHERE code = ? AND user_id IS NULL AND expires > ?',
+      userId,
+      code.toUpperCase(),
+      Date.now(),
+    )
+    return rowsWritten > 0
+  }
+
+  async claimPairing(
+    id: string,
+  ): Promise<
+    { status: 'pending' } | { token: string; name: string } | { error: string }
+  > {
+    const pairing = this.ctx.storage.sql
+      .exec<{ user_id: string | null; expires: number }>(
+        'SELECT user_id, expires FROM runner_pairings WHERE id = ?',
+        await hash(id),
+      )
+      .toArray()[0]
+    if (!pairing || pairing.expires <= Date.now()) {
+      return { error: 'ペアリングの有効期限が切れました' }
+    }
+    if (!pairing.user_id) return { status: 'pending' }
+    this.ctx.storage.sql.exec(
+      'DELETE FROM runner_pairings WHERE id = ?',
+      await hash(id),
+    )
+    const user = this.ctx.storage.sql
+      .exec<User>('SELECT id, name FROM users WHERE id = ?', pairing.user_id)
+      .one()
+    return { token: await this.issueRunnerToken(user.id), name: user.name }
+  }
+
   // ランナー用のトークンはアカウントごとに1つ。発行し直すと古いトークンは使えなくなる
-  async issueRunnerToken(userId: string) {
+  private async issueRunnerToken(userId: string) {
     const token = crypto.randomUUID()
     this.ctx.storage.sql.exec(
       'INSERT INTO runner_tokens (id, user_id) VALUES (?, ?) ON CONFLICT (user_id) DO UPDATE SET id = excluded.id',

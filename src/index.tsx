@@ -106,9 +106,27 @@ const routes = app
     deleteCookie(c, 'session', { path: '/' })
     return c.json({ ok: true })
   })
-  .post('/runner/token', auth, async (c) =>
-    c.json({ token: await accounts(c.env).issueRunnerToken(c.var.user.id) }),
+  // ランナーのペアリング。申し込みと受け取りはログインしていないランナーから届く
+  .post('/runner/pairings', async (c) =>
+    c.json(await accounts(c.env).startPairing()),
   )
+  .post('/runner/pairings/claim', async (c) => {
+    const { id } = await c.req.json<{ id?: unknown }>()
+    if (typeof id !== 'string') {
+      return c.json({ error: 'id に文字列を指定してください' }, 400)
+    }
+    const result = await accounts(c.env).claimPairing(id)
+    return c.json(result, 'error' in result ? 410 : 200)
+  })
+  .post('/runner/pairings/approve', auth, async (c) => {
+    const { code } = await c.req.json<{ code?: unknown }>()
+    if (typeof code !== 'string') {
+      return c.json({ error: 'code に文字列を指定してください' }, 400)
+    }
+    return (await accounts(c.env).approvePairing(code.trim(), c.var.user.id))
+      ? c.json({ ok: true })
+      : c.json({ error: 'コードが見つからないか、有効期限が切れています' }, 400)
+  })
   // 手元のランナーが WebSocket で接続する。Cookie ではなくランナー用トークンで認証する
   .get('/runner/socket', async (c) => {
     const token = c.req.header('Authorization')?.replace(/^Bearer /, '')
