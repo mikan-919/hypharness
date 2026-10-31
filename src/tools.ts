@@ -77,6 +77,25 @@ const CJK = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/;
 export const searchTerms = (query: string) => query.toLowerCase().replace(/[、。，．！？!?,.「」『』（）()"']/g, " ").split(/\s+/).filter(Boolean)
   .flatMap(w => CJK.test(w) && w.length > 2 ? Array.from({ length: w.length - 1 }, (_, i) => w.slice(i, i + 2)) : [w]);
 
+// One URL per document: arXiv versions and mirrors become the abstract page; other URLs lose the fragment, "www." and a trailing slash.
+// ponytail: arXiv is the only family of mirrors recognized; add patterns as other duplicated sources show up
+const ARXIV = /^https?:\/\/(?:www\.|export\.)?(?:arxiv\.org|ar5iv\.labs\.arxiv\.org|ar5iv\.org|alphaxiv\.org|huggingface\.co)\/(?:abs|pdf|html|overview|papers)\/(\d{4}\.\d{4,5})/i;
+export function canonicalUrl(url: string) {
+  const arxiv = url.match(ARXIV);
+  if (arxiv) return `https://arxiv.org/abs/${arxiv[1]}`;
+  if (!URL.canParse(url)) return url;
+  const u = new URL(url);
+  u.hash = "";
+  u.hostname = u.hostname.replace(/^www\./, "");
+  return u.href.replace(/\/$/, "");
+}
+
+// A page already recorded: the same document, or the same title when it is long enough to name one work
+// (a proceedings copy of an arXiv paper). A merged item resolves to the item it was merged into.
+export function knownPage(store: Store, url: string, title: string) {
+  return store.get<{ id: string }>("select coalesce(merged_into, id) id from knowledge where source = ?1 or (length(?2) >= 20 and lower(gist) = lower(?2)) order by created_at limit 1", canonicalUrl(url), title)?.id;
+}
+
 const line = (t: Task) => `${t.id} [${t.kind}/${t.status}] goal=${t.goal}${t.assignee ? ` assignee=${t.assignee}` : ""}${t.claimed_by ? ` by=${t.claimed_by}` : ""}: ${t.description.slice(0, 160)}`;
 
 export const tools: Record<string, Def<TSchema>> = {
@@ -383,7 +402,7 @@ export const tools: Record<string, Def<TSchema>> = {
     run(c, a) {
       const words = searchTerms(a.query);
       const rows = c.store.all<{ id: string; gist: string; summary: string; status: string }>(
-        "select k.* from knowledge k where (?1 is null or k.id in (select knowledge from domain_knowledge where domain = ?1)) and (?2 is null or k.status = ?2)",
+        "select k.* from knowledge k where (?1 is null or k.id in (select knowledge from domain_knowledge where domain = ?1)) and (?2 is null or k.status = ?2) and k.status != 'merged'",
         a.domain ?? null, a.status ?? null);
       // A match in the gist counts double: items that share a summary (sentences of one turn) then rank by their own words,
       // and only the best of them is listed, so one long turn cannot fill the results.
@@ -401,7 +420,7 @@ export const tools: Record<string, Def<TSchema>> = {
     run(c, a) {
       const k = c.store.get<Record<string, string>>("select * from knowledge where id = ?", a.id) ?? fail(`Unknown knowledge ${a.id}`);
       const domains = c.store.all<{ domain: string }>("select domain from domain_knowledge where knowledge = ?", a.id).map(d => d.domain);
-      return `${k.id} [${k.status}${k.verified_by ? ` by ${k.verified_by}` : ""}] source=${k.source} domains=${domains.join(",") || "-"}\ngist: ${k.gist}\nsummary: ${k.summary}${a.level === "raw" ? `\nraw: ${k.raw}` : ""}`;
+      return `${k.merged_into ? `${k.id} was merged into ${k.merged_into}; use that ID\n` : ""}${k.id} [${k.status}${k.verified_by ? ` by ${k.verified_by}` : ""}] source=${k.source} domains=${domains.join(",") || "-"}\ngist: ${k.gist}\nsummary: ${k.summary}${a.level === "raw" ? `\nraw: ${k.raw}` : ""}`;
     },
   }),
   knowledge_verify: def({
@@ -409,10 +428,34 @@ export const tools: Record<string, Def<TSchema>> = {
     parameters: Type.Object({ id: Str("Knowledge ID") }),
     run(c, a) {
       const k = c.store.get<Record<string, string>>("select * from knowledge where id = ?", a.id) ?? fail(`Unknown knowledge ${a.id}`);
+      if (k.merged_into) fail(`${a.id} was merged into ${k.merged_into}; verify that instead`);
       if (k.status !== "hypothesis") fail(`${a.id} is already ${k.status}`);
       if (c.store.get("select id from tasks where target = ? and status in ('open', 'claimed')", a.id)) fail(`Verification of ${a.id} is already pending`);
       const id = requestVerification(c.store, c.task.goal, k.author!, a.id, `Verify knowledge ${a.id} against its source.\ngist: ${k.gist}\nsummary: ${k.summary}\nsource: ${k.source}\nCheck the raw evidence (knowledge_get level=raw) and the source itself.`);
       return `Created verification task ${id}`;
+    },
+  }),
+  knowledge_merge: def({
+    description: "Fold duplicates into one knowledge item: items that record the same document (another version, mirror or copy) or the same claim. Each duplicate points to the kept item from then on, and its domain links move there.",
+    parameters: Type.Object({ keep: Str("Knowledge ID to keep"), duplicates: Type.Array(Type.String(), { minItems: 1, maxItems: 20, description: "Knowledge IDs that duplicate it" }), reason: Str("Why they are the same") }),
+    run(c, a) {
+      const get = (id: string) => c.store.get<{ id: string; status: string; merged_into: string | null }>("select id, status, merged_into from knowledge where id = ?", id) ?? fail(`Unknown knowledge ${id}`);
+      const keep = get(a.keep);
+      if (keep.merged_into) fail(`${keep.id} was merged into ${keep.merged_into}; keep that instead`);
+      return c.store.tx(() => {
+        for (const id of new Set(a.duplicates)) {
+          const d = get(id);
+          if (d.id === keep.id) fail("An item cannot be its own duplicate");
+          if (d.merged_into) fail(`${d.id} was already merged into ${d.merged_into}`);
+          // Merging must not lose a verification: the kept item has to be at least as established.
+          if (d.status === "verified" && keep.status !== "verified") fail(`${d.id} is verified and ${keep.id} is not; keep ${d.id} instead`);
+          c.store.run("update knowledge set status = 'merged', merged_into = ? where id = ?", keep.id, d.id);
+          c.store.run("insert or ignore into domain_knowledge(domain, knowledge) select domain, ? from domain_knowledge where knowledge = ?", keep.id, d.id);
+          c.store.run("delete from domain_knowledge where knowledge = ?", d.id);
+        }
+        c.store.log(c.agent.id, "knowledge_merged", { keep: keep.id, duplicates: a.duplicates, reason: a.reason });
+        return `Merged ${a.duplicates.join(", ")} into ${keep.id}`;
+      });
     },
   }),
 
@@ -630,15 +673,22 @@ export const tools: Record<string, Def<TSchema>> = {
     parameters: Type.Object({ url: Str("Public HTTP(S) URL") }),
     async run(c, a) {
       const page = await (c.fetchPage ?? fetchPublicPage)(a.url);
+      const source = canonicalUrl(page.url);
+      // A page recorded before (often as a search excerpt) keeps its ID; the fetched text replaces shorter unverified evidence.
+      const known = knownPage(c.store, page.url, page.url);
+      if (known) {
+        c.store.run("update knowledge set raw = ?1, summary = ?2 where id = ?3 and status = 'hypothesis' and length(raw) < length(?1)", page.text, page.text.slice(0, 500), known);
+        return `${known} ${page.url} (already recorded)\n${page.text}`.slice(0, c.store.config.toolOutputLimit);
+      }
       if (c.store.meta("resident") === "1") {
         const id = c.store.id("K"), embed = c.embed ?? fail("Resident knowledge requires an embedder");
-        await recordToolKnowledge(c.store, embed, { id, gist: page.url, summary: page.text.slice(0, 500), raw: page.text, source: page.url, author: c.agent.id });
+        await recordToolKnowledge(c.store, embed, { id, gist: page.url, summary: page.text.slice(0, 500), raw: page.text, source, author: c.agent.id });
         return `${id} ${page.url}\n${page.text}`.slice(0, c.store.config.toolOutputLimit);
       }
       const id = c.store.tx(() => {
         const id = c.store.id("K");
         c.store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, ?, ?, ?, 'hypothesis', ?, ?)",
-          id, page.url, page.text.slice(0, 500), page.text, page.url, c.agent.id, Date.now());
+          id, page.url, page.text.slice(0, 500), page.text, source, c.agent.id, Date.now());
         c.store.log(c.agent.id, "knowledge_added", { id, gist: page.url, from: "web_fetch" });
         return id;
       });
@@ -646,7 +696,7 @@ export const tools: Record<string, Def<TSchema>> = {
     },
   }),
   web_search: def({
-    description: "Search the web with Parallel. Returns ranked URLs with excerpts. Each result is recorded as unverified knowledge with the URL as source (one item per URL; its ID is shown), so check knowledge_search before searching again.",
+    description: "Search the web with Parallel. Returns ranked URLs with excerpts. Each result is recorded as unverified knowledge with the URL as source (one item per document, so versions and mirrors of one paper share an ID; its ID is shown), so check knowledge_search before searching again.",
     parameters: Type.Object({
       objective: Str("Self-contained statement of what you are looking for and why"),
       queries: Type.Array(Type.String(), { minItems: 1, maxItems: 5, description: "2-3 keyword queries of 3-6 words each" }),
@@ -681,20 +731,18 @@ export const tools: Record<string, Def<TSchema>> = {
         const embed = c.embed ?? fail("Resident knowledge requires an embedder");
         const ids: string[] = [];
         for (const r of found) {
-          const known = c.store.get<{ id: string }>("select id from knowledge where source = ?", r.url);
-          let id = known?.id ?? c.store.id("K");
-          if (!known) id = await recordToolKnowledge(c.store, embed, { id, gist: r.title, summary: r.excerpt.slice(0, 500), raw: r.excerpt, source: r.url, author: c.agent.id, dedupeSource: true });
-          ids.push(id);
+          const known = knownPage(c.store, r.url, r.title);
+          ids.push(known ?? await recordToolKnowledge(c.store, embed, { id: c.store.id("K"), gist: r.title, summary: r.excerpt.slice(0, 500), raw: r.excerpt, source: canonicalUrl(r.url), author: c.agent.id, dedupeSource: true }));
         }
         const results = found.map((r, i) => `[${i + 1}] ${ids[i]} ${r.title}${r.publish_date ? ` (${r.publish_date})` : ""}\n${r.url}\n${r.excerpt}`);
         return [...warnings, ...results].join("\n\n") || "No results";
       }
       const ids = c.store.tx(() => found.map(r => {
-        const known = c.store.get<{ id: string }>("select id from knowledge where source = ?", r.url);
-        if (known) return known.id;
+        const known = knownPage(c.store, r.url, r.title);
+        if (known) return known;
         const id = c.store.id("K");
         c.store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, ?, ?, ?, 'hypothesis', ?, ?)",
-          id, r.title, r.excerpt.slice(0, 500), r.excerpt, r.url, c.agent.id, Date.now());
+          id, r.title, r.excerpt.slice(0, 500), r.excerpt, canonicalUrl(r.url), c.agent.id, Date.now());
         c.store.log(c.agent.id, "knowledge_added", { id, gist: r.title, from: "web_search" });
         return id;
       }));

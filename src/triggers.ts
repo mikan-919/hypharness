@@ -110,7 +110,7 @@ function organize(store: Store, author: string, domain: string, why: string) {
     goal: "G0", kind: "organize", author, assignee: d.steward, target: domain, budget: ORGANIZE_BUDGET,
     description: `${why}\nYou steward ${d.id} (${d.name}: ${d.description}), ${n(d.id)} knowledge items. Recent ones:\n${sample.map(s => `- ${s.gist}`).join("\n")}\n`
       + `Other domains: ${others.map(o => `${o.id} ${o.name} (n=${n(o.id)}, steward ${o.steward})`).join("; ") || "none"}.\n`
-      + `Reorganize only if it makes knowledge easier to find: domain_split by topic, domain_merge domains you steward, or domain_request another steward's domain to merge it. Then task_finish with what you changed, or why nothing needed changing. Budget: ${ORGANIZE_BUDGET} model calls.`,
+      + `Reorganize only if it makes knowledge easier to find: knowledge_merge items that record the same document or claim, domain_split by topic, domain_merge domains you steward, or domain_request another steward's domain to merge it. Then task_finish with what you changed, or why nothing needed changing. Budget: ${ORGANIZE_BUDGET} model calls.`,
   });
 }
 

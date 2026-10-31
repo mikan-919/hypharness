@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { defaultConfig, Store, type Config } from "./db.ts";
 import { runScheduler, steer } from "./scheduler.ts";
-import { safePath, toolSchemas, tools, type ToolContext } from "./tools.ts";
+import { canonicalUrl, safePath, toolSchemas, tools, type ToolContext } from "./tools.ts";
 import type { Runtime } from "./agent.ts";
 
 // A scripted agent: reads its opening message and the tools it already used, and returns the next tool call.
@@ -175,6 +175,52 @@ test("web_search sends the query to Parallel and returns ranked excerpts", async
     globalThis.fetch = original;
     if (key === undefined) delete process.env.PARALLEL_API_KEY; else process.env.PARALLEL_API_KEY = key;
   }
+});
+
+test("versions and copies of one paper become one knowledge item, and knowledge_merge folds the ones recorded before", async () => {
+  const { store, rt } = setup({});
+  const c = { store, agent: store.agent("lead")!, task: { id: "T-1", goal: "G0" }, workspace: rt.workspace, contextDir: rt.contextDir, episode: "e", messages: [] } as unknown as ToolContext;
+  expect(canonicalUrl("https://arxiv.org/html/2401.10020v2#S3")).toBe("https://arxiv.org/abs/2401.10020");
+  expect(canonicalUrl("https://ar5iv.labs.arxiv.org/html/2504.15228")).toBe("https://arxiv.org/abs/2504.15228");
+  expect(canonicalUrl("https://www.Example.org/a/?q=1#top")).toBe("https://example.org/a/?q=1");
+  const original = globalThis.fetch, key = process.env.PARALLEL_API_KEY;
+  try {
+    process.env.PARALLEL_API_KEY = "test-key";
+    const result = (url: string, title: string) => ({ url, title, publish_date: null, excerpts: [title] });
+    globalThis.fetch = (async () => Response.json({ results: [
+      result("https://arxiv.org/abs/2401.10020", "Self-Rewarding Language Models"),
+      result("https://arxiv.org/pdf/2401.10020v2", "[2401.10020] Self-Rewarding LMs"),
+      result("https://proceedings.mlr.press/v235/yuan24d.html", "Self-Rewarding Language Models"),
+    ] })) as unknown as typeof fetch;
+    const out = await tools.web_search!.run(c, { objective: "x", queries: ["self rewarding"] });
+    const ids = [...out.matchAll(/^\[\d\] (K-\S+)/gm)].map(m => m[1]);
+    expect(new Set(ids).size).toBe(1);
+    expect(store.all("select source from knowledge")).toEqual([{ source: "https://arxiv.org/abs/2401.10020" }]);
+    // A fetched page replaces the shorter search excerpt instead of adding an item.
+    const page = { ...c, fetchPage: async () => ({ url: "https://arxiv.org/html/2401.10020v3", text: "full text of the paper, longer than the excerpt" }) } as ToolContext;
+    expect(await tools.web_fetch!.run(page, { url: "https://arxiv.org/html/2401.10020v3" })).toStartWith(`${ids[0]} `);
+    expect(store.get<{ n: number; raw: string }>("select count(*) n, raw from knowledge")).toEqual({ n: 1, raw: "full text of the paper, longer than the excerpt" });
+  } finally {
+    globalThis.fetch = original;
+    if (key === undefined) delete process.env.PARALLEL_API_KEY; else process.env.PARALLEL_API_KEY = key;
+  }
+
+  // Duplicates recorded before (claims, or rows from older runs) are folded by an agent.
+  const add = (gist: string) => tools.knowledge_add!.run(c, { gist, summary: gist, raw: gist, source: "inference" }) as string;
+  const [a, b] = [add("STaR bootstraps reasoning"), add("STaR bootstraps reasoning from its own rationales")].map(r => r.match(/K-\S+/)![0]);
+  store.run("insert into domains(id, name, description, steward, status) values('D1', 'papers', '', 'lead', 'active')");
+  store.run("insert into domain_knowledge(domain, knowledge) values('D1', ?)", b);
+  expect(() => tools.knowledge_merge!.run(c, { keep: a, duplicates: [a], reason: "x" })).toThrow("its own duplicate");
+  tools.knowledge_merge!.run(c, { keep: a, duplicates: [b], reason: "same claim" });
+  expect(store.get("select status, merged_into from knowledge where id = ?", b)).toEqual({ status: "merged", merged_into: a });
+  expect(store.all("select knowledge from domain_knowledge")).toEqual([{ knowledge: a }]);
+  expect(tools.knowledge_search!.run(c, { query: "STaR" })).not.toContain(b);
+  expect(tools.knowledge_get!.run(c, { id: b, level: "summary" })).toStartWith(`${b} was merged into ${a}`);
+  expect(() => tools.knowledge_verify!.run(c, { id: b })).toThrow(`merged into ${a}`);
+  // A verified item is never folded into an unverified one.
+  store.run("update knowledge set status = 'verified' where id = ?", a);
+  const d = add("STaR again").match(/K-\S+/)![0];
+  expect(() => tools.knowledge_merge!.run(c, { keep: d, duplicates: [a], reason: "x" })).toThrow("keep");
 });
 
 test("file_search finds lines across workspace files and stays inside the workspace", async () => {

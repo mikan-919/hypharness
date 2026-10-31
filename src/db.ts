@@ -32,7 +32,7 @@ create table if not exists tasks(id text primary key, goal text not null, kind t
   author text not null, assignee text, exclude text, target text, claimed_by text, lease_until int, result text, feedback text,
   verified_by text, rev int not null default 0, created_at int not null);
 create table if not exists knowledge(id text primary key, gist text not null, summary text not null, raw text not null, source text not null,
-  status text not null, author text not null, verified_by text, created_at int not null);
+  status text not null, author text not null, verified_by text, created_at int not null, merged_into text);
 create table if not exists domains(id text primary key, name text not null, description text not null, steward text not null, parent text,
   status text not null, rev int not null default 0);
 create table if not exists domain_knowledge(domain text not null, knowledge text not null, primary key(domain, knowledge));
@@ -89,6 +89,7 @@ export class Store {
     this.db.exec(schema);
     // Added after the first release; older stores get the column here.
     if (!this.all<{ name: string }>("pragma table_info(tasks)").some(c => c.name === "budget")) this.db.run("alter table tasks add column budget int");
+    if (!this.all<{ name: string }>("pragma table_info(knowledge)").some(c => c.name === "merged_into")) this.db.run("alter table knowledge add column merged_into text");
   }
 
   tx<T>(fn: () => T): T { return this.db.transaction(fn)(); }
