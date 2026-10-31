@@ -26,6 +26,12 @@ export type Idea = {
   score: number | null
   cycle: number
 }
+export type Message = {
+  id: number
+  from_agent: string
+  to_agent: string
+  content: string
+}
 
 // 経済の状態。資本や価値をエージェントが書き換えられないよう、エージェントの SQL ツールからは触れない
 export function openEconomy(path: string) {
@@ -62,10 +68,10 @@ export function openEconomy(path: string) {
       reason TEXT,
       cycle INTEGER NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS tasks (
+    CREATE TABLE IF NOT EXISTS pool_tasks (
       id INTEGER PRIMARY KEY,
       company_id INTEGER NOT NULL REFERENCES companies(id),
-      worker TEXT NOT NULL,
+      worker TEXT,
       body TEXT NOT NULL,
       result TEXT,
       cycle INTEGER NOT NULL
@@ -83,12 +89,22 @@ export function openEconomy(path: string) {
       target INTEGER,
       philosophy TEXT
     );
-    CREATE TABLE IF NOT EXISTS meetings (
+    CREATE TABLE IF NOT EXISTS messages (
       id INTEGER PRIMARY KEY,
-      company_id INTEGER NOT NULL,
-      cycle INTEGER NOT NULL,
-      transcript TEXT NOT NULL
+      from_agent TEXT NOT NULL,
+      to_agent TEXT NOT NULL,
+      content TEXT NOT NULL,
+      read INTEGER NOT NULL DEFAULT 0
     );`)
+  // 採点済みのアイデアを精算に1回だけ使うための印。古い DB には列を足す
+  if (
+    !db
+      .query<{ name: string }, []>('PRAGMA table_info(ideas)')
+      .all()
+      .some((c) => c.name === 'settled')
+  ) {
+    db.run('ALTER TABLE ideas ADD COLUMN settled INTEGER NOT NULL DEFAULT 0')
+  }
 
   const meta = (key: string) =>
     db
@@ -102,6 +118,7 @@ export function openEconomy(path: string) {
         'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
       )
       .run(key, value)
+  const cycle = () => Number(meta('cycle') ?? 0)
   const companies = () =>
     db
       .query<Company, []>(
@@ -127,6 +144,20 @@ export function openEconomy(path: string) {
         'SELECT company_id FROM workers WHERE name = ?',
       )
       .get(name)?.company_id ?? null
+  // worker が引き受けて、まだ終えていない仕事
+  const openTask = (worker: string) =>
+    db
+      .query<{ id: number; body: string }, [string]>(
+        'SELECT id, body FROM pool_tasks WHERE worker = ? AND result IS NULL ORDER BY id LIMIT 1',
+      )
+      .get(worker)
+  // 会社のタスクプールにある、誰も引き受けていない仕事
+  const pool = (companyId: number) =>
+    db
+      .query<{ id: number; body: string }, [number]>(
+        'SELECT id, body FROM pool_tasks WHERE company_id = ? AND worker IS NULL AND result IS NULL ORDER BY id',
+      )
+      .all(companyId)
 
   const found = (name: string, capital: number, philosophy = '') =>
     db
@@ -142,14 +173,43 @@ export function openEconomy(path: string) {
     )
   }
 
+  // 資本で賄える数に worker を合わせる。採用は所属のない worker から優先し、記憶を引き継ぐ
+  const staff = (companyId: number) => {
+    const target = Math.min(
+      MAX_WORKERS,
+      Math.max(0, Math.floor((company(companyId)?.capital ?? 0) / WORKER_COST)),
+    )
+    const current = workersOf(companyId)
+    for (const name of current.slice(target)) {
+      db.query('UPDATE workers SET company_id = NULL WHERE name = ?').run(name)
+    }
+    for (let n = current.length; n < target; n++) {
+      const free = db
+        .query<{ name: string }, []>(
+          'SELECT name FROM workers WHERE company_id IS NULL ORDER BY name LIMIT 1',
+        )
+        .get()
+      const name =
+        free?.name ??
+        `worker-${(db.query<{ n: number }, []>('SELECT COUNT(*) AS n FROM workers').get()?.n ?? 0) + 1}`
+      db.query(
+        'INSERT INTO workers (name, company_id) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET company_id = excluded.company_id',
+      ).run(name, companyId)
+    }
+    return workersOf(companyId)
+  }
+
   return {
     db,
-    cycle: () => Number(meta('cycle') ?? 0),
+    cycle,
     goal: () => meta('goal') ?? '',
     companies,
     company,
     workersOf,
     workerCompany,
+    openTask,
+    pool,
+    staff,
     investors: () =>
       db
         .query<{ name: string; cash: number }, []>(
@@ -162,40 +222,43 @@ export function openEconomy(path: string) {
           'SELECT company_id, amount FROM stakes WHERE investor = ?',
         )
         .all(investor),
-    ideas: (cycle: number) =>
+    unscoredIdeas: () =>
       db
-        .query<Idea, [number]>(
-          'SELECT * FROM ideas WHERE cycle = ? ORDER BY id',
-        )
-        .all(cycle),
+        .query<Idea, []>('SELECT * FROM ideas WHERE score IS NULL ORDER BY id')
+        .all(),
     recentIdeas: (companyId: number, limit = 10) =>
       db
         .query<Idea, [number, number]>(
           'SELECT * FROM ideas WHERE company_id = ? ORDER BY id DESC LIMIT ?',
         )
         .all(companyId, limit),
-    taskOf: (worker: string, cycle: number) =>
+    latestIdeas: (limit = 20) =>
       db
-        .query<{ id: number; body: string }, [string, number]>(
-          'SELECT id, body FROM tasks WHERE worker = ? AND cycle = ? AND result IS NULL ORDER BY id LIMIT 1',
-        )
-        .get(worker, cycle),
+        .query<Idea, [number]>('SELECT * FROM ideas ORDER BY id DESC LIMIT ?')
+        .all(limit),
     pendingProposals: (worker: string) =>
       db
         .query<{ id: number; from_worker: string; content: string }, [string]>(
           "SELECT id, from_worker, content FROM proposals WHERE to_worker = ? AND status = 'pending'",
         )
         .all(worker),
-    latestIdeas: (limit = 20) =>
+    unread: (agent: string) =>
       db
-        .query<Idea, [number]>('SELECT * FROM ideas ORDER BY id DESC LIMIT ?')
-        .all(limit),
-    latestMeetings: () =>
-      db
-        .query<{ company_id: number; cycle: number; transcript: string }, []>(
-          'SELECT company_id, cycle, transcript FROM meetings WHERE cycle = (SELECT MAX(cycle) FROM meetings)',
+        .query<Message, [string]>(
+          'SELECT id, from_agent, to_agent, content FROM messages WHERE to_agent = ? AND read = 0 ORDER BY id',
         )
-        .all(),
+        .all(agent),
+    markRead: (ids: number[]) => {
+      for (const id of ids) {
+        db.query('UPDATE messages SET read = 1 WHERE id = ?').run(id)
+      }
+    },
+    recentMessages: (limit = 30) =>
+      db
+        .query<Message, [number]>(
+          'SELECT id, from_agent, to_agent, content FROM messages ORDER BY id DESC LIMIT ?',
+        )
+        .all(limit),
 
     // 目的を設定する。初回は会社と投資家を用意する
     setGoal(goal: string) {
@@ -203,7 +266,7 @@ export function openEconomy(path: string) {
         setMeta('goal', goal)
         if (companies().length) return
         for (let i = 1; i <= INITIAL_COMPANIES; i++) {
-          found(`会社${i}`, FOUNDING_CAPITAL)
+          staff(found(`会社${i}`, FOUNDING_CAPITAL))
         }
         for (let i = 1; i <= INITIAL_INVESTORS; i++) {
           db.query('INSERT INTO investors (name, cash) VALUES (?, ?)').run(
@@ -211,45 +274,8 @@ export function openEconomy(path: string) {
             INVESTOR_CASH,
           )
         }
+        setMeta('cycle', '1')
       })()
-    },
-
-    nextCycle() {
-      const next = Number(meta('cycle') ?? 0) + 1
-      setMeta('cycle', String(next))
-      db.run('DELETE FROM votes')
-      return next
-    },
-
-    // 資本で賄える数に worker を合わせる。採用は所属のない worker から優先し、記憶を引き継ぐ
-    staff(companyId: number) {
-      const target = Math.min(
-        MAX_WORKERS,
-        Math.max(
-          0,
-          Math.floor((company(companyId)?.capital ?? 0) / WORKER_COST),
-        ),
-      )
-      const current = workersOf(companyId)
-      for (const name of current.slice(target)) {
-        db.query('UPDATE workers SET company_id = NULL WHERE name = ?').run(
-          name,
-        )
-      }
-      for (let n = current.length; n < target; n++) {
-        const free = db
-          .query<{ name: string }, []>(
-            'SELECT name FROM workers WHERE company_id IS NULL ORDER BY name LIMIT 1',
-          )
-          .get()
-        const name =
-          free?.name ??
-          `worker-${(db.query<{ n: number }, []>('SELECT COUNT(*) AS n FROM workers').get()?.n ?? 0) + 1}`
-        db.query(
-          'INSERT INTO workers (name, company_id) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET company_id = excluded.company_id',
-        ).run(name, companyId)
-      }
-      return workersOf(companyId)
     },
 
     setPhilosophy(companyId: number, philosophy: string) {
@@ -258,37 +284,74 @@ export function openEconomy(path: string) {
         companyId,
       )
     },
-    assignTask(companyId: number, worker: string, body: string, cycle: number) {
-      if (workerCompany(worker) !== companyId) {
-        throw new Error(`${worker} はこの会社の worker ではありません`)
-      }
+    // 会社のタスクプールに仕事を足す。誰がやるかは worker が選ぶ
+    addTask(companyId: number, body: string) {
       db.query(
-        'INSERT INTO tasks (company_id, worker, body, cycle) VALUES (?, ?, ?, ?)',
-      ).run(companyId, worker, body, cycle)
+        'INSERT INTO pool_tasks (company_id, body, cycle) VALUES (?, ?, ?)',
+      ).run(companyId, body, cycle())
     },
-    finishTask(id: number, result: string) {
-      db.query('UPDATE tasks SET result = ? WHERE id = ?').run(result, id)
+    // 自分の会社のプールから仕事を引き受ける。抱える仕事は1件まで
+    claimTask(worker: string, id: number) {
+      if (openTask(worker)) throw new Error('まだ仕事の途中です')
+      const { changes } = db
+        .query(
+          'UPDATE pool_tasks SET worker = ? WHERE id = ? AND company_id = ? AND worker IS NULL AND result IS NULL',
+        )
+        .run(worker, id, workerCompany(worker) ?? -1)
+      if (!changes)
+        throw new Error(`自分の会社のプールに仕事 ${id} はありません`)
+    },
+    finishTask(worker: string, result: string) {
+      const task = openTask(worker)
+      if (!task) throw new Error('終わらせる仕事がありません')
+      db.query('UPDATE pool_tasks SET result = ? WHERE id = ?').run(
+        result,
+        task.id,
+      )
     },
     postIdea(
       worker: string,
       idea: { title: string; body: string; file?: string },
-      cycle: number,
     ) {
       const companyId = workerCompany(worker)
       if (companyId === null) throw new Error('所属する会社がありません')
       db.query(
         'INSERT INTO ideas (company_id, worker, title, body, file, cycle) VALUES (?, ?, ?, ?, ?, ?)',
-      ).run(companyId, worker, idea.title, idea.body, idea.file ?? null, cycle)
+      ).run(
+        companyId,
+        worker,
+        idea.title,
+        idea.body,
+        idea.file ?? null,
+        cycle(),
+      )
     },
     scoreIdea(id: number, score: number, reason: string) {
       if (!(score >= 0 && score <= 10)) {
         throw new Error('score は 0〜10 です')
       }
-      db.query('UPDATE ideas SET score = ?, reason = ? WHERE id = ?').run(
-        score,
-        reason,
-        id,
-      )
+      const { changes } = db
+        .query(
+          'UPDATE ideas SET score = ?, reason = ? WHERE id = ? AND score IS NULL',
+        )
+        .run(score, reason, id)
+      if (!changes) throw new Error(`未採点のアイデア ${id} はありません`)
+    },
+    // to に all を指定すると、同じ会社のほかの worker 全員に送る
+    sendMessage(from: string, to: string, content: string) {
+      const companyId = workerCompany(from)
+      const recipients =
+        to === 'all' && companyId !== null
+          ? workersOf(companyId).filter((w) => w !== from)
+          : [to]
+      for (const r of recipients) {
+        if (!db.query('SELECT 1 FROM workers WHERE name = ?').get(r)) {
+          throw new Error(`${r} という worker はいません`)
+        }
+        db.query(
+          'INSERT INTO messages (from_agent, to_agent, content) VALUES (?, ?, ?)',
+        ).run(from, r, content)
+      }
     },
     propose(from: string, to: string, content: string) {
       if (!db.query('SELECT 1 FROM workers WHERE name = ?').get(to)) {
@@ -348,21 +411,20 @@ export function openEconomy(path: string) {
         ).run(investor, companyId, amount)
       })()
     },
-    saveMeeting(companyId: number, cycle: number, transcript: string) {
-      db.query(
-        'INSERT INTO meetings (company_id, cycle, transcript) VALUES (?, ?, ?)',
-      ).run(companyId, cycle, transcript)
-    },
 
-    // 期末の精算: 市場の採点から価値と売上を決め、配当と費用を払い、投票で合併・分裂し、資本の尽きた会社を畳む
-    settle(cycle: number) {
+    // 期末の精算: 未精算の採点から価値と売上を決め、配当と費用を払い、投票で合併・分裂し、
+    // 資本の尽きた会社を畳み、資本に合わせて人数を揃えてから次の期に進む
+    settle() {
       db.transaction(() => {
         for (const c of companies()) {
           const { avg } = db
-            .query<{ avg: number | null }, [number, number]>(
-              'SELECT AVG(score) AS avg FROM ideas WHERE company_id = ? AND cycle = ? AND score IS NOT NULL',
+            .query<{ avg: number | null }, [number]>(
+              'SELECT AVG(score) AS avg FROM ideas WHERE company_id = ? AND score IS NOT NULL AND settled = 0',
             )
-            .get(c.id, cycle) ?? { avg: null }
+            .get(c.id) ?? { avg: null }
+          db.query(
+            'UPDATE ideas SET settled = 1 WHERE company_id = ? AND score IS NOT NULL',
+          ).run(c.id)
           // 成果のない期は価値が半分に下がる
           const value = avg ?? c.value / 2
           const revenue = value * REVENUE_RATE
@@ -418,12 +480,15 @@ export function openEconomy(path: string) {
             if (yes * 2 > members.length && accepted) {
               db.query(
                 'UPDATE companies SET capital = capital + ? WHERE id = ?',
-              ).run(a.capital, b.id)
+              ).run(company(a.id)?.capital ?? 0, b.id)
               db.query(
                 'UPDATE workers SET company_id = ? WHERE company_id = ?',
               ).run(b.id, a.id)
               db.query(
                 'INSERT INTO stakes (investor, company_id, amount) SELECT investor, ?, amount FROM stakes WHERE company_id = ? ON CONFLICT (investor, company_id) DO UPDATE SET amount = amount + excluded.amount',
+              ).run(b.id, a.id)
+              db.query(
+                'UPDATE pool_tasks SET company_id = ? WHERE company_id = ?',
               ).run(b.id, a.id)
               db.query('DELETE FROM stakes WHERE company_id = ?').run(a.id)
               dissolve(a.id)
@@ -461,7 +526,14 @@ export function openEconomy(path: string) {
 
         for (const c of companies()) {
           if (c.capital < WORKER_COST) dissolve(c.id)
+          else staff(c.id)
         }
+        // 解雇や移籍で会社を離れた worker の仕事は、元の会社のプールに戻す
+        db.run(
+          'UPDATE pool_tasks SET worker = NULL WHERE result IS NULL AND worker IS NOT NULL AND worker NOT IN (SELECT name FROM workers WHERE company_id = pool_tasks.company_id)',
+        )
+        db.run('DELETE FROM votes')
+        setMeta('cycle', String(cycle() + 1))
       })()
     },
   }

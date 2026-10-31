@@ -10,7 +10,7 @@ type Status = {
   goal: string
   cycle: number
   running: boolean
-  error: string
+  nextSettleAt: number | null
   log: string[]
   companies: {
     id: number
@@ -19,6 +19,7 @@ type Status = {
     capital: number
     value: number
     workers: string[]
+    pool: { id: number; body: string }[]
   }[]
   investors: { name: string; cash: number }[]
   ideas: {
@@ -31,7 +32,12 @@ type Status = {
     score: number | null
     cycle: number
   }[]
-  meetings: { company_id: number; cycle: number; transcript: string }[]
+  messages: {
+    id: number
+    from_agent: string
+    to_agent: string
+    content: string
+  }[]
 }
 
 export default function Economy(props: PageProps<'Economy'>) {
@@ -76,7 +82,9 @@ export default function Economy(props: PageProps<'Economy'>) {
   return (
     <main className='mx-auto flex max-w-3xl flex-col gap-6 p-8'>
       <header className='flex items-center justify-between'>
-        <h1 className='text-2xl font-bold'>経済（第{status.cycle}期）</h1>
+        <h1 className='text-2xl font-bold'>
+          経済（第{status.cycle}期{status.running ? '、稼働中' : ''}）
+        </h1>
         <Link href='/' className='text-sm underline'>
           ホームへ
         </Link>
@@ -94,15 +102,30 @@ export default function Economy(props: PageProps<'Economy'>) {
           目的を設定
         </Button>
       </form>
-      <Button
-        onClick={run(() => post<Status>('/economy/step'))}
-        disabled={!status.goal || status.running}
-      >
-        {status.running ? '回しています…' : '1周回す'}
-      </Button>
-      {(error || status.error) && (
-        <p className='text-destructive text-sm'>{error || status.error}</p>
-      )}
+      <div className='flex items-center gap-3'>
+        {status.running ? (
+          <Button
+            variant='outline'
+            onClick={run(() => post<Status>('/economy/stop'))}
+          >
+            停止
+          </Button>
+        ) : (
+          <Button
+            onClick={run(() => post<Status>('/economy/start'))}
+            disabled={!status.goal}
+          >
+            開始
+          </Button>
+        )}
+        {status.nextSettleAt && (
+          <p className='text-sm'>
+            次の精算:{' '}
+            {new Date(status.nextSettleAt).toLocaleTimeString('ja-JP')}
+          </p>
+        )}
+      </div>
+      {error && <p className='text-destructive text-sm'>{error}</p>}
 
       <section className='flex flex-col gap-2'>
         <h2 className='font-bold'>会社</h2>
@@ -114,6 +137,14 @@ export default function Economy(props: PageProps<'Economy'>) {
             </p>
             <p>設計思想: {c.philosophy || '未設定'}</p>
             <p>worker: {c.workers.join(', ') || 'なし'}</p>
+            <p>タスクプール（未着手 {c.pool.length}件）</p>
+            {c.pool.length > 0 && (
+              <ul className='list-disc pl-5'>
+                {c.pool.map((t) => (
+                  <li key={t.id}>{t.body}</li>
+                ))}
+              </ul>
+            )}
           </div>
         ))}
       </section>
@@ -141,13 +172,12 @@ export default function Economy(props: PageProps<'Economy'>) {
         ))}
       </section>
 
-      <section className='flex flex-col gap-2 text-sm'>
-        <h2 className='font-bold'>直近の会議</h2>
-        {status.meetings.map((m) => (
-          <div key={m.company_id}>
-            <p className='font-bold'>会社 {m.company_id}</p>
-            <p className='whitespace-pre-wrap'>{m.transcript}</p>
-          </div>
+      <section className='flex flex-col gap-1 text-sm'>
+        <h2 className='font-bold'>worker 同士のメッセージ</h2>
+        {status.messages.map((m) => (
+          <p key={m.id} className='whitespace-pre-wrap'>
+            {m.from_agent} → {m.to_agent}: {m.content}
+          </p>
         ))}
       </section>
 

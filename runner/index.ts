@@ -9,8 +9,8 @@ import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { createModels } from '@earendil-works/pi-ai/models'
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
 import { openAgent, respond } from './agent'
-import { runCycle } from './cycle'
 import { openEconomy } from './economy'
+import { startLoops } from './loop'
 import { createToolbox, type Toolbox, withTools } from './tools'
 
 const DIR = join(homedir(), '.hyph')
@@ -27,7 +27,7 @@ type Config = { url: string; token: string }
 // Worker からの依頼。chat は応答を差分で流し、それ以外は result を1回返す
 type Request = { id: string } & (
   | { method: 'chat'; agent: string; message: string }
-  | { method: 'status' | 'step' }
+  | { method: 'status' | 'start' | 'stop' }
   | { method: 'setGoal'; goal: unknown }
 )
 
@@ -125,8 +125,7 @@ async function start(url: string | undefined) {
 
   // ループの進み具合。画面が状態を取りに来たときに返す
   const lines: string[] = []
-  let running = false
-  let lastError = ''
+  let loops: ReturnType<typeof startLoops> | null = null
   const log = (line: string) => {
     console.log(line)
     lines.push(`${new Date().toLocaleTimeString('ja-JP')} ${line}`)
@@ -135,18 +134,20 @@ async function start(url: string | undefined) {
   const status = () => ({
     goal: economy.goal(),
     cycle: economy.cycle(),
-    running,
-    error: lastError,
+    running: loops !== null,
+    nextSettleAt: loops?.nextSettleAt() ?? null,
     log: lines,
-    companies: economy
-      .companies()
-      .map((c) => ({ ...c, workers: economy.workersOf(c.id) })),
+    companies: economy.companies().map((c) => ({
+      ...c,
+      workers: economy.workersOf(c.id),
+      pool: economy.pool(c.id),
+    })),
     investors: economy.investors(),
     ideas: economy.latestIdeas(),
-    meetings: economy.latestMeetings(),
+    messages: economy.recentMessages(),
   })
 
-  const call = (request: Request) => {
+  const call = async (request: Request) => {
     switch (request.method) {
       case 'status':
         return status()
@@ -156,13 +157,10 @@ async function start(url: string | undefined) {
         }
         economy.setGoal(request.goal.trim())
         return status()
-      case 'step':
-        if (running) throw new Error('すでにループを回しています')
+      case 'start':
+        if (loops) throw new Error('すでにループを回しています')
         if (!economy.goal()) throw new Error('先に目的を設定してください')
-        running = true
-        lastError = ''
-        // 1周は数分かかるため、終わりを待たずに返す。進み具合は status で見る
-        runCycle({
+        loops = startLoops({
           economy,
           agent: agentFor,
           log,
@@ -183,14 +181,15 @@ async function start(url: string | undefined) {
               .toolbox.run('file_read', { path })
               .catch(() => null),
         })
-          .catch((e) => {
-            lastError = e instanceof Error ? e.message : String(e)
-            log(`ループが止まりました: ${lastError}`)
-          })
-          .finally(() => {
-            running = false
-          })
         return status()
+      case 'stop': {
+        const current = loops
+        if (!current) throw new Error('ループは止まっています')
+        loops = null
+        // 動いている途中のエージェントを待つと時間がかかるため、待たずに返す
+        current.stop()
+        return status()
+      }
       default:
         throw new Error(`未知の依頼です: ${request.method}`)
     }
@@ -220,7 +219,9 @@ async function start(url: string | undefined) {
           })
           ws.send(JSON.stringify({ id: request.id, done: true }))
         } else {
-          ws.send(JSON.stringify({ id: request.id, result: call(request) }))
+          ws.send(
+            JSON.stringify({ id: request.id, result: await call(request) }),
+          )
         }
       } catch (e) {
         const error = e instanceof Error ? e.message : String(e)

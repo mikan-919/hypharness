@@ -155,8 +155,12 @@ const routes = app
       await runner(c.env, c.var.user.id).call({ method: 'setGoal', goal }),
     )
   })
-  .post('/economy/step', auth, async (c) =>
-    c.json(await runner(c.env, c.var.user.id).call({ method: 'step' })),
+  .post('/economy/:action{start|stop}', auth, async (c) =>
+    c.json(
+      await runner(c.env, c.var.user.id).call({
+        method: c.req.param('action'),
+      }),
+    ),
   )
   .post('/agents/:name/chat', auth, async (c) => {
     const name = c.req.param('name')
