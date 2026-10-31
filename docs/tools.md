@@ -90,7 +90,7 @@
 
 ## MCP のツール
 
-状態ファイルと同じディレクトリに `mcp.json` を置くと、外部の MCP サーバー（ツールを提供するプロセスまたは HTTP サーバー）を起動時に接続します。設定例は [README](../README.md#mcp-サーバー) にあります。`mcpServers` の各名前に、標準入出力なら `command`・`args`・`env`、HTTP なら `type: http`・`url`・`headers` を指定します。ファイルがない場合は追加されません。
+状態ファイルと同じディレクトリに `mcp.json` を置くと、外部の MCP サーバー（ツールを提供するプロセスまたは HTTP サーバー）を起動時に接続します。設定例は [README](../README.md#mcp-サーバー) にあります。`mcpServers` の各名前に、標準入出力なら `command`・`args`・`env`、HTTP なら `type: http`・`url`・`headers`・`oauth` を指定します。`oauth: true` のサーバーは `mcp-login` で保存した `mcp-auth.json` のトークンで接続します。ファイルがない場合は追加されません。
 
 サーバーが提供する説明と入力スキーマをそのまま使い、各ツールを `mcp__サーバー名__ツール名` として提供します。標準入出力のサーバーはシェルと同じ隔離環境で起動し、環境変数は `env` に指定したものだけを渡します。bubblewrap がない場合は起動できません。HTTP の接続先は指定された URL をそのまま使います。
 

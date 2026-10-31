@@ -1,15 +1,18 @@
+import { writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { auth, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import type { OAuthClientInformationMixed, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { TSchema, Tool } from "@earendil-works/pi-ai";
 import type { Store } from "./db.ts";
 import { sandboxCommand } from "./sandbox.ts";
 import { recordToolKnowledge, type Embed } from "./resident-memory.ts";
 
 type StdioConfig = { command: string; args?: string[]; env?: Record<string, string> };
-type HttpConfig = { type: "http"; url: string; headers?: Record<string, string> };
+type HttpConfig = { type: "http"; url: string; headers?: Record<string, string>; oauth?: boolean };
 type Config = StdioConfig | HttpConfig;
 type Server = { name: string; config: Config; client?: Client; connecting?: Promise<Client>; tools: Tool[] };
 
@@ -22,13 +25,82 @@ function parseConfig(value: unknown): Config {
   if (c.type === "http") {
     if (typeof c.url !== "string" || !["http:", "https:"].includes(new URL(c.url).protocol)) throw new Error("HTTP server requires an HTTP(S) URL");
     if (c.headers !== undefined && !strings(c.headers)) throw new Error("headers must contain strings");
-    return { type: "http", url: c.url, headers: c.headers as Record<string, string> | undefined };
+    if (c.oauth !== undefined && typeof c.oauth !== "boolean") throw new Error("oauth must be a boolean");
+    return { type: "http", url: c.url, headers: c.headers as Record<string, string> | undefined, oauth: c.oauth };
   }
   if (c.type !== undefined && c.type !== "stdio") throw new Error("Unsupported server type");
   if (typeof c.command !== "string" || !c.command) throw new Error("stdio server requires a command");
   if (c.args !== undefined && (!Array.isArray(c.args) || !c.args.every(x => typeof x === "string"))) throw new Error("args must be an array of strings");
   if (c.env !== undefined && !strings(c.env)) throw new Error("env must contain strings");
   return { command: c.command, args: c.args as string[] | undefined, env: c.env as Record<string, string> | undefined };
+}
+
+type Saved = { client?: OAuthClientInformationMixed; tokens?: OAuthTokens; verifier?: string };
+
+// OAuth state for each server lives in mcp-auth.json next to mcp.json. Only mcp-login can ask the user to authorize.
+// ponytail: read-modify-write without a lock; a login and a resident refresh writing at the same moment can lose one update.
+class FileOAuth implements OAuthClientProvider {
+  state?: () => string;
+  constructor(private file: string, private name: string, readonly redirectUrl: string | undefined = undefined, private onRedirect?: (url: URL) => void) {}
+  get clientMetadata() {
+    return { client_name: "hypharness", redirect_uris: this.redirectUrl ? [this.redirectUrl] : [], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" };
+  }
+  private async all(): Promise<Record<string, Saved>> { const f = Bun.file(this.file); return await f.exists() ? await f.json() : {}; }
+  private async save(patch: Saved) {
+    const all = await this.all();
+    all[this.name] = { ...all[this.name], ...patch };
+    await writeFile(this.file, JSON.stringify(all, null, 2), { mode: 0o600 });
+  }
+  async clientInformation() {
+    const client = (await this.all())[this.name]?.client;
+    // Without this, the SDK would try to register a client that has no redirect URI.
+    if (!client && !this.onRedirect) this.redirectToAuthorization();
+    return client;
+  }
+  saveClientInformation(client: OAuthClientInformationMixed) { return this.save({ client }); }
+  async tokens() { return (await this.all())[this.name]?.tokens; }
+  saveTokens(tokens: OAuthTokens) { return this.save({ tokens }); }
+  saveCodeVerifier(verifier: string) { return this.save({ verifier }); }
+  async codeVerifier() {
+    const verifier = (await this.all())[this.name]?.verifier;
+    if (!verifier) throw new Error("No PKCE code verifier saved");
+    return verifier;
+  }
+  async invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery") {
+    if (scope === "all") await this.save({ client: undefined, tokens: undefined, verifier: undefined });
+    else if (scope !== "discovery") await this.save({ [scope]: undefined });
+  }
+  redirectToAuthorization(url?: URL) {
+    if (!this.onRedirect || !url) throw new Error(`Authorization required; run: bun run start mcp-login ${this.name}`);
+    this.onRedirect(url);
+  }
+}
+
+// Runs the browser authorization once and saves tokens that the resident process refreshes later.
+export async function mcpLogin(dir: string, name: string, log: (line: string) => void = console.log) {
+  const data = await Bun.file(join(dir, "mcp.json")).json() as { mcpServers?: Record<string, unknown> };
+  const config = parseConfig(data.mcpServers?.[name]);
+  if (!("url" in config) || !config.oauth) throw new Error(`${name} is not an HTTP server with oauth: true`);
+  const state = crypto.randomUUID();
+  const code = Promise.withResolvers<string>();
+  const callback = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+    const url = new URL(req.url);
+    if (url.pathname !== "/callback") return new Response("Not found", { status: 404 });
+    if (url.searchParams.get("state") !== state) return new Response("State mismatch", { status: 400 });
+    const value = url.searchParams.get("code");
+    if (!value) { code.reject(new Error(`Authorization failed: ${url.searchParams.get("error") ?? "no code"}`)); return new Response("Authorization failed.", { status: 400 }); }
+    code.resolve(value);
+    return new Response("Authorized. You can close this tab.");
+  } });
+  try {
+    const provider = new FileOAuth(join(dir, "mcp-auth.json"), name, `${callback.url}callback`, url => log(`Open this URL to authorize ${name}:\n${url}`));
+    provider.state = () => state;
+    // The callback port changes on every login, so the client is registered again with the new redirect URI.
+    await provider.invalidateCredentials("all");
+    const options = { serverUrl: config.url };
+    if (await auth(provider, options) === "REDIRECT") await auth(provider, { ...options, authorizationCode: await code.promise });
+    log(`Authorized ${name}`);
+  } finally { callback.stop(true); }
 }
 
 export class McpTools {
@@ -80,7 +152,10 @@ export class McpTools {
       const client = new Client({ name: "hypharness", version: "1" });
       const c = server.config;
       let transport: StdioClientTransport | StreamableHTTPClientTransport;
-      if ("url" in c) transport = new StreamableHTTPClientTransport(new URL(c.url), { requestInit: { headers: c.headers } });
+      if ("url" in c) transport = new StreamableHTTPClientTransport(new URL(c.url), {
+        requestInit: { headers: c.headers },
+        authProvider: c.oauth ? new FileOAuth(join(dirname(this.store.db.filename), "mcp-auth.json"), server.name) : undefined,
+      });
       else {
         const command = c.command === "bun" ? process.execPath : c.command.includes("/") ? c.command : Bun.which(c.command);
         if (!command) throw new Error(`Executable not found: ${c.command}`);

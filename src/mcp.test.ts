@@ -69,6 +69,23 @@ test("streamable HTTP uses the configured local URL and headers", async () => {
   } finally { await manager.close(); await server.close(); http.stop(true); store.db.close(); }
 });
 
+test("streamable HTTP with oauth sends the token saved by mcp-login", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hyph-mcp-oauth-")), store = openResident(join(dir, "state.sqlite"));
+  const server = new Server({ name: "oauth-fixture", version: "1" }, { capabilities: { tools: {} } });
+  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [{ name: "search", description: "Search", inputSchema: { type: "object", properties: {} } }] }));
+  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: () => crypto.randomUUID(), enableJsonResponse: true });
+  await server.connect(transport);
+  const seen: (string | null)[] = [], log: string[] = [];
+  const http = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: req => { seen.push(req.headers.get("authorization")); return transport.handleRequest(req); } });
+  await Bun.write(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { paper: { type: "http", url: `${http.url}mcp`, oauth: true } } }));
+  await Bun.write(join(dir, "mcp-auth.json"), JSON.stringify({ paper: { tokens: { access_token: "saved-token", token_type: "Bearer" } } }));
+  const manager = await McpTools.open(store, dir, line => log.push(line), async () => [1, 0]);
+  try {
+    expect(manager.has("mcp__paper__search")).toBe(true);
+    expect(seen.at(-1)).toBe("Bearer saved-token");
+  } finally { await manager.close(); await server.close(); http.stop(true); store.db.close(); }
+});
+
 test.skipIf(!sandboxUsable())("stdio MCP tools are isolated, reconnect, and persist full results", async () => {
   const { store, manager, log } = await fixture();
   try {
