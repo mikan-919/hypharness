@@ -151,7 +151,9 @@ const routes = app
     if (!(await stub.connected())) {
       return c.json({ error: 'ランナーが接続されていません' }, 503)
     }
-    return c.json({ reply: await stub.chat(name, message) })
+    return c.body(await stub.chat(name, message), 200, {
+      'content-type': 'application/x-ndjson',
+    })
   })
 
 export default routes

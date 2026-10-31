@@ -77,15 +77,53 @@ function Chat() {
     e.preventDefault()
     setError('')
     setSending(true)
-    setLines((prev) => [...prev, { role: 'user', content: message }])
+    setLines((prev) => [
+      ...prev,
+      { role: 'user', content: message },
+      { role: 'assistant', content: '' },
+    ])
+    // 届いた差分を最後の応答に追記する
+    const append = (delta: string) =>
+      setLines((prev) => [
+        ...prev.slice(0, -1),
+        { role: 'assistant', content: prev[prev.length - 1].content + delta },
+      ])
     try {
-      const { reply } = await post<{ reply: string }>(
+      const response = await fetch(
         `/agents/${encodeURIComponent(agent)}/chat`,
-        { message },
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ message }),
+        },
       )
-      setLines((prev) => [...prev, { role: 'assistant', content: reply }])
+      if (!response.ok || !response.body) {
+        const json = (await response.json()) as { error?: string }
+        throw new Error(json.error ?? `${response.status}`)
+      }
       setMessage('')
+      // 応答は1行に1つの JSON で届く。行の途中で区切られた分は次の読み込みとつなげる
+      const reader = response.body
+        .pipeThrough(new TextDecoderStream())
+        .getReader()
+      let buffer = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += value
+        const parts = buffer.split('\n')
+        buffer = parts.pop() ?? ''
+        for (const part of parts) {
+          const event = JSON.parse(part) as { delta?: string; error?: string }
+          if (event.error) throw new Error(event.error)
+          if (event.delta) append(event.delta)
+        }
+      }
     } catch (e) {
+      // 本文が届く前に失敗した場合は、空の応答を残さない
+      setLines((prev) =>
+        prev.at(-1)?.content === '' ? prev.slice(0, -1) : prev,
+      )
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setSending(false)

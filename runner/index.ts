@@ -102,21 +102,27 @@ async function start(url: string | undefined) {
   await mkdir(AGENTS, { recursive: true, mode: 0o700 })
   const agents = new Map<string, ReturnType<typeof openAgent>>()
 
-  const handle = async (request: Request) => {
+  // 応答の差分は届いたそばから onDelta に渡し、全文がそろってから記憶に残す
+  const handle = async (request: Request, onDelta: (delta: string) => void) => {
     const agent = agents.get(request.agent) ?? openAgent(AGENTS, request.agent)
     agents.set(request.agent, agent)
     const { instructions, messages } = agent.context(request.message)
-    const response = await models.complete(model, {
+    let text = ''
+    const events = models.stream(model, {
       systemPrompt: instructions,
       messages: messages.map((m) => toPiMessage(m, model)),
     })
-    if (response.stopReason === 'error') throw new Error(response.errorMessage)
-    const text = response.content
-      .flatMap((block) => (block.type === 'text' ? [block.text] : []))
-      .join('')
+    for await (const event of events) {
+      if (event.type === 'text_delta') {
+        text += event.delta
+        onDelta(event.delta)
+      }
+      if (event.type === 'error') {
+        throw new Error(event.error.errorMessage ?? event.reason)
+      }
+    }
     agent.remember('user', request.message)
     agent.remember('assistant', text)
-    return text
   }
 
   const connect = () => {
@@ -130,7 +136,10 @@ async function start(url: string | undefined) {
     ws.onmessage = async (event) => {
       const request: Request = JSON.parse(String(event.data))
       try {
-        ws.send(JSON.stringify({ id: request.id, text: await handle(request) }))
+        await handle(request, (delta) =>
+          ws.send(JSON.stringify({ id: request.id, delta })),
+        )
+        ws.send(JSON.stringify({ id: request.id, done: true }))
       } catch (e) {
         const error = e instanceof Error ? e.message : String(e)
         console.error(error)
