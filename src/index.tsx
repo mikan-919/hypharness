@@ -3,6 +3,7 @@ import { type Context, Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { csrf } from 'hono/csrf'
 import { createMiddleware } from 'hono/factory'
+import { HTTPException } from 'hono/http-exception'
 import type { Accounts, RelyingParty, User } from './accounts'
 import type { Agent, Codex } from './agent'
 import { rootView } from './renderer'
@@ -51,6 +52,12 @@ const app = new Hono<AppEnv>()
 
 app.use(csrf())
 app.use(inertia({ rootView }))
+// Durable Object や外部 API で出た例外の内容を、画面が読める JSON で返す
+app.onError((err, c) => {
+  if (err instanceof HTTPException) return err.getResponse()
+  console.error(err)
+  return c.json({ error: err.message }, 500)
+})
 
 const routes = app
   .get('/', auth, async (c) =>
