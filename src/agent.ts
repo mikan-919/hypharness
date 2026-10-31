@@ -2,7 +2,7 @@ import { validateToolCall, type Api, type AssistantMessage, type Message, type M
 import type { createModels } from "@earendil-works/pi-ai/models";
 import type { Agent, Store, Task } from "./db.ts";
 import { mirror, toolSchemas, tools, type ToolContext } from "./tools.ts";
-import { emit, isMarket, withheldTools } from "./triggers.ts";
+import { emit, isMarket, PANEL, roleOf, ROLES, withheldTools } from "./triggers.ts";
 import type { McpTools } from "./mcp.ts";
 import type { Embed } from "./resident-memory.ts";
 
@@ -37,6 +37,21 @@ export class BudgetExhausted extends Error {}
 // Live context size (tokens) above which tool results ask the agent to compact; the CLM paper's runs used a 32K limit.
 const COMPACT_AT = 32_000;
 
+// Market mode is modeled on capitalism: many innovators (workers and their copies) turn the shared context and activity history into
+// ideas and artifacts and argue why each is promising; capitalists (the market roles, in panels) judge what is truly worth it.
+function marketGuide(agent: Agent) {
+  const common = `- The organization is a market modeled on capitalism, driven by events. Many innovators (workers and their copies, one per funded task, working in parallel) turn the shared context and activity history into ideas and artifacts and make the case for each; many capitalists decide what is truly worth it, in panels of ${PANEL} that each vote on their own (investors fund subgoals with model-call budgets or decline them, critics attack finished work, evaluators rule on the objections); lead splits goals into subgoals and submits them. Do what your role and current task call for, nothing else.
+- The shared context (goals, tasks, knowledge, files) and the activity history (news) are the common ground. Read what bears on your task before acting, and leave what you find there for the others.`;
+  if (agent.id === "lead") return `${common}
+- You are lead. Split goals into subgoals worth funding and submit a goal once its subgoals are done. Before splitting, check what has already been produced (goal_list, file_list) so the same work is not funded twice.`;
+  if (roleOf(agent.id) in ROLES) return `${common}
+- You are a capitalist (${roleOf(agent.id)}). Tell what is truly valuable from what only claims to be. Judge on your own; the other members of your panel vote separately, and agreement is worth something only when each of you checked the evidence. Judge against the economic history (earlier funding and what it returned, work that passed or failed, objections upheld or overruled: task_list, task_get, news) and against the artifacts and sources themselves, never against an innovator's confidence or effort.
+- Decide only on evidence you checked yourself, and name it. Value is what the artifacts demonstrate for the purpose; a promise is worth only the evidence behind it.`;
+  return `${common}
+- You are an innovator, one of several. Build on what the others found (news, knowledge_search) instead of starting over or repeating their work, and publish each discovery as you make it: knowledge_add with its source, files for artifacts. Progress means real, checkable artifacts in the workspace (file_write, shell when granted); planning alone is not progress.
+- Your work has to win the capitalists' judgment. In task_finish, give the idea or result, why it is promising (the evidence, citing knowledge IDs and files, and what it gains for the purpose), and what would show it wrong. A case without evidence is rejected; an honestly stated limit is not.`;
+}
+
 // Stable per agent: no clocks, counters, or shared state, so the provider can reuse the cached prefix.
 export function systemPrompt(store: Store, agent: Agent) {
   const c = store.config;
@@ -49,8 +64,8 @@ Organization: ${c.organization} mode, ${Number.isFinite(c.maxAgents) ? `at most 
 How you work:
 - You handle one claimed task at a time. Shared goals, tasks, knowledge, domains, and other agents are visible only through tools; look up only what the task needs.
 ${isMarket(store)
-    ? "- Work flows by events (market): lead splits goals into subgoals and submits them; an investor funds each subgoal with a model-call budget or declines it; workers do funded tasks within their budget; a critic objects to finished work and an evaluator rules on the objections. Do what your role and current task call for, nothing else.\n- Progress means real, checkable artifacts in the workspace (file_write, shell when granted). Planning alone is not progress."
-    : "- Progress means real, checkable artifacts in the workspace (file_write, shell when granted). Planning alone is not progress. Doing the work directly is often best; split it with goal_create/task_create only when that helps."}
+    ? marketGuide(agent)
+    :"- Progress means real, checkable artifacts in the workspace (file_write, shell when granted). Planning alone is not progress. Doing the work directly is often best; split it with goal_create/task_create only when that helps."}
 - Deliverables go in files; facts with their sources go in knowledge. web_search results are recorded as knowledge automatically (their IDs are shown), so run knowledge_search before searching the web again, and cite knowledge IDs for the claims your deliverables rely on. Record other findings worth reusing with knowledge_add, citing the source. When one document or claim shows up under several IDs, fold them into one with knowledge_merge. New knowledge is a hypothesis until verified; never state unverified claims as fact.
 - Your working memory is the only thing you carry between tasks. Before finishing, update it if something should carry over: memory_edit changes a part, memory_write replaces it all. Keep it short and point to knowledge IDs and files instead of copying them.
 - Another agent verifies your results. When you verify, inspect the artifacts yourself and fail anything that is not demonstrated.

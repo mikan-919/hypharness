@@ -3,11 +3,11 @@ import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
-import type { Runtime } from "./agent.ts";
+import { systemPrompt, type Runtime } from "./agent.ts";
 import { centralization, defaultConfig, Store } from "./db.ts";
-import { runScheduler } from "./scheduler.ts";
+import { runScheduler, steer } from "./scheduler.ts";
 import { tools, type ToolContext } from "./tools.ts";
-import { emit, MAX_DECLINES, withheldTools } from "./triggers.ts";
+import { emit, MAX_DECLINES, PANEL, withheldTools } from "./triggers.ts";
 
 type Ctx = { messages: Message[] };
 const call = (name: string, args: Parameters<typeof fauxToolCall>[1]) => fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
@@ -58,76 +58,107 @@ function setup(m: ReturnType<typeof market>) {
   return { store, rt };
 }
 
-test("market: lead splits, the investor funds, a worker answers, the critic passes it, and lead submits", async () => {
+test("market: lead splits, a panel of investors funds it, a worker answers, the critics pass it, and lead submits", async () => {
   const m = market({ budget: 5 });
   const { store, rt } = setup(m);
   expect((await runScheduler(rt)).status).toBe("done");
   expect(readFileSync(join(rt.workspace, "answer.txt"), "utf8")).toBe("Oslo");
   const kinds = store.all<{ kind: string; claimed_by: string; status: string }>("select kind, claimed_by, status from tasks order by created_at");
-  expect(kinds.filter(t => t.kind === "invest").map(t => t.claimed_by)).toEqual(["investor"]);
-  expect(kinds.filter(t => t.kind === "critique").map(t => [t.claimed_by, t.status])).toEqual([["critic", "done"]]);
+  expect(kinds.filter(t => t.kind === "invest").map(t => t.claimed_by).sort()).toEqual(["investor", "investor-2", "investor-3"]);
+  expect(kinds.filter(t => t.kind === "critique").map(t => [t.claimed_by, t.status]).sort()).toEqual([["critic", "done"], ["critic-2", "done"], ["critic-3", "done"]]);
   // lead never does or claims work, and its tools exclude doing it.
   expect(kinds.filter(t => t.claimed_by === "lead").every(t => t.kind === "steer")).toBe(true);
   const withheld = (id: string) => withheldTools(store, store.agent(id)!);
   expect(withheld("lead").has("file_write") && withheld("lead").has("goal_fund")).toBe(true);
-  expect(withheld("investor").has("goal_fund")).toBe(false);
+  expect(withheld("investor").has("goal_fund") || withheld("investor-3").has("goal_fund")).toBe(false);
   expect(withheld("worker").has("goal_fund") && !withheld("worker").has("file_write")).toBe(true);
   expect(store.get<{ budget: number }>("select budget from tasks where kind = 'work'")!.budget).toBe(5);
 });
 
-test("market: a task that spends its budget fails and goes back to the investor", async () => {
+test("market: a task that spends its budget fails and goes back to the investors", async () => {
   const { store, rt } = setup(market({ budget: 2, workerLoops: true }));
   await runScheduler(rt, 6);
   const work = store.get<{ id: string; status: string; feedback: string }>("select * from tasks where kind = 'work'")!;
   expect([work.status, work.feedback]).toEqual(["failed", "budget exhausted"]);
   expect(store.get<{ n: number }>("select count(*) n from usage where task = ?", work.id)!.n).toBe(2);
-  const refund = store.all<{ description: string }>("select description from tasks where kind = 'invest' order by created_at").at(1);
+  const refund = store.all<{ description: string }>("select description from tasks where kind = 'invest' order by created_at").at(PANEL);
   expect(refund?.description).toContain(`spent its budget of 2 model calls`);
 });
 
-test("market: the investor can decline only a limited number of subgoals of one goal", () => {
+test("market: investors vote; a majority funds with the median budget, and only a limited number of subgoals can be declined", () => {
   const store = new Store(":memory:");
   store.init("p", "", { ...defaultConfig, organization: "market" });
   const lead = store.agent("lead")!;
   const ctx = (agent: string, task: string) => ({ store, agent: store.agent(agent)!, task: store.task(task)!, workspace: "", contextDir: "", episode: "e", messages: [] }) as ToolContext;
-  const decline = () => {
+  const subgoal = () => {
     const goal = store.id("G");
     store.run("insert into goals(id, parent, description, status, owner, created_at) values(?, 'G0', 'sub', 'open', 'lead', 0)", goal);
     store.tx(() => emit(store, lead.id, "goal_created", { id: goal, parent: "G0" }));
-    const task = store.get<{ id: string }>("select id from tasks where kind = 'invest' and target = ?", goal)!.id;
-    expect(store.claim(task, "investor")).toBe(true);
-    return () => tools.goal_decline!.run(ctx("investor", task), { goal, reason: "not worth it" });
+    const tasks = store.all<{ id: string; assignee: string }>("select id, assignee from tasks where kind = 'invest' and target = ? order by assignee", goal);
+    for (const t of tasks) expect(store.claim(t.id, t.assignee)).toBe(true);
+    return { goal, vote: (i: number, v: { budget: number } | "decline") => v === "decline"
+      ? tools.goal_decline!.run(ctx(tasks[i]!.assignee, tasks[i]!.id), { goal, reason: `no ${i}` })
+      : tools.goal_fund!.run(ctx(tasks[i]!.assignee, tasks[i]!.id), { goal, budget: v.budget, rationale: `pays ${i}` }) };
   };
-  for (let i = 0; i < MAX_DECLINES; i++) expect(decline()()).toStartWith("Declined");
-  expect(() => decline()()).toThrow("fund this one with a small budget instead");
-  // Only the investor's invest task can fund or decline.
+  // Two of three fund: the goal is funded with the median of their budgets (the lower one of two).
+  const funded = subgoal();
+  expect(funded.vote(0, { budget: 30 })).toContain("waits for the other investors");
+  expect(funded.vote(1, "decline")).toContain("waits");
+  expect(funded.vote(2, { budget: 10 })).toContain("funded");
+  expect(store.get<{ budget: number; description: string }>("select budget, description from tasks where kind = 'work' and goal = ?", funded.goal)).toMatchObject({ budget: 10 });
+  // A majority to decline drops it with every decliner's reason.
+  for (let n = 0; n < MAX_DECLINES; n++) {
+    const s = subgoal();
+    s.vote(0, "decline"); s.vote(1, { budget: 5 });
+    expect(s.vote(2, "decline")).toContain("declined");
+    expect(store.goal(s.goal)!.feedback).toBe("declined: no 0 / no 2");
+  }
+  expect(() => subgoal().vote(0, "decline")).toThrow("fund this one with a small budget instead");
+  // Only an investor's own invest task can fund or decline.
   expect(() => tools.goal_fund!.run(ctx("lead", store.get<{ id: string }>("select id from tasks where kind = 'invest' and status = 'claimed'")!.id), { goal: "G0", budget: 1, rationale: "x" })).toThrow();
 });
 
-test("market: an objection goes to the evaluator, whose ruling decides the work and the critic's record", () => {
+test("market: any critic's objection goes to the evaluators, whose majority ruling decides the work and the critics' record", () => {
   const store = new Store(":memory:");
   store.init("p", "", { ...defaultConfig, organization: "market" });
   store.addAgent("worker", "worker", "host");
   const ctx = (agent: string, task: string) => ({ store, agent: store.agent(agent)!, task: store.task(task)!, workspace: "", contextDir: "", episode: "e", messages: [] }) as ToolContext;
-  const finish = (agent: string, kind: string, verdict?: "pass" | "fail", result = "r") => {
-    const t = store.get<{ id: string }>("select id from tasks where kind = ? and status = 'open'", kind)!.id;
-    expect(store.claim(t, agent)).toBe(true);
-    tools.task_finish!.run(ctx(agent, t), { result, verdict });
-    return t;
+  // Each member of the open panel of this kind votes in turn.
+  const panel = (kind: string, ...votes: ["pass" | "fail", string][]) => {
+    const open = store.all<{ id: string; assignee: string }>("select id, assignee from tasks where kind = ? and status = 'open' order by assignee", kind);
+    expect(open).toHaveLength(PANEL);
+    open.forEach((t, i) => { expect(store.claim(t.id, t.assignee)).toBe(true); tools.task_finish!.run(ctx(t.assignee, t.id), { verdict: votes[i]![0], result: votes[i]![1] }); });
+  };
+  const submit = (result: string) => {
+    const t = store.get<{ id: string }>("select id from tasks where kind = 'work' and status = 'open'")!.id;
+    expect(store.claim(t, "worker")).toBe(true);
+    tools.task_finish!.run(ctx("worker", t), { result });
   };
   const work = store.addTask({ goal: "G0", kind: "work", description: "write answer.txt", author: "lead", exclude: "lead", budget: 5 });
-  finish("worker", "work", undefined, "answer.txt");
+  submit("answer.txt");
+  panel("critique", ["pass", "fine"], ["fail", "answer.txt is empty"], ["pass", "fine"]);
   expect(store.task(work)!.status).toBe("review");
-  finish("critic", "critique", "fail", "answer.txt is empty");
-  expect(store.task(work)!.status).toBe("review");
-  expect(store.get<{ description: string }>("select description from tasks where kind = 'judge'")!.description).toContain("answer.txt is empty");
-  finish("evaluator", "judge", "fail", "the file is empty");
-  expect([store.task(work)!.status, store.task(work)!.feedback]).toEqual(["open", "the file is empty"]);
-  // The next critique shows the critic its record.
-  finish("worker", "work", undefined, "answer.txt now has the answer");
-  expect(store.get<{ description: string }>("select description from tasks where kind = 'critique' and status = 'open'")!.description).toContain("Your record: 1 upheld, 0 overruled");
-  finish("critic", "critique", "pass");
+  expect(store.get<{ description: string }>("select description from tasks where kind = 'judge'")!.description).toContain("critic-2: answer.txt is empty");
+  panel("judge", ["fail", "the file is empty"], ["pass", "looks fine"], ["fail", "empty file"]);
+  expect([store.task(work)!.status, store.task(work)!.feedback]).toEqual(["open", "evaluator: the file is empty\nevaluator-3: empty file"]);
+  // The next critique shows the critics their record: one ruling, upheld.
+  submit("answer.txt now has the answer");
+  expect(store.get<{ description: string }>("select description from tasks where kind = 'critique' and status = 'open'")!.description).toContain("record: 1 upheld, 0 overruled");
+  panel("critique", ["pass", "ok"], ["pass", "ok"], ["pass", "ok"]);
   expect(store.task(work)!.status).toBe("done");
+});
+
+test("market: every funded task gets an innovator of its own, so funded goals proceed in parallel", () => {
+  const store = new Store(":memory:");
+  store.init("p", "", { ...defaultConfig, organization: "market" });
+  const tasks = [1, 2, 3].map(i => store.addTask({ goal: "G0", kind: "work", description: `part ${i}`, author: "investor", budget: 5 }));
+  steer(store);
+  expect(store.agents().filter(a => a.id.startsWith("worker")).map(a => a.id)).toEqual(["worker", "worker-2", "worker-3"]);
+  // A busy innovator is not counted as free, and an idle one is reused before a new one is made.
+  expect(store.claim(tasks[0]!, "worker") && store.claim(tasks[1]!, "worker-2")).toBe(true);
+  store.addTask({ goal: "G0", kind: "work", description: "part 4", author: "investor", budget: 5 });
+  steer(store);
+  expect(store.agents().filter(a => a.id.startsWith("worker")).length).toBe(4);
 });
 
 test("centralization shows lead's share of calls, the agents, and the most domains one steward holds", () => {
@@ -184,4 +215,18 @@ test("agent_split checks the budget, and agent_merge folds a copy's memory into 
   split([{ description: "c", budget: 1 }]);
   expect(store.get<{ assignee: string }>("select assignee from tasks where description like 'Part of task %: c%'")!.assignee).toBe("worker-3");
   expect(store.agent("worker-3")!.status).toBe("active");
+});
+
+test("market prompts cast workers as innovators who argue their case and the market roles as capitalists who judge it", () => {
+  const store = new Store(":memory:");
+  store.init("p", "", { ...defaultConfig, organization: "market" });
+  for (const id of ["investor", "critic", "worker-2"]) store.addAgent(id, id, "host");
+  const prompt = (id: string) => systemPrompt(store, store.agent(id)!);
+  expect(prompt("worker-2")).toContain("You are an innovator");
+  expect(prompt("worker-2")).toContain("why it is promising");
+  for (const id of ["investor", "critic"]) expect(prompt(id)).toContain("You are a capitalist");
+  expect(prompt("lead")).toContain("You are lead");
+  const classic = new Store(":memory:");
+  classic.init("p", "", defaultConfig);
+  expect(systemPrompt(classic, classic.agent("lead")!)).not.toContain("capitalism");
 });

@@ -29,6 +29,14 @@ export const ROLES: Record<string, { role: string; kinds: Task["kind"][] }> = {
 
 export const isMarket = (store: Store) => store.config.organization === "market";
 
+// Several agents hold each market role: "critic-2" is a critic like "critic", and "worker-3" a worker.
+export const roleOf = (id: string) => id.replace(/-\d+$/, "");
+
+// Capitalists decide in panels: every funding decision, critique and ruling is voted on by this many agents of the role,
+// each judging on its own, so one agent's blind spot does not decide.
+// ponytail: fixed panel size; make it a run setting if the cost or the number of perspectives needs tuning
+export const PANEL = 3;
+
 // New knowledge in a domain since it was last organized before its steward is set to organize it.
 export const ORGANIZE_EVERY = 12;
 const ORGANIZE_BUDGET = 12;
@@ -38,7 +46,7 @@ const ORGANIZE_BUDGET = 12;
 export function eligible(store: Store, agent: Agent, task: Pick<Task, "kind">) {
   if (isSteward(agent.id) || task.kind === "organize") return isSteward(agent.id) && task.kind === "organize";
   if (!isMarket(store)) return true;
-  const r = ROLES[agent.id];
+  const r = ROLES[roleOf(agent.id)];
   return r ? r.kinds.includes(task.kind) : !Object.values(ROLES).some(x => x.kinds.includes(task.kind));
 }
 
@@ -61,7 +69,7 @@ export function withheldTools(store: Store, agent: Agent) {
   const withheld = new Set<string>();
   if (store.meta("resident") === "1") for (const t of ["domain_create", "domain_link", "domain_split", "domain_merge", "domain_transfer", "domain_request"]) withheld.add(t);
   if (isSteward(agent.id)) for (const t of ["file_write", "shell", "task_create", "task_assign", "agent_spawn", "goal_create", "goal_complete", "goal_update", "goal_transfer"]) withheld.add(t);
-  if (!(isMarket(store) && agent.id === "investor")) { withheld.add("goal_fund"); withheld.add("goal_decline"); }
+  if (!(isMarket(store) && roleOf(agent.id) === "investor")) { withheld.add("goal_fund"); withheld.add("goal_decline"); }
   if (isMarket(store) && agent.id === "lead") for (const t of ["file_write", "shell", "task_create", "task_assign", "agent_spawn"]) withheld.add(t);
   return withheld;
 }
@@ -69,7 +77,7 @@ export function withheldTools(store: Store, agent: Agent) {
 // Wakes the agent for a role, or creates it the first time the role is needed.
 function staff(store: Store, id: string) {
   const a = store.agent(id);
-  if (!a) store.addAgent(id, ROLES[id]?.role ?? `${id}: does funded work tasks and verifies results`, "host");
+  if (!a) store.addAgent(id, ROLES[roleOf(id)]?.role ?? `${id}: does funded work tasks and verifies results`, "host");
   else if (a.status === "dormant") store.run("update agents set status = 'active', idle = 0 where id = ?", id);
   return id;
 }
@@ -79,9 +87,22 @@ export function requestVerification(store: Store, goal: string, author: string, 
   return store.addTask({ goal, kind: "verify", author, exclude: store.config.maxAgents > 1 ? author : null, target, description });
 }
 
-// Judge rulings so far: an upheld objection is a fail verdict against the work, an overruled one a pass.
+// Opens one task for each member of a panel (role, role-2, ...); they share a panel ID so the decision waits for every vote.
+function convene(store: Store, role: string, t: Omit<Parameters<Store["addTask"]>[0], "assignee" | "panel">) {
+  const panel = store.id("P");
+  for (let i = 1; i <= PANEL; i++) store.addTask({ ...t, assignee: staff(store, i === 1 ? role : `${role}-${i}`), panel });
+}
+
+// Every vote of the task's panel once all members have voted, or undefined while some have not. A task from before panels is a panel of one.
+export function panelVotes(store: Store, task: Task) {
+  const votes = task.panel ? store.all<Task>("select * from tasks where panel = ? order by created_at", task.panel) : [store.task(task.id)!];
+  return votes.every(v => v.status === "done") ? votes : undefined;
+}
+
+// Rulings so far, one per evaluator panel: an upheld objection is a majority fail against the work, an overruled one is not.
 export function criticRecord(store: Store) {
-  const r = store.get<{ upheld: number; overruled: number }>("select coalesce(sum(result like 'fail:%'), 0) upheld, coalesce(sum(result like 'pass:%'), 0) overruled from tasks where kind = 'judge' and status = 'done'")!;
+  const r = store.get<{ upheld: number; overruled: number }>(`select coalesce(sum(f * 2 > n), 0) upheld, coalesce(sum(f * 2 <= n), 0) overruled
+    from (select sum(result like 'fail:%') f, count(*) n from tasks where kind = 'judge' and status = 'done' group by coalesce(panel, id))`)!;
   return { upheld: Number(r.upheld), overruled: Number(r.overruled) };
 }
 
@@ -90,11 +111,11 @@ function invest(store: Store, author: string, goal: Goal, why: string) {
   const siblings = store.all<{ status: string; feedback: string | null }>("select status, feedback from goals where parent = ? and id != ?", goal.parent, goal.id);
   const declined = siblings.filter(s => s.feedback?.startsWith("declined")).length;
   const spent = store.all<{ budget: number | null; used: number }>("select t.budget, (select count(*) from usage u where u.task = t.id) used from tasks t where t.goal = ? and t.budget is not null", goal.id);
-  store.addTask({
-    goal: goal.id, kind: "invest", author, assignee: staff(store, "investor"), target: goal.id,
+  convene(store, "investor", {
+    goal: goal.id, kind: "invest", author, target: goal.id,
     description: `${why}\nGoal ${goal.id}: ${goal.description}\nParent goal ${goal.parent}: ${store.goal(goal.parent!)?.description ?? "-"}\n`
       + `Funding so far for this goal: ${spent.length ? spent.map(s => `${s.used} of ${s.budget} calls used`).join("; ") : "none"}. Declined siblings: ${declined} of at most ${MAX_DECLINES}.\n`
-      + `Decide with goal_fund (a model-call budget and why it should pay back) or goal_decline (why it is not worth it).`,
+      + `Decide with goal_fund (a model-call budget and why it should pay back) or goal_decline (why it is not worth it). ${PANEL} investors vote on their own; a majority funds it with the median of their budgets.`,
   });
 }
 
@@ -176,11 +197,11 @@ export const EVENT_TRIGGERS: EventTrigger[] = [
     on: "work_submitted", modes: ["market"],
     fire(store, agent, d) {
       const task = store.task(d.task)!, record = criticRecord(store);
-      store.addTask({
-        goal: task.goal, kind: "critique", author: agent, assignee: staff(store, "critic"), exclude: agent, target: task.id,
+      convene(store, "critic", {
+        goal: task.goal, kind: "critique", author: agent, exclude: agent, target: task.id,
         description: `Task ${task.id} is finished and waits for review.\nTask: ${task.description}\nClaimed result: ${d.result}\n`
           + `Inspect the actual artifacts. If you find concrete problems, finish with verdict fail and list each objection with its evidence; otherwise finish with verdict pass.\n`
-          + `An evaluator rules on your objections. Your record: ${record.upheld} upheld, ${record.overruled} overruled; overruled objections count against you.`,
+          + `${PANEL} critics review it on their own; the work passes only if none objects. Evaluators rule on the objections. The critics' record: ${record.upheld} upheld, ${record.overruled} overruled; overruled objections count against you.`,
       });
     },
   },
@@ -188,10 +209,10 @@ export const EVENT_TRIGGERS: EventTrigger[] = [
     on: "objections_raised", modes: ["market"],
     fire(store, agent, d) {
       const task = store.task(d.target)!;
-      store.addTask({
-        goal: task.goal, kind: "judge", author: agent, assignee: staff(store, "evaluator"), target: task.id,
-        description: `The critic objected to task ${task.id}.\nTask: ${task.description}\nClaimed result: ${task.result}\nObjections: ${d.objections}\n`
-          + `Check each objection's evidence yourself. Finish with verdict fail if an objection holds (the work goes back with your reasons), or pass if none does.`,
+      convene(store, "evaluator", {
+        goal: task.goal, kind: "judge", author: agent, target: task.id,
+        description: `Critics objected to task ${task.id}.\nTask: ${task.description}\nClaimed result: ${task.result}\nObjections: ${d.objections}\n`
+          + `Check each objection's evidence yourself. Finish with verdict fail if an objection holds (the work goes back with your reasons), or pass if none does. ${PANEL} evaluators rule on their own; the majority decides.`,
       });
     },
   },
@@ -216,19 +237,22 @@ export const STATE_TRIGGERS: StateTrigger[] = [
     },
   },
   {
-    // Funded work and verification need a worker; the market roles never take them.
+    // Funded work and verification need workers; the market roles never take them. Each open task gets a worker that is not
+    // busy with another, so several innovators work on funded goals in parallel; a new one is staffed when none is free.
     name: "unstaffed", modes: ["market"],
     scan(store) {
-      const open = store.all<Task>("select * from tasks where status = 'open' and assignee is null and kind in ('work', 'verify')");
+      const open = store.all<Task>("select * from tasks where status = 'open' and assignee is null and kind in ('work', 'verify') order by created_at");
+      const busy = new Set(store.all<{ id: string }>("select claimed_by id from tasks where status = 'claimed' union select assignee from tasks where status = 'open' and assignee is not null").map(r => r.id));
       for (const t of open) {
-        const takers = store.agents().filter(a => mayTake(store, a, t));
-        if (takers.some(a => a.status === "active")) continue;
-        const dormant = takers.find(a => a.status === "dormant");
-        if (dormant) { staff(store, dormant.id); continue; }
-        // Everyone who could take it did the work: a new verifier is staffed instead.
-        let id = "worker", n = 1;
-        for (let a = store.agent(id); a && (a.status === "merged" || !mayTake(store, a, t)); a = store.agent(id)) id = n++ === 1 ? "verifier" : `verifier-${n - 1}`;
-        staff(store, id);
+        const takers = store.agents().filter(a => a.status !== "merged" && !busy.has(a.id) && mayTake(store, a, t));
+        const taker = takers.find(a => a.status === "active") ?? takers.find(a => a.status === "dormant");
+        if (taker) { busy.add(staff(store, taker.id)); continue; }
+        if (store.agents().length >= store.config.maxAgents) continue;
+        // Everyone free who could verify it did the work, so verification gets a new verifier rather than another worker.
+        const base = t.kind === "work" ? "worker" : "verifier";
+        let n = 1;
+        while (store.agent(n === 1 ? base : `${base}-${n}`)) n++;
+        busy.add(staff(store, n === 1 ? base : `${base}-${n}`));
       }
     },
   },
