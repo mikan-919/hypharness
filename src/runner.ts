@@ -1,11 +1,9 @@
 import { DurableObject } from 'cloudflare:workers'
 
-export type Message = { role: 'user' | 'assistant'; content: string }
-
 type Pending = { resolve: (text: string) => void; reject: (e: Error) => void }
 
-// 1アカウントの手元のランナーとの WebSocket を持つ。Workers から chatgpt.com へは接続できないため、
-// Codex の呼び出しはランナーに任せる
+// 1アカウントの手元のランナーとの WebSocket を持つ。エージェントの記憶と処理はランナーにあり、
+// Worker は発言を中継するだけにする
 export class Runner extends DurableObject<Env> {
   // 応答待ちの依頼。ランナーの応答を待つあいだはリクエストが続くため、インスタンスは休止しない
   private pending = new Map<string, Pending>()
@@ -26,11 +24,11 @@ export class Runner extends DurableObject<Env> {
     return this.ctx.getWebSockets().length > 0
   }
 
-  complete(instructions: string, messages: Message[]) {
+  chat(agent: string, message: string) {
     const ws = this.ctx.getWebSockets()[0]
     if (!ws) throw new Error('ランナーが接続されていません')
     const id = crypto.randomUUID()
-    ws.send(JSON.stringify({ id, instructions, messages }))
+    ws.send(JSON.stringify({ id, agent, message }))
     // ponytail: タイムアウトなし。ランナーが応答しないと切断まで待つ。必要になったら期限を足す
     return new Promise<string>((resolve, reject) => {
       this.pending.set(id, { resolve, reject })

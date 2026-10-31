@@ -5,7 +5,6 @@ import { csrf } from 'hono/csrf'
 import { createMiddleware } from 'hono/factory'
 import { HTTPException } from 'hono/http-exception'
 import type { Accounts, RelyingParty, User } from './accounts'
-import type { Agent } from './agent'
 import { rootView } from './renderer'
 import type { Runner } from './runner'
 
@@ -129,21 +128,14 @@ const routes = app
     if (typeof message !== 'string' || !message.trim()) {
       return c.json({ error: 'message に文字列を指定してください' }, 400)
     }
-    // 記憶はアカウントとエージェント名の組ごとのインスタンスに分ける
-    const agent = (c.env.AGENT as DurableObjectNamespace<Agent>).getByName(
-      `${c.var.user.id}/${name}`,
-    )
-    return c.json({ reply: await agent.chat(c.var.user.id, message) })
+    // エージェントの記憶と処理はランナーにあるため、ランナーが止まっていると応答できない
+    const stub = runner(c.env, c.var.user.id)
+    if (!(await stub.connected())) {
+      return c.json({ error: 'ランナーが接続されていません' }, 503)
+    }
+    return c.json({ reply: await stub.chat(name, message) })
   })
-  .get('/agents/:name/memories', auth, async (c) =>
-    c.json(
-      await (c.env.AGENT as DurableObjectNamespace<Agent>)
-        .getByName(`${c.var.user.id}/${c.req.param('name')}`)
-        .memories(),
-    ),
-  )
 
 export default routes
 export { Accounts } from './accounts'
-export { Agent } from './agent'
 export { Runner } from './runner'

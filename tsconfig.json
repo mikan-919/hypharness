@@ -19,6 +19,5 @@
     "cloudflare.config.ts",
     "vite.config.ts",
     ".cloudflare/types"
-  ],
-  "exclude": ["src/**/*.test.ts"]
+  ]
 }

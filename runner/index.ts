@@ -1,5 +1,5 @@
-// 手元で動かし、hypharness の Worker から届く依頼を Codex（ChatGPT でのサインイン）で処理する。
-// Workers から chatgpt.com へは接続できないため、モデルの呼び出しだけをここで行う
+// 手元で動かすエージェントの実行環境。Worker から届いた発言を、エージェントごとの記憶と
+// Codex（ChatGPT でのサインイン）で処理する。Workers から chatgpt.com へは接続できないため、ここで動かす
 import { chmod, mkdir, rename } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -11,16 +11,17 @@ import type {
 } from '@earendil-works/pi-ai'
 import { createModels } from '@earendil-works/pi-ai/models'
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
+import { type Message, openAgent } from './agent'
 
 const DIR = join(homedir(), '.hyph')
 const CONFIG = join(DIR, 'config.json')
 const AUTH = join(DIR, 'auth.json')
+const AGENTS = join(DIR, 'agents')
 const MODEL = 'gpt-6.1-sol'
 const RECONNECT_MS = 5000
 
 type Config = { url: string; token: string }
-type Message = { role: 'user' | 'assistant'; content: string }
-type Request = { id: string; instructions: string; messages: Message[] }
+type Request = { id: string; agent: string; message: string }
 
 const [command, ...args] = process.argv.slice(2)
 
@@ -61,15 +62,24 @@ async function start() {
   const model = models.getModel('openai', MODEL)
   if (!model) throw new Error(`未対応のモデルです: ${MODEL}`)
 
+  await mkdir(AGENTS, { recursive: true, mode: 0o700 })
+  const agents = new Map<string, ReturnType<typeof openAgent>>()
+
   const handle = async (request: Request) => {
+    const agent = agents.get(request.agent) ?? openAgent(AGENTS, request.agent)
+    agents.set(request.agent, agent)
+    const { instructions, messages } = agent.context(request.message)
     const response = await models.complete(model, {
-      systemPrompt: request.instructions,
-      messages: request.messages.map((m) => toPiMessage(m, model)),
+      systemPrompt: instructions,
+      messages: messages.map((m) => toPiMessage(m, model)),
     })
     if (response.stopReason === 'error') throw new Error(response.errorMessage)
-    return response.content
+    const text = response.content
       .flatMap((block) => (block.type === 'text' ? [block.text] : []))
       .join('')
+    agent.remember('user', request.message)
+    agent.remember('assistant', text)
+    return text
   }
 
   const connect = () => {
@@ -100,7 +110,7 @@ async function start() {
   connect()
 }
 
-// 過去の応答は Codex 以外のモデルが書いたこともあるため、本文だけの応答として渡す
+// 記憶には応答の本文だけを残しているため、本文だけの応答として渡す
 function toPiMessage(
   message: Message,
   model: { api: AssistantMessage['api']; provider: string; id: string },

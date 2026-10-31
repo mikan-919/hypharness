@@ -36,8 +36,8 @@ function RunnerSetup({ connected }: { connected: boolean }) {
     <section className='flex flex-col gap-2 text-sm'>
       <p>
         {connected
-          ? 'ランナーが接続中です。Codex で応答します。'
-          : 'ランナーが未接続です。Workers AI で応答します。'}
+          ? 'ランナーが接続中です。'
+          : 'ランナーが未接続のため、エージェントは応答できません。'}
       </p>
       {token ? (
         <pre className='overflow-x-auto rounded-lg bg-muted p-3'>
