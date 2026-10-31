@@ -1,4 +1,4 @@
-import { validateToolCall, type AssistantMessage, type Message, type ToolCall } from "@earendil-works/pi-ai";
+import { Type, validateToolCall, type AssistantMessage, type Message, type ToolCall } from "@earendil-works/pi-ai";
 import { MODEL_TIMEOUT_MS, withTimeout } from "./agent.ts";
 import { defaultConfig, Store, type Agent, type Task } from "./db.ts";
 import type { Llm } from "./locomo.ts";
@@ -10,6 +10,14 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { remember, type Embed } from "./resident-memory.ts";
 import { frontPacket } from "./resident-market.ts";
+import { setOrder } from "./resident.ts";
+
+// The resident front only talks; work goes to the organization behind it as the purpose, so a request for a report
+// is handed over instead of being written into one long reply that keeps the user waiting.
+const ORDER = { name: "order_set", description: "Set the organization's top-level purpose to work the user explicitly asked for (research, a report, code). Use it only for such a request, in the user's own words; it replaces the current purpose.", parameters: Type.Object({ purpose: Type.String({ minLength: 1, description: "The work as the user asked for it" }) }) };
+const RESIDENT_SYSTEM = `You are the front of a conversation with a user. Reply in the user's language, briefly: a few sentences.
+You do not do the work yourself. Research, reports, code and other tasks are carried out by the organization behind you. When the user asks for such work, hand it over with order_set and say that it has started; do not write the result yourself.
+The supplied memory packet and recent messages are your context; use the lookup tools only if the packet is insufficient.`;
 
 // Front chat: the model that talks to the user keeps only the last few messages in its context. Older messages are
 // handed to DeLM as knowledge (one sentence per item, one domain per day), and the model looks them up when a reply
@@ -88,8 +96,8 @@ export async function reply(llm: Llm, store: Store, text: string, embed?: Embed)
     content: `${packet ? `Memory packet:\n${packet.text}\n\n` : ""}${recent.length > 1 ? `Recent messages:\n${recent.slice(0, -1).map(m => turnOf(m).line).join("\n")}\n\n` : ""}New message from the user (${turnOf(recent.at(-1)!).when} UTC):\n${text}`,
   }];
   const lookup = resident ? ["knowledge_search", "knowledge_get"] : LOOKUP;
-  const schemas = lookup.map(name => ({ name, description: tools[name]!.description, parameters: tools[name]!.parameters }));
-  const system = resident ? `You are the front of a conversation. Reply in the user's language. The supplied memory packet and recent messages are your context; use the lookup tools only if the packet is insufficient. Do not assign work.` : SYSTEM;
+  const schemas = [...lookup.map(name => ({ name, description: tools[name]!.description, parameters: tools[name]!.parameters })), ...resident ? [ORDER] : []];
+  const system = resident ? RESIDENT_SYSTEM : SYSTEM;
   // Lookup tools read only the store; the agent and task are placeholders for the shared tool signature.
   const ctx = { store, agent: { id: "front" } as Agent, task: { id: "chat" } as Task, workspace: "", contextDir: "", episode: "chat", messages } as ToolContext;
   let calls = 0, lookups = 0, peakTokens = 0, answer = "";
@@ -110,9 +118,15 @@ export async function reply(llm: Llm, store: Store, text: string, embed?: Embed)
     for (const call of toolCalls) {
       let out: string, isError = false;
       try {
-        if (!lookup.includes(call.name)) throw new Error(`Unknown tool ${call.name}`);
-        out = String(await tools[call.name]!.run(ctx, validateToolCall(schemas, call)));
-        lookups++;
+        if (resident && call.name === ORDER.name) {
+          const { purpose } = validateToolCall(schemas, call) as { purpose: string };
+          setOrder(store, purpose);
+          out = `The organization now works on: ${purpose}`;
+        } else {
+          if (!lookup.includes(call.name)) throw new Error(`Unknown tool ${call.name}`);
+          out = String(await tools[call.name]!.run(ctx, validateToolCall(schemas, call)));
+          lookups++;
+        }
       } catch (e) { out = `Error: ${e instanceof Error ? e.message : String(e)}`; isError = true; }
       messages.push({ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: out.slice(0, defaultConfig.toolOutputLimit) }], isError, timestamp: Date.now() });
     }

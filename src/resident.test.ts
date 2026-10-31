@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { openResident, setOrder } from "./resident.ts";
 import { runWorkerPool } from "./scheduler.ts";
 import type { Runtime } from "./agent.ts";
-import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { history, reply, waitForFront } from "./chat.ts";
 import { tools, type ToolContext } from "./tools.ts";
 import { remember } from "./resident-memory.ts";
@@ -113,4 +113,18 @@ test("notifications wake an idle pool and changes before waiting are not lost", 
   await Promise.race([pool, Bun.sleep(1000).then(() => { throw new Error("Pool did not wake"); })]);
   expect(completed).toBe(true);
   store.db.close();
+});
+
+test("the resident front hands a request for work to the organization as the purpose instead of doing it", async () => {
+  const store = openResident(":memory:");
+  const faux = fauxProvider(), models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall("order_set", { purpose: "RSI の論文を調べてレポートにまとめる" })], { stopReason: "toolUse" }),
+    fauxAssistantMessage("調査を始めました。"),
+  ]);
+  const r = await reply({ models, model: faux.getModel() }, store, "RSI の論文を調べてレポートにまとめて", async () => [1, 0]);
+  expect(r.reply).toBe("調査を始めました。");
+  expect(store.purpose).toBe("RSI の論文を調べてレポートにまとめる");
+  expect(store.get<{ n: number }>("select count(*) n from log where event = 'order_changed'")!.n).toBe(1);
 });
