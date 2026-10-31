@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { join, relative } from "node:path";
 import { parseArgs } from "node:util";
 import type { Message } from "@earendil-works/pi-ai";
-import { canonicalUrl, render, safePath } from "../tools.ts";
+import { canonicalUrl, render, safePath, titleKey } from "../tools.ts";
 import { openModel } from "../auth.ts";
 import { history, openChat, organize, reply, WINDOW } from "../chat.ts";
 import { centralization, type Store } from "../db.ts";
@@ -51,7 +51,7 @@ function duplicates(d: Database) {
   const rows = all(d, `select id, gist, source from knowledge${merges(d) ? " where merged_into is null" : ""} order by created_at`) as { id: string; gist: string; source: string }[];
   const groups = new Map<string, { id: string; gist: string }[]>();
   for (const k of rows) {
-    const keys = [/^https?:\/\//.test(k.source) ? `source ${canonicalUrl(k.source)}` : null, k.gist.length >= 20 ? `gist ${k.gist.toLowerCase()}` : null];
+    const keys = [/^https?:\/\//.test(k.source) ? `source ${canonicalUrl(k.source)}` : null, titleKey(k.gist).length >= 20 ? `title ${titleKey(k.gist)}` : null];
     for (const key of keys) if (key) groups.set(key, [...groups.get(key) ?? [], { id: k.id, gist: k.gist }]);
   }
   return [...groups].filter(([, items]) => items.length > 1).map(([key, items]) => ({ id: key, key, items }));

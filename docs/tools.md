@@ -89,7 +89,7 @@
 | `file_search` | `query`, `path?` | 文字列を含む行を大文字小文字を区別せずに探し、ファイル名と行番号付きで最大40件返す |
 | `file_write` | `path`, `content` | ファイルを書く。途中のディレクトリは作られる |
 | `shell` | `command` | bubblewrap 内の作業ディレクトリでシェルコマンドを実行する（60秒で打ち切り）。起動時に `--allow-shell` を指定し、bubblewrap がある場合だけ使える |
-| `web_search` | `objective`, `queries`, `max_results?`, `include_domains?`, `after_date?` | Parallel Search API に fast モードで検索を送り、関連順の URL と抜粋を返す（既定で8件）。各結果は、題名を要旨、抜粋を原資料、URL を出典とする未検証の知識として自動で登録され、結果に知識 ID が付く。同じ文書は1件だけ登録される。arXiv の版違い（`abs`、`pdf`、`html` の各版）とミラー（ar5iv、alphaXiv、Hugging Face Papers）は `https://arxiv.org/abs/<ID>` に、そのほかの URL はフラグメント、`www.`、末尾の `/` を除いた形にそろえて照合する。20文字以上の題名が既存の知識の要旨と一致する場合も同じ文書とみなす。環境変数 `PARALLEL_API_KEY` がない起動では、モデルに渡す一覧から外れる |
+| `web_search` | `objective`, `queries`, `max_results?`, `include_domains?`, `after_date?` | Parallel Search API に fast モードで検索を送り、関連順の URL と抜粋を返す（既定で8件）。各結果は、題名を要旨、抜粋を原資料、URL を出典とする未検証の知識として自動で登録され、結果に知識 ID が付く。同じ文書は1件だけ登録される。arXiv の版違い（`abs`、`pdf`、`html` の各版）とミラー（ar5iv、alphaXiv、Hugging Face Papers）は `https://arxiv.org/abs/<ID>` に、そのほかの URL はフラグメント、`www.`、末尾の `/` を除いた形にそろえて照合する。題名も、先頭の arXiv ID、末尾のサイト名（「| OpenReview」「- Microsoft Research」「· GitHub」など）、先頭の「GitHub - 持ち主/リポジトリ:」と記号を除いて比べ、20文字以上で一致すれば同じ文書とみなす。環境変数 `PARALLEL_API_KEY` がない起動では、モデルに渡す一覧から外れる |
 
 ## MCP のツール
 

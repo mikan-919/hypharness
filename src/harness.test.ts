@@ -154,15 +154,25 @@ test("versions and copies of one paper become one knowledge item, and knowledge_
       result("https://arxiv.org/abs/2401.10020", "Self-Rewarding Language Models"),
       result("https://arxiv.org/pdf/2401.10020v2", "[2401.10020] Self-Rewarding LMs"),
       result("https://proceedings.mlr.press/v235/yuan24d.html", "Self-Rewarding Language Models"),
+      // The same work under a site's name, an arXiv ID, or a repository prefix is still one item.
+      result("https://arxiv.org/abs/2310.02304", "[2310.02304] Self-Taught Optimizer (STOP): Recursively Self-Improving Code Generation"),
+      result("https://openreview.net/forum?id=46Zgqo4QIU", "Self-Taught Optimizer (STOP): Recursively Self-Improving Code Generation | OpenReview"),
+      result("https://opt-ml.org/papers/2023/paper21.pdf", "Self-Taught Optimizer (STOP): Recursively Self-Improving Code Generation"),
+      result("https://github.com/microsoft/stop", "GitHub - microsoft/stop: Self-Taught Optimizer (STOP): Recursively Self-Improving Code Generation · GitHub"),
+      // A different work with a similar title stays separate.
+      result("https://arxiv.org/abs/2504.15228", "A Self-Improving Coding Agent | alphaXiv"),
     ] })) as unknown as typeof fetch;
     const out = await tools.web_search!.run(c, { objective: "x", queries: ["self rewarding"] });
     const ids = [...out.matchAll(/^\[\d\] (K-\S+)/gm)].map(m => m[1]);
-    expect(new Set(ids).size).toBe(1);
-    expect(store.all("select source from knowledge")).toEqual([{ source: "https://arxiv.org/abs/2401.10020" }]);
+    expect(new Set(ids.slice(0, 3)).size).toBe(1);
+    expect(new Set(ids.slice(3, 7)).size).toBe(1);
+    expect(new Set(ids).size).toBe(3);
+    expect(store.all("select source from knowledge order by created_at")).toEqual([{ source: "https://arxiv.org/abs/2401.10020" }, { source: "https://arxiv.org/abs/2310.02304" }, { source: "https://arxiv.org/abs/2504.15228" }]);
     // A fetched page replaces the shorter search excerpt instead of adding an item.
     const page = { ...c, fetchPage: async () => ({ url: "https://arxiv.org/html/2401.10020v3", text: "full text of the paper, longer than the excerpt" }) } as ToolContext;
     expect(await tools.web_fetch!.run(page, { url: "https://arxiv.org/html/2401.10020v3" })).toStartWith(`${ids[0]} `);
-    expect(store.get<{ n: number; raw: string }>("select count(*) n, raw from knowledge")).toEqual({ n: 1, raw: "full text of the paper, longer than the excerpt" });
+    expect(store.get<{ n: number }>("select count(*) n from knowledge")!.n).toBe(3);
+    expect(store.get<{ raw: string }>("select raw from knowledge where id = ?", ids[0])!.raw).toBe("full text of the paper, longer than the excerpt");
   } finally {
     globalThis.fetch = original;
     if (key === undefined) delete process.env.PARALLEL_API_KEY; else process.env.PARALLEL_API_KEY = key;

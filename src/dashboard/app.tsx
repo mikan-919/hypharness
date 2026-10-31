@@ -523,7 +523,7 @@ function Dashboard({ session, onDeleted, readOnly = false }: { session: string; 
             </CardContent>
           </Card>
           <Card>
-            <CardHeader><CardTitle>重複の候補</CardTitle><CardDescription>同じ文書（正規化した出典）か、20文字以上の同じ Gist を持つ未統合の知識。エージェントが knowledge_merge でまとめると消えます</CardDescription></CardHeader>
+            <CardHeader><CardTitle>重複の候補</CardTitle><CardDescription>同じ文書（正規化した出典）か、同じ題名（サイト名や arXiv ID を除いて20文字以上）を持つ未統合の知識。エージェントが knowledge_merge でまとめると消えます</CardDescription></CardHeader>
             <CardContent>
               <DataTable rows={o.duplicates} empty="重複なし" columns={[
                 { key: "key", label: "一致した値", render: r => <Clip text={r.key} width="max-w-sm" /> },
