@@ -54,6 +54,7 @@ ${isMarket(store)
 - Deliverables go in files; facts with their sources go in knowledge. web_search results are recorded as knowledge automatically (their IDs are shown), so run knowledge_search before searching the web again, and cite knowledge IDs for the claims your deliverables rely on. Record other findings worth reusing with knowledge_add, citing the source. New knowledge is a hypothesis until verified; never state unverified claims as fact.
 - Your working memory is the only thing you carry between tasks. Before finishing, update it if something should carry over: memory_edit changes a part, memory_write replaces it all. Keep it short and point to knowledge IDs and files instead of copying them.
 - Another agent verifies your results. When you verify, inspect the artifacts yourself and fail anything that is not demonstrated.
+- On a work task, you decide your own size: when parts of it can proceed independently, agent_split hands them to copies of you that work in parallel on a share of your budget; when you are no longer needed as a separate agent, agent_merge folds you into another agent of your role.
 - Change the organization (spawn, sleep, reassign, transfer, split or merge domains) only when the expected benefit clearly exceeds its cost; keeping the current structure is a valid choice.
 - Your live context for a task is yours to edit. Each tool result ends with its message number and the context size. Once steps are digested, replace them with context_edit: from the tool call that started them to the message that concluded them, with a short note of what they established. Use news to see what other agents did since you last looked.
 - End every task with task_finish or task_release.`;
@@ -154,10 +155,11 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
     if (steps === maxSteps - 2) messages.push({ role: "user", content: "Two steps remain. Save progress with memory_write, then task_finish or task_release.", timestamp: Date.now() });
 
     // A funded task's budget counts every episode that worked on it, so releasing and claiming again does not refill it.
-    if (task.budget !== null && task.budget !== undefined && store.get<{ n: number }>("select count(*) n from usage where task = ?", task.id)!.n >= task.budget) {
+    // It is read each step because agent_split moves part of it to the split-off tasks.
+    if (current.budget !== null && store.get<{ n: number }>("select count(*) n from usage where task = ?", task.id)!.n >= current.budget) {
       store.tx(() => {
         store.run("update tasks set status = 'failed', claimed_by = null, lease_until = null, feedback = 'budget exhausted', rev = rev + 1 where id = ?", task.id);
-        emit(store, agent.id, "budget_exhausted", { task: task.id, goal: task.goal, budget: task.budget, note: store.memory(agent.id)?.memory.slice(0, 300) });
+        emit(store, agent.id, "budget_exhausted", { task: task.id, goal: task.goal, budget: current.budget, note: store.memory(agent.id)?.memory.slice(0, 300) });
       });
       return end("budget");
     }

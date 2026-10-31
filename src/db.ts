@@ -54,7 +54,7 @@ export function centralization(db: Database) {
   return { leadShare: calls.n ? Math.round((calls.lead / calls.n) * 1000) / 1000 : 0, agents, maxDomainsPerSteward };
 }
 
-export type Agent = { id: string; role: string; status: "active" | "dormant"; parent: string | null; idle: number };
+export type Agent = { id: string; role: string; status: "active" | "dormant" | "merged"; parent: string | null; idle: number };
 export type Goal = { id: string; parent: string | null; description: string; status: "open" | "review" | "done" | "dropped"; owner: string; deliverable: string | null; feedback: string | null; verified_by: string | null; rev: number };
 export type Task = {
   id: string; goal: string; kind: "work" | "verify" | "steer" | "invest" | "critique" | "judge" | "organize"; description: string; status: "open" | "claimed" | "review" | "done" | "failed";

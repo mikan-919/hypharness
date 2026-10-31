@@ -559,6 +559,70 @@ export const tools: Record<string, Def<TSchema>> = {
       return `${a.id} is dormant`;
     },
   }),
+  agent_split: def({
+    description: "Split yourself: hand independent parts of your current work task to copies of you (same role, a copy of your working memory) that work on them in parallel. Each part takes its budget out of your task's remaining budget. Keep the rest, and how the parts fit together, for yourself.",
+    parameters: Type.Object({
+      parts: Type.Array(Type.Object({ description: Str("Self-contained part: what to do, where to write it, how success is checked"), budget: Opt(Type.Integer({ minimum: 1, description: "Model calls for this part; required when your task has a budget" })) }), { minItems: 1, maxItems: 4 }),
+      reason: Str("Why these parts go faster or better in parallel"),
+    }),
+    run(c, a) {
+      dynamicOnly(c.store);
+      const task = requireCurrent(c);
+      if (task.kind !== "work") fail("Only a work task can be split");
+      const budgeted = task.budget !== null;
+      if (a.parts.some(p => (p.budget === undefined) === budgeted)) fail(budgeted ? "Give each part a budget" : "Your task has no budget; leave the parts' budgets out");
+      const given = a.parts.reduce((n, p) => n + (p.budget ?? 0), 0);
+      return c.store.tx(() => {
+        if (budgeted) {
+          const left = task.budget! - c.store.get<{ n: number }>("select count(*) n from usage where task = ?", task.id)!.n;
+          if (given >= left) fail(`The parts need ${given} model calls but your task has ${left} left, and you need at least one to finish`);
+          c.store.run("update tasks set budget = budget - ? where id = ?", given, task.id);
+        }
+        const memory = c.store.memory(c.agent.id)!.memory, base = c.agent.id.replace(/-\d+$/, "");
+        const created = a.parts.map(p => {
+          // A dormant copy of the same role is reused before a new one is made.
+          let copy = c.store.get<Agent>("select * from agents where role = ? and status = 'dormant' and id != ? order by created_at", c.agent.role, c.agent.id)?.id;
+          if (copy) c.store.run("update agents set status = 'active', idle = 0 where id = ?", copy);
+          else {
+            if (c.store.agents().length >= c.store.config.maxAgents) fail(`Agent limit ${c.store.config.maxAgents} reached`);
+            let n = 2;
+            while (c.store.agent(`${base}-${n}`)) n++;
+            c.store.addAgent(copy = `${base}-${n}`, c.agent.role, c.agent.id);
+          }
+          c.store.writeMemory(copy, memory);
+          mirror(c, copy);
+          const id = c.store.addTask({
+            goal: task.goal, kind: "work", author: c.agent.id, assignee: copy, budget: p.budget ?? null,
+            description: `Part of task ${task.id}, split off by ${c.agent.id}: ${p.description}\nThe whole task: ${task.description}`,
+          });
+          return `${id} -> ${copy}`;
+        });
+        c.store.log(c.agent.id, "agent_split", { task: task.id, parts: created, reason: a.reason });
+        return `Split ${task.id}: ${created.join(", ")}${budgeted ? `; your task keeps ${task.budget! - given} model calls` : ""}`;
+      });
+    },
+  }),
+  agent_merge: def({
+    description: "Merge yourself into another agent of the same role when you are no longer needed as a separate agent: your working memory is appended to its memory and you retire for good. Finish your current task afterwards.",
+    parameters: Type.Object({ into: Str("Agent of your role that takes over your memory"), reason: Str("Why a separate agent is no longer worth it") }),
+    run(c, a) {
+      dynamicOnly(c.store);
+      const target = c.store.agent(a.into) ?? fail(`Unknown agent ${a.into}`);
+      if (target.id === c.agent.id) fail("Cannot merge into yourself");
+      if (target.role !== c.agent.role || target.status === "merged") fail(`${a.into} is not an agent of your role that can take you over`);
+      return c.store.tx(() => {
+        if (c.store.get("select id from tasks where (claimed_by = ?1 and status = 'claimed' and id != ?2) or (assignee = ?1 and status = 'open')", c.agent.id, c.task.id)) fail("You still have tasks; finish or release them first");
+        const mine = c.store.memory(c.agent.id)!.memory, theirs = c.store.memory(target.id)!.memory;
+        const merged = mine ? `${theirs}${theirs ? "\n\n" : ""}## Merged from ${c.agent.id}\n${mine}` : theirs;
+        if (merged.length > c.store.config.memoryLimit) fail(`Merged memory would be ${merged.length} characters, over the limit of ${c.store.config.memoryLimit}; compact your memory first`);
+        if (merged !== theirs) c.store.writeMemory(target.id, merged);
+        c.store.run("update agents set status = 'merged' where id = ?", c.agent.id);
+        c.store.log(c.agent.id, "agent_merged", { id: c.agent.id, into: target.id, reason: a.reason });
+        mirror(c, target.id);
+        return `Merged into ${target.id}; finish your current task`;
+      });
+    },
+  }),
 
   // --- External information ---
   web_fetch: def({
