@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { ArrowDown, BookOpen, Brain, ChevronRight, CircleCheck, CircleX, Coins, ExternalLink, FilePen, FileText, Globe, Info, ListChecks, LoaderCircle, Merge, Search, Split, Target, Users, Wrench } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -195,32 +198,185 @@ function AgentPanel({ session, agent }: { session: string; agent: Row }) {
   );
 }
 
-type Stream = { id: string; agent: string; task: string; kind: string | null; description: string | null; steps: number; text: string };
+type StreamSummary = { id: string; agent: string; task: string; status: string; kind: string | null; description: string | null; steps: number; lastAt: number | null; last: string };
+type StreamItem = { type: "task"; text: string } | { type: "note"; text: string } | { type: "text"; text: string } | { type: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; context?: string };
+type StreamDetail = Omit<StreamSummary, "steps" | "lastAt" | "last"> & { items: StreamItem[] };
 
-// One episode's context as it grows; it follows the newest step unless the reader has scrolled up.
-function StreamCard({ stream }: { stream: Stream }) {
-  const ref = useRef<HTMLPreElement>(null), follow = useRef(true);
-  useEffect(() => { if (follow.current) ref.current?.scrollTo(0, ref.current.scrollHeight); }, [stream.text]);
+// Each role keeps one colour, so an agent is recognisable in the list and in the conversation.
+const ROLE_COLORS: Record<string, string> = {
+  lead: "bg-violet-600", investor: "bg-amber-600", critic: "bg-rose-600", evaluator: "bg-sky-600",
+  worker: "bg-emerald-600", verifier: "bg-teal-600", explorer: "bg-indigo-600", steward: "bg-stone-500",
+};
+// worker-2, explorer-p-… and steward-d-… share the colour of the word before the first hyphen.
+const roleOf = (agent: string) => agent.split("-")[0]!;
+function Avatar({ agent, size = "size-8" }: { agent: string; size?: string }) {
+  return <div className={`${size} ${ROLE_COLORS[roleOf(agent)] ?? "bg-zinc-500"} flex shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white uppercase`}>{agent.slice(0, 2)}</div>;
+}
+
+// Agents' text is untrusted: react-markdown renders it as React elements, never as raw HTML, and drops unsafe URLs.
+function Md({ text }: { text: string }) {
+  return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ node: _, ...props }) => <a {...props} target="_blank" rel="noreferrer" /> }}>{text}</ReactMarkdown></div>;
+}
+const Pre = ({ text, error = false }: { text: string; error?: boolean }) =>
+  <pre className={`max-h-96 overflow-auto rounded-md bg-background p-3 text-xs whitespace-pre-wrap ${error ? "text-destructive" : ""}`}>{text || "(空)"}</pre>;
+const str = (v: unknown) => Array.isArray(v) ? v.join(", ") : typeof v === "string" ? v : v === undefined ? "" : JSON.stringify(v);
+const isMd = (path: unknown) => typeof path === "string" && /\.(md|markdown)$/i.test(path);
+const Caption = ({ children }: { children: React.ReactNode }) => <div className="mb-1 text-xs text-muted-foreground">{children}</div>;
+function Verdict({ value }: { value: unknown }) {
+  if (value !== "pass" && value !== "fail") return null;
+  return <Badge variant={value === "pass" ? "default" : "destructive"}>{value === "pass" ? "合格" : "不合格"}</Badge>;
+}
+
+// How each tool reads in the conversation: an icon, what it did in words, the one argument that says the most, and,
+// opened, its arguments and result laid out for that tool rather than as raw JSON.
+type Tool = Extract<StreamItem, { type: "tool" }>;
+type ToolView = { icon: React.ComponentType<{ className?: string }>; label: string; summary?: (a: Record<string, unknown>) => string; body?: (t: Tool) => React.ReactNode };
+const TOOL_VIEWS: Record<string, ToolView> = {
+  file_write: { icon: FilePen, label: "ファイルを書く", summary: a => str(a.path), body: t => <>{isMd(t.args.path) ? <Md text={str(t.args.content)} /> : <Pre text={str(t.args.content)} />}</> },
+  file_read: { icon: FileText, label: "ファイルを読む", summary: a => str(a.path), body: t => {
+    if (t.result === undefined || t.error) return null;
+    const [head, ...rest] = t.result.split("\n"), body = rest.join("\n");
+    return <><Caption>{head}</Caption>{isMd(t.args.path) ? <Md text={body} /> : <Pre text={body} />}</>;
+  } },
+  file_list: { icon: FileText, label: "ファイルの一覧", summary: a => str(a.path) || "." },
+  file_search: { icon: Search, label: "ファイルを検索", summary: a => str(a.query) },
+  web_search: { icon: Search, label: "Web を検索", summary: a => str(a.queries), body: t => {
+    if (t.result === undefined || t.error) return null;
+    const hits = t.result.split("\n\n").map(block => /^\[(\d+)\] (K-\S+) (.*)\n(\S+)\n?([\s\S]*)$/.exec(block)).filter(m => m !== null);
+    return <div className="grid gap-2">
+      {typeof t.args.objective === "string" && <Caption>目的: {t.args.objective}</Caption>}
+      {hits.map(([, n, id, title, url, excerpt]) => (
+        <div key={n} className="rounded-md border bg-background p-2.5">
+          <a href={url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-sm font-medium hover:underline">{title}<ExternalLink className="size-3 shrink-0" /></a>
+          <div className="truncate text-xs text-emerald-700 dark:text-emerald-400">{url} <span className="text-muted-foreground">・{id}</span></div>
+          <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{excerpt}</p>
+        </div>
+      ))}
+      {!hits.length && <Pre text={t.result} />}
+    </div>;
+  } },
+  web_fetch: { icon: Globe, label: "ページを取得", summary: a => str(a.url) },
+  knowledge_add: { icon: BookOpen, label: "知識を記録", summary: a => str(a.gist), body: t => <div className="grid gap-1.5 text-sm">
+    <div className="font-medium">{str(t.args.gist)}</div><div className="text-muted-foreground">{str(t.args.summary)}</div><Caption>出典: {str(t.args.source)}</Caption>
+  </div> },
+  knowledge_search: { icon: Search, label: "知識を検索", summary: a => str(a.query) },
+  knowledge_get: { icon: BookOpen, label: "知識を開く", summary: a => `${str(a.id)}（${a.level === "raw" ? "原文" : "要約"}）` },
+  knowledge_verify: { icon: BookOpen, label: "知識の検証を依頼", summary: a => str(a.id) },
+  knowledge_merge: { icon: Merge, label: "知識を統合", summary: a => `${str(a.duplicates)} → ${str(a.keep)}` },
+  goal_create: { icon: Target, label: "目標を作る", summary: a => str(a.description), body: t => <Md text={str(t.args.description)} /> },
+  goal_complete: { icon: Target, label: "目標を提出", summary: a => str(a.id), body: t => <><Caption>成果物</Caption><Md text={str(t.args.deliverable)} /></> },
+  goal_update: { icon: Target, label: "目標を書き換える", summary: a => a.drop ? `${str(a.id)} を取りやめ` : str(a.description), body: t => <Md text={str(t.args.description ?? "（取りやめ）")} /> },
+  goal_fund: { icon: Coins, label: "出資に投票", summary: a => `${str(a.budget)} 回`, body: t => <Md text={str(t.args.rationale)} /> },
+  goal_decline: { icon: Coins, label: "見送りに投票", summary: a => str(a.reason), body: t => <Md text={str(t.args.reason)} /> },
+  task_finish: { icon: ListChecks, label: "タスクを終える", summary: a => str(a.result), body: t => <Md text={str(t.args.result)} /> },
+  task_release: { icon: ListChecks, label: "タスクを返す", summary: a => str(a.note), body: t => <Md text={str(t.args.note)} /> },
+  task_create: { icon: ListChecks, label: "タスクを作る", summary: a => str(a.description), body: t => <Md text={str(t.args.description)} /> },
+  memory_write: { icon: Brain, label: "作業記憶を書き直す", summary: a => str(a.content), body: t => <Md text={str(t.args.content)} /> },
+  memory_edit: { icon: Brain, label: "作業記憶を直す", summary: a => str(a.new), body: t => <div className="grid gap-2 text-xs">
+    <pre className="rounded-md bg-red-500/10 p-2 whitespace-pre-wrap">- {str(t.args.old)}</pre><pre className="rounded-md bg-emerald-500/10 p-2 whitespace-pre-wrap">+ {str(t.args.new)}</pre>
+  </div> },
+  context_edit: { icon: Brain, label: "文脈を要約する", summary: a => `#${str(a.from)}–#${str(a.to)}: ${str(a.note)}` },
+  agent_split: { icon: Split, label: "分裂する", summary: a => str(a.reason) },
+  agent_merge: { icon: Merge, label: "統合する", summary: a => `→ ${str(a.into)}` },
+  agent_spawn: { icon: Users, label: "エージェントを作る", summary: a => str(a.id) },
+  news: { icon: Users, label: "他の担当の動きを見る" },
+};
+
+function ToolStep({ item, pending }: { item: Tool; pending: boolean }) {
+  const view: ToolView = TOOL_VIEWS[item.name] ?? { icon: Wrench, label: item.name };
+  const Icon = view.icon, summary = (view.summary?.(item.args) ?? str(Object.values(item.args)[0])).replace(/\s+/g, " ").slice(0, 140);
+  const custom = view.body?.(item), consumed = custom != null && (item.name === "file_read" || item.name === "web_search");
+  const status = pending ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
+    : item.error ? <CircleX className="size-4 text-destructive" /> : item.result === undefined ? null : <CircleCheck className="size-4 text-emerald-600" />;
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">{stream.agent} <Badge variant="secondary">{stream.kind ?? "-"}</Badge> <span className="text-muted-foreground text-sm font-normal">{stream.steps} ステップ</span></CardTitle>
-        <CardDescription><Clip text={`${stream.task}: ${stream.description ?? ""}`} width="max-w-full" /></CardDescription>
-      </CardHeader>
-      <CardContent>
-        <pre ref={ref} onScroll={e => { const el = e.currentTarget; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}
-          className="h-96 overflow-auto rounded-md border p-3 text-xs whitespace-pre-wrap">{stream.text}</pre>
-      </CardContent>
-    </Card>
+    <details className="group rounded-xl border bg-card open:shadow-sm">
+      <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3 py-2 text-sm [&::-webkit-details-marker]:hidden">
+        <Icon className="size-4 shrink-0 text-muted-foreground" />
+        <span className="shrink-0 font-medium">{view.label}</span>
+        <span className="min-w-0 truncate text-muted-foreground">{summary}</span>
+        <span className="ml-auto flex shrink-0 items-center gap-2">
+          {item.name === "task_finish" && <Verdict value={item.args.verdict} />}
+          {pending && <span className="text-xs text-muted-foreground">実行中…</span>}
+          {status}
+          <ChevronRight className="size-4 text-muted-foreground transition-transform group-open:rotate-90" />
+        </span>
+      </summary>
+      <div className="grid gap-3 border-t px-3 py-3">
+        {custom ?? <><Caption>引数</Caption><Pre text={JSON.stringify(item.args, null, 2)} /></>}
+        {item.result !== undefined && !consumed && <div><Caption>{item.error ? "エラー" : "結果"}{item.context && ` ・ ${item.context}`}</Caption><Pre text={item.result} error={item.error} /></div>}
+        {consumed && item.context && <Caption>{item.context}</Caption>}
+        <div className="font-mono text-[11px] text-muted-foreground">{item.name}</div>
+      </div>
+    </details>
   );
 }
 
-// Every agent's episode in progress side by side, refreshed as the agents take steps.
+// One episode as a conversation: the task as the opening message, the model's text beside its avatar, tool calls as
+// folded steps. It follows the newest step unless the reader has scrolled up.
+function Conversation({ session, id }: { session: string; id: string }) {
+  const s = usePoll<StreamDetail>(`/api/stream?s=${enc(session)}&id=${enc(id)}`, 2000);
+  const ref = useRef<HTMLDivElement>(null);
+  const [follow, setFollow] = useState(true);
+  useEffect(() => { if (follow) ref.current?.scrollTo(0, ref.current.scrollHeight); }, [s?.items.length, follow, id]);
+  useEffect(() => setFollow(true), [id]);
+  if (!s) return <div className="p-6 text-muted-foreground">読み込み中…</div>;
+  const running = s.status === "running";
+  const lastTool = [...s.items].reverse().find(i => i.type === "tool") as Extract<StreamItem, { type: "tool" }> | undefined;
+  return (
+    <div className="flex min-h-0 min-w-0 flex-col">
+      <div className="flex items-center gap-3 border-b px-4 py-3">
+        <Avatar agent={s.agent} />
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 font-medium">{s.agent} <Badge variant="secondary">{s.kind ?? "-"}</Badge> <Status value={s.status} /></div>
+          <div className="truncate text-xs text-muted-foreground" title={s.description ?? ""}>{s.task}: {s.description}</div>
+        </div>
+      </div>
+      <div ref={ref} onScroll={e => { const el = e.currentTarget; setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 60); }} className="relative min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto grid max-w-3xl grid-cols-[minmax(0,1fr)] gap-4 px-4 py-6">
+          {s.items.map((item, i) => item.type === "task" ? (
+            <details key={i} className="rounded-2xl bg-muted px-4 py-3 text-sm">
+              <summary className="cursor-pointer font-medium">タスクの指示（作業記憶と目標を含む）</summary>
+              <div className="mt-3"><Md text={item.text} /></div>
+            </details>
+          ) : item.type === "note" ? (
+            <div key={i} className="flex items-start gap-2 text-xs text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" /><span className="whitespace-pre-wrap">{item.text}</span></div>
+          ) : item.type === "text" ? (
+            <div key={i} className="flex gap-3"><Avatar agent={s.agent} size="size-7" /><div className="min-w-0 flex-1 pt-1"><Md text={item.text} /></div></div>
+          ) : (
+            <div key={item.id} className="pl-10"><ToolStep item={item} pending={running && item === lastTool && item.result === undefined} /></div>
+          ))}
+          {running && lastTool?.result !== undefined && <div className="flex items-center gap-2 pl-10 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />考えています…</div>}
+        </div>
+      </div>
+      {!follow && <Button size="sm" variant="secondary" className="absolute right-6 bottom-6 shadow" onClick={() => setFollow(true)}><ArrowDown className="size-4" />最新へ</Button>}
+    </div>
+  );
+}
+
+// Agents' episodes as a list of conversations, those in progress first, with the selected one open beside it.
 function Streams({ session }: { session: string }) {
-  const list = usePoll<Stream[]>(`/api/streams?s=${enc(session)}`, 2000);
+  const list = usePoll<StreamSummary[]>(`/api/streams?s=${enc(session)}`, 2000);
+  const [selected, setSelected] = useState<string>();
+  const current = list?.find(s => s.id === selected) ?? list?.[0];
   if (!list) return <div className="text-muted-foreground">読み込み中…</div>;
-  if (!list.length) return <div className="text-muted-foreground">実行中のエピソードはありません</div>;
-  return <div className="grid gap-4 xl:grid-cols-2">{list.map(s => <StreamCard key={s.id} stream={s} />)}</div>;
+  if (!list.length) return <div className="text-muted-foreground">エピソードはまだありません</div>;
+  return (
+    <Card className="relative grid h-[75vh] grid-rows-[12rem_1fr] gap-0 overflow-hidden py-0 md:grid-cols-[18rem_minmax(0,1fr)] md:grid-rows-1">
+      <div className="min-h-0 overflow-y-auto border-b md:border-r md:border-b-0">
+        {list.map(s => (
+          <button key={s.id} type="button" onClick={() => setSelected(s.id)}
+            className={`flex w-full items-start gap-3 px-3 py-2.5 text-left hover:bg-muted/60 ${s.id === current?.id ? "bg-muted" : ""}`}>
+            <div className="relative"><Avatar agent={s.agent} />{s.status === "running" && <span className="absolute -right-0.5 -bottom-0.5 size-3 rounded-full border-2 border-background bg-emerald-500" />}</div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 text-sm font-medium"><span className="truncate">{s.agent}</span><span className="ml-auto shrink-0 text-xs font-normal text-muted-foreground">{s.kind}</span></div>
+              <div className="truncate text-xs text-muted-foreground">{s.last || s.description}</div>
+            </div>
+          </button>
+        ))}
+      </div>
+      {current && <Conversation session={session} id={current.id} />}
+    </Card>
+  );
 }
 
 type RunInfo = { dir: string; kind: string; args: string[]; startedAt: number; endedAt: number | null; exitCode: number | null; running: boolean };

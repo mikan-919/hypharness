@@ -102,14 +102,47 @@ function agent(d: Database, id: string) {
   };
 }
 
-// Every episode in progress with its context so far, one per working agent; the newest end is kept when it is long.
-const STREAM_CHARS = 20_000;
-function streams(d: Database) {
-  const rows = all(d, "select e.id, e.agent, e.task, t.kind, t.description, e.messages from episodes e left join tasks t on t.id = e.task where e.status = 'running' order by e.agent") as { messages: string }[];
-  return rows.map(({ messages, ...r }) => {
-    const parsed = JSON.parse(messages) as Message[], text = render(parsed);
-    return { ...r, steps: parsed.filter(m => m.role === "assistant").length, text: text.length > STREAM_CHARS ? `…${text.slice(-STREAM_CHARS)}` : text };
+// An episode as a conversation: the task it opened with, the model's text, notes the harness added, and each tool
+// call paired with its result. Thinking is encrypted and left out; long results keep their beginning.
+type StreamItem = { type: "task" | "note" | "text"; text: string }
+  | { type: "tool"; id: string; name: string; args: unknown; result?: string; error?: boolean; context?: string };
+const STREAM_ITEMS = 300, RESULT_CHARS = 6000;
+const textOf = (content: string | { type: string; text?: string }[]) => typeof content === "string" ? content : content.map(b => b.text ?? "").join("");
+function streamItems(messages: Message[]) {
+  const items: StreamItem[] = [], calls = new Map<string, Extract<StreamItem, { type: "tool" }>>();
+  messages.forEach((m, i) => {
+    if (m.role === "user") items.push({ type: i === 0 ? "task" : "note", text: textOf(m.content) });
+    else if (m.role === "assistant") for (const b of m.content) {
+      if (b.type === "text" && b.text.trim()) items.push({ type: "text", text: b.text });
+      if (b.type === "toolCall") { const call = { type: "tool" as const, id: b.id, name: b.name, args: b.arguments }; calls.set(b.id, call); items.push(call); }
+    } else if (m.role === "toolResult") {
+      const call = calls.get(m.toolCallId);
+      if (!call) return;
+      // Each result ends with the harness's position and context readout; it is shown apart from the result.
+      const text = textOf(m.content), readout = /\n\[#\d+ · live context: [^\]]*\]$/.exec(text);
+      const body = readout ? text.slice(0, readout.index) : text;
+      Object.assign(call, { result: body.length > RESULT_CHARS ? `${body.slice(0, RESULT_CHARS)}\n… (${body.length - RESULT_CHARS} more characters)` : body, error: m.isError, context: readout?.[0].trim().slice(1, -1) });
+    }
   });
+  return items.length > STREAM_ITEMS ? [items[0]!, { type: "note" as const, text: `(${items.length - STREAM_ITEMS} earlier steps not shown)` }, ...items.slice(-STREAM_ITEMS + 1)] : items;
+}
+
+// Episodes in progress first, then the most recently active ones, each with its last action for the list.
+function streams(d: Database) {
+  const rows = all(d, `select e.id, e.agent, e.task, e.status, t.kind, t.description, e.messages,
+      (select max(at) from usage u where u.task = e.task and u.agent = e.agent) lastAt
+    from episodes e left join tasks t on t.id = e.task order by e.status = 'running' desc, lastAt desc limit 40`) as { messages: string }[];
+  return rows.map(({ messages, ...r }) => {
+    const items = streamItems(JSON.parse(messages) as Message[]), last = items.at(-1);
+    return { ...r, steps: items.filter(i => i.type === "tool" || i.type === "text").length, last: !last ? "" : last.type === "tool" ? last.name : last.text.slice(0, 120) };
+  });
+}
+
+function stream(d: Database, id: string) {
+  const row = d.query("select e.id, e.agent, e.task, e.status, t.kind, t.description, e.messages from episodes e left join tasks t on t.id = e.task where e.id = ?").get(id) as { messages: string } | null;
+  if (!row) return undefined;
+  const { messages, ...r } = row;
+  return { ...r, items: streamItems(JSON.parse(messages) as Message[]) };
 }
 
 function episode(d: Database, id: string) {
@@ -288,6 +321,7 @@ const server = Bun.serve({
     }),
     "/api/agent": guard(async req => { const p = params(req), s = await session(p.get("s")); return json(s && agent(s.db, p.get("id") ?? "")); }),
     "/api/streams": guard(async req => { const s = await session(params(req).get("s")); return json(s && streams(s.db)); }),
+    "/api/stream": guard(async req => { const p = params(req), s = await session(p.get("s")); return json(s && stream(s.db, p.get("id") ?? "")); }),
     "/api/episode": guard(async req => { const p = params(req), s = await session(p.get("s")); return json(s && episode(s.db, p.get("id") ?? "")); }),
     "/api/files": guard(async req => {
       const s = await session(params(req).get("s"));

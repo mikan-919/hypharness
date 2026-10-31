@@ -28,7 +28,12 @@ test("dashboard lists sessions read-only and refuses paths it did not discover",
   for (const [id, gist, source] of [["K-1", "Self-Rewarding Language Models", "https://arxiv.org/abs/2401.10020"], ["K-2", "x", "https://arxiv.org/html/2401.10020v2"], ["K-3", "other", "https://example.org"]])
     store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, '', '', ?, 'hypothesis', 'worker', 0)", id, gist, source);
   // worker-2 is mid-episode; worker's episode has finished.
-  const messages = (text: string) => JSON.stringify([{ role: "user", content: text, timestamp: 0 }, { role: "assistant", content: [{ type: "text", text: "reading the sources" }], timestamp: 0 }]);
+  const messages = (text: string) => JSON.stringify([
+    { role: "user", content: text, timestamp: 0 },
+    { role: "assistant", content: [{ type: "thinking", thinking: "" }, { type: "text", text: "reading the sources" }, { type: "toolCall", id: "c1", name: "file_read", arguments: { path: "notes.md" } }], timestamp: 0 },
+    { role: "toolResult", toolCallId: "c1", toolName: "file_read", content: [{ type: "text", text: "notes body\n[#2 · live context: ~120 tokens]" }], isError: false, timestamp: 0 },
+    { role: "assistant", content: [{ type: "toolCall", id: "c2", name: "web_fetch", arguments: { url: "https://arxiv.org/abs/2310.02304" } }], timestamp: 0 },
+  ]);
   store.run("insert into episodes(id, agent, task, messages, status) values('T-a:worker:1', 'worker', 'T-a', ?, 'finished')", messages("done task"));
   store.run("insert into episodes(id, agent, task, messages, status) values('T-b:worker-2:1', 'worker-2', 'T-b', ?, 'running')", messages("survey the papers"));
   store.db.close();
@@ -41,10 +46,18 @@ test("dashboard lists sessions read-only and refuses paths it did not discover",
     expect(overview.spans.map(s => [s.agent, s.start, s.end])).toEqual([["worker", 10, 30], ["worker-2", 20, 40], ["lead", 50, 60]]);
     expect(overview.peak).toEqual({ agents: 2, work: 2 });
     expect(overview.duplicates.map(g => [g.key, g.items.map(k => k.id)])).toEqual([["source https://arxiv.org/abs/2401.10020", ["K-1", "K-2"]]]);
-    const streams = await (await fetch(`${base}/api/streams?s=.hyph/run`)).json() as { agent: string; kind: string; steps: number; text: string }[];
-    expect(streams.map(s => [s.agent, s.kind, s.steps])).toEqual([["worker-2", "work", 1]]);
-    expect(streams[0]!.text).toContain("survey the papers");
-    expect(streams[0]!.text).toContain("reading the sources");
+    // Episodes in progress come first; each lists its steps and last action.
+    const streams = await (await fetch(`${base}/api/streams?s=.hyph/run`)).json() as { id: string; agent: string; status: string; kind: string; steps: number; last: string }[];
+    expect(streams.map(s => [s.agent, s.status, s.kind, s.steps, s.last])).toEqual([["worker-2", "running", "work", 3, "web_fetch"], ["worker", "finished", "work", 3, "web_fetch"]]);
+    // An episode reads as a conversation: the task, the model's text, and each call with its result, the readout apart.
+    const stream = await (await fetch(`${base}/api/stream?s=.hyph/run&id=${streams[0]!.id}`)).json() as { items: unknown[] };
+    expect(stream.items).toEqual([
+      { type: "task", text: "survey the papers" },
+      { type: "text", text: "reading the sources" },
+      { type: "tool", id: "c1", name: "file_read", args: { path: "notes.md" }, result: "notes body", error: false, context: "#2 · live context: ~120 tokens" },
+      { type: "tool", id: "c2", name: "web_fetch", args: { url: "https://arxiv.org/abs/2310.02304" } },
+    ]);
+    expect((await fetch(`${base}/api/stream?s=.hyph/run&id=nope`)).status).toBe(404);
     expect((await fetch(`${base}/api/streams?s=..`)).status).toBe(404);
     expect((await fetch(`${base}/api/overview?s=..`)).status).toBe(404);
     expect((await fetch(`${base}/api/file?s=.hyph/run&path=../state.sqlite`)).status).toBe(400);
