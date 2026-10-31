@@ -1,7 +1,7 @@
 import { BudgetExhausted, runEpisode, type Runtime } from "./agent.ts";
 import { centralization, type Agent, type Goal, type Store, type Task } from "./db.ts";
 import { mirror } from "./tools.ts";
-import { eligible, scan } from "./triggers.ts";
+import { mayTake, scan } from "./triggers.ts";
 import { McpTools } from "./mcp.ts";
 
 // State triggers (src/triggers.ts), such as an idle goal going back to its owner.
@@ -11,14 +11,14 @@ function claimable(store: Store, agent: Agent) {
   const candidates = store.all<Task>(
     `select * from tasks where status = 'open' and (assignee is null or assignee = ?1) and (exclude is null or exclude != ?1)
      order by assignee is null, kind != 'verify', created_at`, agent.id);
-  for (const t of candidates) if (eligible(store, agent, t) && store.claim(t.id, agent.id)) return store.task(t.id)!;
+  for (const t of candidates) if (mayTake(store, agent, t) && store.claim(t.id, agent.id)) return store.task(t.id)!;
 }
 
-// A verify task excludes its author; if no active agent can take it, wake or create one rather than self-verify.
+// A verify task excludes its author and anyone who did the work; if no active agent can take it, wake or create one rather than self-verify.
 function unblockVerification(store: Store) {
   const blocked = store.all<Task>("select * from tasks where status = 'open' and kind = 'verify' and exclude is not null");
   for (const t of blocked) {
-    const takers = store.all<Agent>("select * from agents where id != ?", t.exclude).filter(a => eligible(store, a, t));
+    const takers = store.agents().filter(a => mayTake(store, a, t));
     if (takers.some(a => a.status === "active")) continue;
     const dormant = takers.find(a => a.status === "dormant");
     if (dormant) {

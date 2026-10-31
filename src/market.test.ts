@@ -148,6 +148,12 @@ test("market: a worker splits off a part to a copy of itself, which does it on a
   expect(work).toEqual([{ claimed_by: "worker", budget: 5, status: "done" }, { claimed_by: "worker-2", budget: 3, status: "done" }]);
   // Each part is critiqued on its own by the critic.
   expect(store.get<{ n: number }>("select count(*) n from tasks where kind = 'critique' and status = 'done' and claimed_by = 'critic'")!.n).toBe(2);
+  // Neither the worker nor its copy verifies the goal they worked on; a verifier is staffed for it.
+  const verifiers = store.all<{ claimed_by: string }>("select claimed_by from tasks where kind = 'verify'").map(t => t.claimed_by);
+  expect(verifiers.length).toBeGreaterThan(0);
+  expect(verifiers.every(v => v === "verifier")).toBe(true);
+  expect(store.all<{ verified_by: string }>("select verified_by from goals where parent = 'G0'").map(g => g.verified_by)).toEqual(["verifier"]);
+  expect(store.all<{ detail: string }>("select detail from log where event = 'verified' and detail like '%\"self\"%'").every(l => JSON.parse(l.detail).self === false)).toBe(true);
 });
 
 test("agent_split checks the budget, and agent_merge folds a copy's memory into another of its role and retires it", () => {

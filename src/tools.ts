@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "node
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { StringEnum, Type, type Message, type Static, type TSchema, type Tool } from "@earendil-works/pi-ai";
 import type { Agent, Goal, Store, Task } from "./db.ts";
-import { emit, MAX_DECLINES, requestVerification } from "./triggers.ts";
+import { didWork, emit, MAX_DECLINES, requestVerification } from "./triggers.ts";
 import { fetchPublicPage } from "./web-fetch.ts";
 import { sandboxShell } from "./sandbox.ts";
 import { recordToolKnowledge, type Embed } from "./resident-memory.ts";
@@ -329,7 +329,7 @@ export const tools: Record<string, Def<TSchema>> = {
           if (!a.verdict) fail("Verify tasks need a verdict");
           applyVerdict(c.store, c.agent.id, task.target!, a.verdict === "pass", a.result);
           c.store.run("update tasks set status = 'done', result = ?, rev = rev + 1 where id = ?", `${a.verdict}: ${a.result}`, task.id);
-          c.store.log(c.agent.id, "verified", { target: task.target, verdict: a.verdict, self: task.author === c.agent.id });
+          c.store.log(c.agent.id, "verified", { target: task.target, verdict: a.verdict, self: didWork(c.store, c.agent.id, task.target!) });
         } else if (task.kind === "work") {
           c.store.run("update tasks set status = 'review', result = ?, rev = rev + 1 where id = ?", a.result, task.id);
           emit(c.store, c.agent.id, "work_submitted", { task: task.id, result: a.result });
