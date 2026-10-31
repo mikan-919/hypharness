@@ -11,6 +11,15 @@ type Status = {
   cycle: number
   running: boolean
   nextSettleAt: number | null
+  // runner/loop.ts の Activity
+  agents: {
+    name: string
+    state: '待機' | '順番待ち' | '実行中' | '失敗' | '停止'
+    since: number
+    label: string
+    detail: string
+    tools: number
+  }[]
   log: string[]
   companies: {
     id: number
@@ -19,7 +28,12 @@ type Status = {
     capital: number
     value: number
     workers: string[]
-    pool: { id: number; body: string }[]
+    tasks: {
+      id: number
+      worker: string | null
+      body: string
+      result: string | null
+    }[]
     board: { id: number; from_agent: string; content: string }[]
   }[]
   investors: { name: string; cash: number }[]
@@ -47,15 +61,18 @@ export default function Economy(props: PageProps<'Economy'>) {
   const [goal, setGoal] = useState(status?.goal ?? '')
   const [error, setError] = useState('')
 
-  // ループを回しているあいだは、進み具合を取りに行く
+  // ループを回しているあいだと、止めたあとに動き終えていないエージェントがいるあいだは、進み具合を取りに行く
+  const busy =
+    status?.running ||
+    status?.agents.some((a) => a.state === '実行中' || a.state === '順番待ち')
   useEffect(() => {
-    if (!status?.running) return
+    if (!busy) return
     const timer = setInterval(async () => {
       const response = await fetch('/economy/status')
       if (response.ok) setStatus((await response.json()) as Status)
     }, 3000)
     return () => clearInterval(timer)
-  }, [status?.running])
+  }, [busy])
 
   const run = (task: () => Promise<Status>) => async () => {
     setError('')
@@ -129,6 +146,28 @@ export default function Economy(props: PageProps<'Economy'>) {
       </div>
       {error && <p className='text-destructive text-sm'>{error}</p>}
 
+      <section className='flex flex-col gap-2 text-sm'>
+        <h2 className='font-bold'>エージェント</h2>
+        {status.agents.length === 0 && <p>（まだ動いていません）</p>}
+        {status.agents.map((a) => (
+          <div key={a.name} className='flex gap-3'>
+            <span className='w-28 shrink-0 font-bold'>{a.name}</span>
+            <span
+              className={`w-28 shrink-0 ${a.state === '失敗' ? 'text-destructive' : ''}`}
+            >
+              {a.state}（{elapsed(a.since)}）
+            </span>
+            <span className='min-w-0 break-words'>
+              {(a.state === '実行中' || a.state === '順番待ち') && a.label && (
+                <span className='font-bold'>{a.label}: </span>
+              )}
+              {a.state === '実行中' && `ツール ${a.tools}回、直近 `}
+              {a.detail}
+            </span>
+          </div>
+        ))}
+      </section>
+
       <section className='flex flex-col gap-2'>
         <h2 className='font-bold'>会社</h2>
         {status.companies.map((c) => (
@@ -139,7 +178,13 @@ export default function Economy(props: PageProps<'Economy'>) {
             </p>
             <p>設計思想: {c.philosophy || '未設定'}</p>
             <p>worker: {c.workers.join(', ') || 'なし'}</p>
-            <p>タスクプール（未着手 {c.pool.length}件）</p>
+            <p>
+              仕事: 未着手{' '}
+              {c.tasks.filter((t) => !t.worker && !t.result).length}
+              件、作業中 {c.tasks.filter((t) => t.worker && !t.result).length}
+              件、完了 {c.tasks.filter((t) => t.result).length}
+              件（新しい20件のうち）
+            </p>
             {c.board.length > 0 && (
               <details>
                 <summary>掲示板（{c.board.length}件）</summary>
@@ -150,12 +195,24 @@ export default function Economy(props: PageProps<'Economy'>) {
                 ))}
               </details>
             )}
-            {c.pool.length > 0 && (
-              <ul className='list-disc pl-5'>
-                {c.pool.map((t) => (
-                  <li key={t.id}>{t.body}</li>
-                ))}
-              </ul>
+            {c.tasks.length > 0 && (
+              <details>
+                <summary>仕事の一覧</summary>
+                <ul className='list-disc pl-5'>
+                  {c.tasks.map((t) => (
+                    <li key={t.id} className='whitespace-pre-wrap'>
+                      [
+                      {t.result
+                        ? `完了 ${t.worker}`
+                        : t.worker
+                          ? `作業中 ${t.worker}`
+                          : '未着手'}
+                      ] {t.id}: {t.body}
+                      {t.result && `\n→ ${t.result}`}
+                    </li>
+                  ))}
+                </ul>
+              </details>
             )}
           </div>
         ))}
@@ -210,4 +267,10 @@ export default function Economy(props: PageProps<'Economy'>) {
       </section>
     </main>
   )
+}
+
+// 状態が変わってからの時間。ポーリングで描き直すたびに更新される
+function elapsed(since: number) {
+  const seconds = Math.max(0, Math.round((Date.now() - since) / 1000))
+  return seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds / 60)}分`
 }

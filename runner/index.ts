@@ -128,6 +128,8 @@ async function start(url: string | undefined) {
   // ループの進み具合。画面が状態を取りに来たときに返す
   const lines: string[] = []
   let loops: ReturnType<typeof startLoops> | null = null
+  // 止めたあとも、各エージェントがどこで止まったかを見せるため、最後のループの状態を残す
+  let activity: ReturnType<typeof startLoops>['activity'] = () => []
   const log = (line: string) => {
     console.log(line)
     lines.push(`${new Date().toLocaleTimeString('ja-JP')} ${line}`)
@@ -138,11 +140,12 @@ async function start(url: string | undefined) {
     cycle: economy.cycle(),
     running: loops !== null,
     nextSettleAt: loops?.nextSettleAt() ?? null,
+    agents: activity(),
     log: lines,
     companies: economy.companies().map((c) => ({
       ...c,
       workers: economy.workersOf(c.id),
-      pool: economy.pool(c.id),
+      tasks: economy.tasks(c.id),
       board: economy.board(c.id),
     })),
     investors: economy.investors(),
@@ -173,7 +176,7 @@ async function start(url: string | undefined) {
           contexts,
           agent: agentFor,
           log,
-          ask: (name, prompt, tools) => {
+          ask: (name, prompt, tools, onTool) => {
             const { agent, toolbox } = agentFor(name)
             return respond({
               models,
@@ -182,6 +185,7 @@ async function start(url: string | undefined) {
               toolbox: withTools(toolbox, tools),
               message: prompt,
               onDelta: () => {},
+              onTool,
               loop: true,
             })
           },
@@ -191,6 +195,7 @@ async function start(url: string | undefined) {
               .toolbox.run('file_read', { path })
               .catch(() => null),
         })
+        activity = loops.activity
         return status()
       case 'stop': {
         const current = loops

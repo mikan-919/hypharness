@@ -107,6 +107,7 @@ export async function respond({
   toolbox,
   message,
   onDelta,
+  onTool,
   loop = false,
 }: {
   models: Models
@@ -115,6 +116,8 @@ export async function respond({
   toolbox: Toolbox
   message: string
   onDelta: (delta: string) => void
+  // ツールを呼ぶ直前に呼ぶ。進み具合を外に見せるために使う
+  onTool?: (name: string, args: Record<string, unknown>) => void
   // ループからの依頼。依頼文に状況がすべて入っているため、記憶から履歴を足さず、依頼文も記憶に残さない
   loop?: boolean
 }) {
@@ -156,6 +159,7 @@ export async function respond({
       let output: string
       let isError = false
       try {
+        onTool?.(call.name, call.arguments)
         output = await toolbox.run(call.name, call.arguments)
       } catch (e) {
         output = e instanceof Error ? e.message : String(e)

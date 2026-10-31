@@ -13,6 +13,8 @@ const CONCURRENCY = 3
 // エージェントが今やること。key が前回動いたときと同じなら、状況が変わっていないので動かない
 export type Turn = {
   key: string
+  // 画面とログに出す、今回やることの説明
+  label: string
   prompt: string
   tools: RoleTool[]
   // 動き終えたあとの後始末（読んだメッセージに印を付けるなど）
@@ -23,7 +25,12 @@ type Agent = ReturnType<typeof openAgent>
 export type LoopDeps = {
   economy: Economy
   // 役割のツールを足したうえで、エージェントに依頼して回答を得る
-  ask: (name: string, prompt: string, tools: RoleTool[]) => Promise<string>
+  ask: (
+    name: string,
+    prompt: string,
+    tools: RoleTool[],
+    onTool: (tool: string, args: Record<string, unknown>) => void,
+  ) => Promise<string>
   agent: (name: string) => { agent: Agent }
   contexts: Contexts
   readFile: (path: string) => Promise<string | null>
@@ -148,6 +155,7 @@ async function roleTurn(
       .join('、')
     return {
       key: ideas.map((i) => i.id).join(','),
+      label: `未採点のアイデア ${ideas.length}件を採点`,
       prompt: `あなたは市場です。利用者の目的に照らして、アイデアの価値を見極めてください。採点は会社の売上になり、投資家の判断材料になります。差をつけないと良い会社が育ちません。
 利用者の目的: ${goal}
 
@@ -200,6 +208,7 @@ ${listing.join('\n')}
     // 期ごとに1回、精算の結果を見て判断する
     return {
       key: `cycle-${cycle}`,
+      label: `第${cycle}期の投資を判断`,
       prompt: `あなたは投資家「${name}」です。会社は資本が多いほど worker を雇え、市場の評価が売上になり、売上の半分が出資額に応じて配当されます。
 利用者の目的: ${goal}
 第${cycle}期です。手元の資金: ${investor.cash.toFixed(1)}
@@ -248,6 +257,9 @@ ${companyList(e) || '（ありません）'}
       .join('\n')
     return {
       key: `${cycle}|${needed}|${pool.length}|${c.philosophy}`,
+      label: c.philosophy
+        ? `タスクプールに仕事を足す（手の空いた worker ${needed}人）`
+        : '設計思想を決める',
       prompt: `あなたは会社「${c.name}」の経営者です。
 利用者の目的: ${goal}
 設計思想: ${c.philosophy || '未設定。set_philosophy で決めてください'}
@@ -305,6 +317,13 @@ ${companyList(e)}
       messages.map((m) => m.id).join(','),
       gifts.map((g) => g.id).join(','),
     ].join('|'),
+    label: [
+      task ? `仕事 ${task.id}: ${task.body.slice(0, 40)}` : '仕事を選ぶ',
+      messages.length ? `メッセージ ${messages.length}件` : '',
+      gifts.length ? `受け取ったエントリー ${gifts.length}件` : '',
+    ]
+      .filter(Boolean)
+      .join('、'),
     prompt: `あなたは worker「${name}」で、会社「${c.name}」（id ${c.id}）に所属しています。
 利用者の目的: ${goal}
 会社の設計思想: ${c.philosophy || '未設定'}
@@ -445,6 +464,38 @@ ${companyList(e)}
   }
 }
 
+// エージェントの今の状態。画面に出して、どこまで進んだか、どこで止まったかを分かるようにする
+export type Activity = {
+  name: string
+  state: '待機' | '順番待ち' | '実行中' | '失敗' | '停止'
+  since: number
+  // 実行中は今回やることと直近のツール、待機中は前回の結果、失敗はエラー
+  label: string
+  detail: string
+  tools: number
+}
+
+// ツールの引数から、ログに出す要点を取り出す
+const brief = (args: Record<string, unknown>) => {
+  const value =
+    [
+      'title',
+      'command',
+      'path',
+      'label',
+      'labels',
+      'gist',
+      'body',
+      'content',
+      'result',
+    ]
+      .map((k) => args[k])
+      .find((v) => v !== undefined) ?? args
+  const text = typeof value === 'string' ? value : JSON.stringify(value)
+  const line = text.replace(/\s+/g, ' ')
+  return line.length > 80 ? `${line.slice(0, 80)}…` : line
+}
+
 // 各エージェントのループを並行に回す。顔ぶれの変化に合わせてループを足し、一定時間ごとに精算する
 export function startLoops(d: LoopDeps) {
   const idle = d.idleMs ?? IDLE_MS
@@ -452,6 +503,24 @@ export function startLoops(d: LoopDeps) {
   let stopped = false
   const running = new Map<string, Promise<void>>()
   const lastKey = new Map<string, string>()
+  const activity = new Map<string, Activity>()
+  const set = (name: string, change: Partial<Activity>) => {
+    const current = activity.get(name) ?? {
+      name,
+      state: '待機',
+      since: Date.now(),
+      label: '',
+      detail: '',
+      tools: 0,
+    }
+    activity.set(name, {
+      ...current,
+      ...(change.state && change.state !== current.state
+        ? { since: Date.now() }
+        : {}),
+      ...change,
+    })
+  }
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
   // モデルを同時に呼ぶ数を抑える
@@ -474,19 +543,44 @@ export function startLoops(d: LoopDeps) {
     while (!stopped && members(d.economy).includes(name)) {
       const turn = await turnFor(name, d)
       if (!turn || turn.key === lastKey.get(name)) {
+        if (!activity.has(name)) set(name, { detail: 'やることがありません' })
         await sleep(idle)
         continue
       }
+      const started = Date.now()
+      let tools = 0
+      set(name, { state: '順番待ち', label: turn.label, detail: '', tools })
       try {
-        await slot(() => d.ask(name, turn.prompt, turn.tools))
+        await slot(() => {
+          set(name, { state: '実行中', detail: '考えています' })
+          d.log(`${name}: 始めました（${turn.label}）`)
+          return d.ask(name, turn.prompt, turn.tools, (tool, args) => {
+            const line = `${tool} ${brief(args)}`
+            set(name, { detail: line, tools: ++tools })
+            d.log(`${name}: ${line}`)
+          })
+        })
         turn.done?.()
         lastKey.set(name, turn.key)
-        d.log(`${name}: 動きました`)
+        const seconds = Math.round((Date.now() - started) / 1000)
+        set(name, {
+          state: '待機',
+          detail: `前回: ${turn.label}（${seconds}秒、ツール ${tools}回）を終えました`,
+        })
+        d.log(`${name}: 終えました（${seconds}秒、ツール ${tools}回）`)
       } catch (e) {
-        d.log(`${name}: 失敗しました: ${e instanceof Error ? e.message : e}`)
+        const message = e instanceof Error ? e.message : String(e)
+        set(name, { state: '失敗', detail: message })
+        d.log(`${name}: 失敗しました（${turn.label}）: ${message}`)
         await sleep(ERROR_MS)
       }
     }
+    set(name, {
+      state: '停止',
+      detail: members(d.economy).includes(name)
+        ? (activity.get(name)?.detail ?? '')
+        : '経済から外れました',
+    })
     running.delete(name)
   }
 
@@ -512,6 +606,7 @@ export function startLoops(d: LoopDeps) {
 
   return {
     nextSettleAt: () => d.economy.nextSettleAt(),
+    activity: () => [...activity.values()],
     // 動いている途中のエージェントは、今の依頼を終えてから止まる
     async stop() {
       stopped = true

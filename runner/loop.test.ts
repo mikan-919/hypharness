@@ -126,6 +126,12 @@ test('各エージェントが自分のループで動き、精算で期が進�
   // 状況が変わらないあいだは呼び直さない（期ごとに1回）
   const investorCalls = calls.filter((c) => c === 'investor-1').length
   expect(investorCalls).toBeLessThanOrEqual(e.cycle())
+  // 止めたあとも、各エージェントがどこまで進んだかが残る
+  const activity = loops.activity()
+  expect(activity.every((x) => x.state === '停止')).toBe(true)
+  expect(activity.find((x) => x.name === 'market')?.detail).toContain(
+    '未採点のアイデア',
+  )
   const stopped = calls.length
   await Bun.sleep(50)
   expect(calls.length).toBe(stopped)

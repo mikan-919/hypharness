@@ -220,6 +220,21 @@ export function openEconomy(path: string) {
     workerCompany,
     openTask,
     pool,
+    // 画面に出す、会社の仕事の新しい順。未着手・作業中・完了のどれかは worker と result で分かる
+    tasks: (companyId: number, limit = 20) =>
+      db
+        .query<
+          {
+            id: number
+            worker: string | null
+            body: string
+            result: string | null
+          },
+          [number, number]
+        >(
+          'SELECT id, worker, body, result FROM pool_tasks WHERE company_id = ? ORDER BY id DESC LIMIT ?',
+        )
+        .all(companyId, limit),
     staff,
     investors: () =>
       db
