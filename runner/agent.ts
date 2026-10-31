@@ -7,7 +7,7 @@ import type {
   ToolCall,
 } from '@earendil-works/pi-ai'
 import type { createModels } from '@earendil-works/pi-ai/models'
-import { type Toolbox, toolDefinitions } from './tools'
+import type { Toolbox } from './tools'
 
 const INSTRUCTIONS =
   'あなたは利用者と対話するエージェントです。日本語で簡潔に答えてください。必要に応じて、ツールで固有 DB・共有 DB・作業用ディレクトリのファイルを使ってください。'
@@ -96,8 +96,8 @@ export function openAgent(dir: string, name: string) {
   }
 }
 
-type Models = ReturnType<typeof createModels>
-type Model = Parameters<Models['stream']>[0]
+export type Models = ReturnType<typeof createModels>
+export type Model = Parameters<Models['stream']>[0]
 
 // ツールを呼びながら回答を作る。本文の差分は届いたそばから onDelta に渡し、回答がそろってから記憶に残す
 export async function respond({
@@ -119,7 +119,7 @@ export async function respond({
   const context: Context = {
     systemPrompt: instructions,
     messages: messages.map((m) => toPiMessage(m, model)),
-    tools: toolDefinitions,
+    tools: toolbox.definitions,
   }
   let text = ''
   for (let step = 0; step < MAX_STEPS; step++) {

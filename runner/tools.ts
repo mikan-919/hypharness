@@ -50,10 +50,32 @@ export const toolDefinitions: Tool[] = [
   },
 ]
 
-export type Toolbox = ReturnType<typeof createToolbox>
+export type Toolbox = {
+  definitions: Tool[]
+  run: (name: string, args: Record<string, unknown>) => Promise<string>
+}
+export type RoleTool = {
+  definition: Tool
+  run: (args: Record<string, unknown>) => string | Promise<string>
+}
+
+// 役割ごとのツールを足す。足したツールにない名前は元のツールに回す
+export function withTools(base: Toolbox, extra: RoleTool[]): Toolbox {
+  return {
+    definitions: [...base.definitions, ...extra.map((t) => t.definition)],
+    run: async (name, args) => {
+      const tool = extra.find((t) => t.definition.name === name)
+      return tool ? tool.run(args) : base.run(name, args)
+    },
+  }
+}
 
 // 失敗は例外で返す。呼び出し側がエラーの結果としてモデルに渡し、モデルが直せるようにする
-export function createToolbox(own: Database, shared: Database, files: string) {
+export function createToolbox(
+  own: Database,
+  shared: Database,
+  files: string,
+): Toolbox {
   const query = (db: Database, statement: unknown) => {
     if (typeof statement !== 'string') throw new Error('sql は文字列です')
     const rows = db.query(statement).all()
@@ -104,7 +126,8 @@ export function createToolbox(own: Database, shared: Database, files: string) {
   }
 
   return {
-    async run(name: string, args: Record<string, unknown>) {
+    definitions: toolDefinitions,
+    async run(name, args) {
       const output = await run(name, args)
       return output.length > OUTPUT_LIMIT
         ? `${output.slice(0, OUTPUT_LIMIT)}\n（${output.length}文字のうち先頭${OUTPUT_LIMIT}文字）`

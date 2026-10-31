@@ -134,6 +134,30 @@ const routes = app
     if (!user) return c.json({ error: 'ランナー用トークンが不正です' }, 401)
     return runner(c.env, user.id).fetch(c.req.raw)
   })
+  // 経済のループ。状態と操作はランナーにあり、Worker は中継する
+  .get('/economy', auth, async (c) => {
+    const stub = runner(c.env, c.var.user.id)
+    return c.render('Economy', {
+      status: (await stub.connected())
+        ? await stub.call({ method: 'status' })
+        : null,
+    })
+  })
+  .get('/economy/status', auth, async (c) =>
+    c.json(await runner(c.env, c.var.user.id).call({ method: 'status' })),
+  )
+  .post('/economy/goal', auth, async (c) => {
+    const { goal } = await c.req.json<{ goal?: unknown }>()
+    if (typeof goal !== 'string' || !goal.trim()) {
+      return c.json({ error: '目的を入力してください' }, 400)
+    }
+    return c.json(
+      await runner(c.env, c.var.user.id).call({ method: 'setGoal', goal }),
+    )
+  })
+  .post('/economy/step', auth, async (c) =>
+    c.json(await runner(c.env, c.var.user.id).call({ method: 'step' })),
+  )
   .post('/agents/:name/chat', auth, async (c) => {
     const name = c.req.param('name')
     const { message } = await c.req.json<{ message?: unknown }>()

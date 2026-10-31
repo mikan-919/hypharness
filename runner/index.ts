@@ -9,7 +9,9 @@ import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { createModels } from '@earendil-works/pi-ai/models'
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
 import { openAgent, respond } from './agent'
-import { createToolbox, type Toolbox } from './tools'
+import { runCycle } from './cycle'
+import { openEconomy } from './economy'
+import { createToolbox, type Toolbox, withTools } from './tools'
 
 const DIR = join(homedir(), '.hyph')
 const CONFIG = join(DIR, 'config.json')
@@ -22,7 +24,12 @@ const PAIRING_POLL_MS = 3000
 const RECONNECT_MS = 5000
 
 type Config = { url: string; token: string }
-type Request = { id: string; agent: string; message: string }
+// Worker からの依頼。chat は応答を差分で流し、それ以外は result を1回返す
+type Request = { id: string } & (
+  | { method: 'chat'; agent: string; message: string }
+  | { method: 'status' | 'step' }
+  | { method: 'setGoal'; goal: unknown }
+)
 
 // 使い方: bun run runner [URL] / bun run runner login
 // 初回は ChatGPT へのサインインと、Worker とのペアリングをこのコマンドの中で行う
@@ -99,27 +106,94 @@ async function start(url: string | undefined) {
       : await pair(url ?? DEFAULT_URL)
 
   await mkdir(AGENTS, { recursive: true, mode: 0o700 })
-  const agents = new Map<string, ReturnType<typeof openAgent>>()
-
   await mkdir(FILES, { recursive: true, mode: 0o700 })
   const shared = new Database(join(DIR, 'state.sqlite'), { strict: true })
   shared.run('PRAGMA journal_mode = WAL')
-  const toolboxes = new Map<string, Toolbox>()
+  const economy = openEconomy(join(DIR, 'economy.sqlite'))
+  const agents = new Map<
+    string,
+    { agent: ReturnType<typeof openAgent>; toolbox: Toolbox }
+  >()
+  const agentFor = (name: string) => {
+    const cached = agents.get(name)
+    if (cached) return cached
+    const agent = openAgent(AGENTS, name)
+    const entry = { agent, toolbox: createToolbox(agent.db, shared, FILES) }
+    agents.set(name, entry)
+    return entry
+  }
 
-  const handle = (request: Request, onDelta: (delta: string) => void) => {
-    const agent = agents.get(request.agent) ?? openAgent(AGENTS, request.agent)
-    agents.set(request.agent, agent)
-    const toolbox =
-      toolboxes.get(request.agent) ?? createToolbox(agent.db, shared, FILES)
-    toolboxes.set(request.agent, toolbox)
-    return respond({
-      models,
-      model,
-      agent,
-      toolbox,
-      message: request.message,
-      onDelta,
-    })
+  // ループの進み具合。画面が状態を取りに来たときに返す
+  const lines: string[] = []
+  let running = false
+  let lastError = ''
+  const log = (line: string) => {
+    console.log(line)
+    lines.push(`${new Date().toLocaleTimeString('ja-JP')} ${line}`)
+    if (lines.length > 200) lines.shift()
+  }
+  const status = () => ({
+    goal: economy.goal(),
+    cycle: economy.cycle(),
+    running,
+    error: lastError,
+    log: lines,
+    companies: economy
+      .companies()
+      .map((c) => ({ ...c, workers: economy.workersOf(c.id) })),
+    investors: economy.investors(),
+    ideas: economy.latestIdeas(),
+    meetings: economy.latestMeetings(),
+  })
+
+  const call = (request: Request) => {
+    switch (request.method) {
+      case 'status':
+        return status()
+      case 'setGoal':
+        if (typeof request.goal !== 'string' || !request.goal.trim()) {
+          throw new Error('目的を入力してください')
+        }
+        economy.setGoal(request.goal.trim())
+        return status()
+      case 'step':
+        if (running) throw new Error('すでにループを回しています')
+        if (!economy.goal()) throw new Error('先に目的を設定してください')
+        running = true
+        lastError = ''
+        // 1周は数分かかるため、終わりを待たずに返す。進み具合は status で見る
+        runCycle({
+          economy,
+          agent: agentFor,
+          log,
+          ask: (name, prompt, tools) => {
+            const { agent, toolbox } = agentFor(name)
+            return respond({
+              models,
+              model,
+              agent,
+              toolbox: withTools(toolbox, tools),
+              message: prompt,
+              onDelta: () => {},
+            })
+          },
+          // ファイルが消えていても採点は続ける
+          readFile: (path) =>
+            agentFor('market')
+              .toolbox.run('file_read', { path })
+              .catch(() => null),
+        })
+          .catch((e) => {
+            lastError = e instanceof Error ? e.message : String(e)
+            log(`ループが止まりました: ${lastError}`)
+          })
+          .finally(() => {
+            running = false
+          })
+        return status()
+      default:
+        throw new Error(`未知の依頼です: ${request.method}`)
+    }
   }
 
   const connect = () => {
@@ -133,10 +207,21 @@ async function start(url: string | undefined) {
     ws.onmessage = async (event) => {
       const request: Request = JSON.parse(String(event.data))
       try {
-        await handle(request, (delta) =>
-          ws.send(JSON.stringify({ id: request.id, delta })),
-        )
-        ws.send(JSON.stringify({ id: request.id, done: true }))
+        if (request.method === 'chat') {
+          const { agent, toolbox } = agentFor(request.agent)
+          await respond({
+            models,
+            model,
+            agent,
+            toolbox,
+            message: request.message,
+            onDelta: (delta) =>
+              ws.send(JSON.stringify({ id: request.id, delta })),
+          })
+          ws.send(JSON.stringify({ id: request.id, done: true }))
+        } else {
+          ws.send(JSON.stringify({ id: request.id, result: call(request) }))
+        }
       } catch (e) {
         const error = e instanceof Error ? e.message : String(e)
         console.error(error)

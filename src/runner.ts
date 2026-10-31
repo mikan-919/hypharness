@@ -13,6 +13,10 @@ export class Runner extends DurableObject<Env> {
     string,
     ReadableStreamDefaultController<Uint8Array>
   >()
+  private pending = new Map<
+    string,
+    { resolve: (value: unknown) => void; reject: (e: Error) => void }
+  >()
 
   async fetch(request: Request) {
     if (request.headers.get('Upgrade') !== 'websocket') {
@@ -38,7 +42,7 @@ export class Runner extends DurableObject<Env> {
     return new ReadableStream<Uint8Array>({
       start: (controller) => {
         this.streams.set(id, controller)
-        ws.send(JSON.stringify({ id, agent, message }))
+        ws.send(JSON.stringify({ id, method: 'chat', agent, message }))
       },
       cancel: () => {
         this.streams.delete(id)
@@ -46,8 +50,26 @@ export class Runner extends DurableObject<Env> {
     })
   }
 
+  // 1回だけ結果を返す依頼（状態の取得、目的の設定、ループの開始）
+  call(request: { method: string; [key: string]: unknown }) {
+    const ws = this.ctx.getWebSockets()[0]
+    if (!ws) throw new Error('ランナーが接続されていません')
+    const id = crypto.randomUUID()
+    ws.send(JSON.stringify({ ...request, id }))
+    return new Promise<unknown>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject })
+    })
+  }
+
   webSocketMessage(_ws: WebSocket, data: string | ArrayBuffer) {
-    const { id, delta, error } = JSON.parse(String(data))
+    const { id, delta, error, result } = JSON.parse(String(data))
+    const pending = this.pending.get(id)
+    if (pending) {
+      this.pending.delete(id)
+      if (error !== undefined) pending.reject(new Error(error))
+      else pending.resolve(result)
+      return
+    }
     const controller = this.streams.get(id)
     if (!controller) return
     if (typeof delta === 'string') {
@@ -64,6 +86,10 @@ export class Runner extends DurableObject<Env> {
   }
 
   webSocketClose() {
+    for (const { reject } of this.pending.values()) {
+      reject(new Error('ランナーとの接続が切れました'))
+    }
+    this.pending.clear()
     for (const controller of this.streams.values()) {
       controller.enqueue(line({ error: 'ランナーとの接続が切れました' }))
       controller.close()

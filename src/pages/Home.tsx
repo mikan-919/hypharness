@@ -1,4 +1,4 @@
-import { router } from '@inertiajs/react'
+import { Link, router } from '@inertiajs/react'
 import { type FormEvent, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -15,9 +15,14 @@ export default function Home({ user, runnerConnected }: PageProps<'Home'>) {
     <main className='mx-auto flex max-w-2xl flex-col gap-6 p-8'>
       <header className='flex items-center justify-between'>
         <h1 className='text-2xl font-bold'>{user.name}</h1>
-        <Button variant='outline' onClick={logout}>
-          ログアウト
-        </Button>
+        <div className='flex items-center gap-3'>
+          <Link href='/economy' className='text-sm underline'>
+            経済
+          </Link>
+          <Button variant='outline' onClick={logout}>
+            ログアウト
+          </Button>
+        </div>
       </header>
       <RunnerSetup connected={runnerConnected} />
       <Chat />
