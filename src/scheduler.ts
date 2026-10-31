@@ -56,7 +56,7 @@ export function report(store: Store, status: Report["status"], rounds: number, e
 
 export async function runScheduler(rt: Runtime, maxRounds = Infinity): Promise<Report> {
   const ownsMcp = !rt.mcp;
-  rt.mcp ??= await McpTools.open(rt.store, rt.workspace, rt.log ?? console.error);
+  rt.mcp ??= await McpTools.open(rt.store, rt.workspace, rt.log ?? console.error, rt.embed);
   try { return await schedule(rt, maxRounds); }
   finally { if (ownsMcp) { await rt.mcp.close(); rt.mcp = undefined; } }
 }
@@ -124,7 +124,7 @@ async function schedule(rt: Runtime, maxRounds: number): Promise<Report> {
 // Resident work fills each slot as soon as an episode finishes; benchmark scheduling stays unchanged.
 export async function runWorkerPool(rt: Runtime, signal: AbortSignal, execute = runEpisode) {
   const ownsMcp = !rt.mcp;
-  rt.mcp ??= await McpTools.open(rt.store, rt.workspace, rt.log ?? console.error);
+  rt.mcp ??= await McpTools.open(rt.store, rt.workspace, rt.log ?? console.error, rt.embed);
   try { return await workerPool(rt, signal, execute); }
   finally { if (ownsMcp) { await rt.mcp.close(); rt.mcp = undefined; } }
 }
@@ -134,6 +134,7 @@ async function workerPool(rt: Runtime, signal: AbortSignal, execute: typeof runE
   const running = new Map<string, Promise<void>>(), retryAfter = new Map<string, number>();
   store.adoptRunning();
   while (!signal.aborted) {
+    const version = store.changeVersion;
     for (const id of running.keys()) {
       const claimed = store.get<Task>("select * from tasks where claimed_by = ? and status = 'claimed'", id);
       if (claimed) store.renew(claimed.id, id);
@@ -150,10 +151,11 @@ async function workerPool(rt: Runtime, signal: AbortSignal, execute: typeof runE
       const promise = execute(rt, agent, task).then(() => { retryAfter.delete(agent.id); }, error => {
         store.log(agent.id, "episode_error", { task: task.id, error: String(error) });
         retryAfter.set(agent.id, Date.now() + (/usage limit|quota|rate.limit/i.test(String(error)) ? 60_000 : 5_000));
-      }).finally(() => running.delete(agent.id));
+      }).finally(() => { running.delete(agent.id); store.notify(); });
       running.set(agent.id, promise);
     }
-    await Promise.race([...running.values(), Bun.sleep(250)]);
+    const retry = Math.min(...[...retryAfter.values()].filter(t => t > Date.now()).map(t => t - Date.now()), 60_000);
+    await store.waitForChange(version, signal, retry);
   }
   await Promise.allSettled(running.values());
 }

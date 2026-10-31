@@ -5,9 +5,10 @@ import type { Agent, Goal, Store, Task } from "./db.ts";
 import { emit, MAX_DECLINES, requestVerification } from "./triggers.ts";
 import { fetchPublicPage } from "./web-fetch.ts";
 import { sandboxShell } from "./sandbox.ts";
+import { recordToolKnowledge, type Embed } from "./resident-memory.ts";
 
 // messages is the caller's live context for the current episode; context_edit changes it in place.
-export type ToolContext = { store: Store; agent: Agent; task: Task; workspace: string; contextDir: string; episode: string; messages: Message[] };
+export type ToolContext = { store: Store; agent: Agent; task: Task; workspace: string; contextDir: string; episode: string; messages: Message[]; embed?: Embed; fetchPage?: typeof fetchPublicPage };
 type Def<S extends TSchema> = { description: string; parameters: S; run: (c: ToolContext, a: Static<S>) => string | Promise<string> };
 const def = <S extends TSchema>(d: Def<S>) => d as Def<TSchema>;
 
@@ -34,12 +35,6 @@ function requireSteward(store: Store, id: string, agent: Agent) {
   if (domain.status !== "active") fail(`Domain ${id} is ${domain.status}`);
   if (domain.steward !== agent.id) fail(`Domain ${id} is stewarded by ${domain.steward}`);
   return domain;
-}
-
-function assignResidentDomain(store: Store, knowledge: string) {
-  if (store.meta("resident") !== "1") return;
-  const domain = store.get<{ id: string }>("select id from domains where status = 'active' order by id limit 1") ?? fail("No active memory domain");
-  store.run("insert into domain_knowledge(domain, knowledge) values(?, ?)", domain.id, knowledge);
 }
 
 function requireInvest(c: ToolContext, goal: string) {
@@ -367,11 +362,16 @@ export const tools: Record<string, Def<TSchema>> = {
     parameters: Type.Object({ gist: Str("One-line core claim"), summary: Str("Short explanation"), raw: Str("Original evidence"), source: Str("Where it came from: file path, URL, command, or 'inference from K-...'"), domain: Opt(Str("Domain ID to link it to (you must steward it)")) }),
     run(c, a) {
       const id = c.store.id("K");
+      if (c.store.meta("resident") === "1") {
+        if (a.domain) requireSteward(c.store, a.domain, c.agent);
+        const embed = c.embed ?? fail("Resident knowledge requires an embedder");
+        return recordToolKnowledge(c.store, embed, { id, gist: a.gist, summary: a.summary, raw: a.raw, source: a.source, author: c.agent.id })
+          .then(() => `Recorded ${id} as hypothesis; use knowledge_verify to have it checked`);
+      }
       c.store.tx(() => {
         if (a.domain) requireSteward(c.store, a.domain, c.agent);
         c.store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, ?, ?, ?, 'hypothesis', ?, ?)", id, a.gist, a.summary, a.raw, a.source, c.agent.id, Date.now());
         if (a.domain) c.store.run("insert into domain_knowledge(domain, knowledge) values(?, ?)", a.domain, id);
-        else assignResidentDomain(c.store, id);
       });
       c.store.log(c.agent.id, "knowledge_added", { id, gist: a.gist });
       return `Recorded ${id} as hypothesis; use knowledge_verify to have it checked`;
@@ -565,12 +565,16 @@ export const tools: Record<string, Def<TSchema>> = {
     description: "Fetch a public HTTP(S) page and record its text as unverified knowledge.",
     parameters: Type.Object({ url: Str("Public HTTP(S) URL") }),
     async run(c, a) {
-      const page = await fetchPublicPage(a.url);
+      const page = await (c.fetchPage ?? fetchPublicPage)(a.url);
+      if (c.store.meta("resident") === "1") {
+        const id = c.store.id("K"), embed = c.embed ?? fail("Resident knowledge requires an embedder");
+        await recordToolKnowledge(c.store, embed, { id, gist: page.url, summary: page.text.slice(0, 500), raw: page.text, source: page.url, author: c.agent.id });
+        return `${id} ${page.url}\n${page.text}`.slice(0, c.store.config.toolOutputLimit);
+      }
       const id = c.store.tx(() => {
         const id = c.store.id("K");
         c.store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, ?, ?, ?, 'hypothesis', ?, ?)",
           id, page.url, page.text.slice(0, 500), page.text, page.url, c.agent.id, Date.now());
-        assignResidentDomain(c.store, id);
         c.store.log(c.agent.id, "knowledge_added", { id, gist: page.url, from: "web_fetch" });
         return id;
       });
@@ -609,13 +613,24 @@ export const tools: Record<string, Def<TSchema>> = {
       const warnings = body.warnings?.map(w => `warning: ${w.message}`) ?? [];
       // The host records what was found, so sources stay reusable without a knowledge_add call per result.
       const found = (body.results ?? []).map(r => ({ ...r, title: r.title ?? "(untitled)", excerpt: (r.excerpts ?? []).join("\n…\n") }));
+      if (c.store.meta("resident") === "1") {
+        const embed = c.embed ?? fail("Resident knowledge requires an embedder");
+        const ids: string[] = [];
+        for (const r of found) {
+          const known = c.store.get<{ id: string }>("select id from knowledge where source = ?", r.url);
+          let id = known?.id ?? c.store.id("K");
+          if (!known) id = await recordToolKnowledge(c.store, embed, { id, gist: r.title, summary: r.excerpt.slice(0, 500), raw: r.excerpt, source: r.url, author: c.agent.id, dedupeSource: true });
+          ids.push(id);
+        }
+        const results = found.map((r, i) => `[${i + 1}] ${ids[i]} ${r.title}${r.publish_date ? ` (${r.publish_date})` : ""}\n${r.url}\n${r.excerpt}`);
+        return [...warnings, ...results].join("\n\n") || "No results";
+      }
       const ids = c.store.tx(() => found.map(r => {
         const known = c.store.get<{ id: string }>("select id from knowledge where source = ?", r.url);
         if (known) return known.id;
         const id = c.store.id("K");
         c.store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, ?, ?, ?, 'hypothesis', ?, ?)",
           id, r.title, r.excerpt.slice(0, 500), r.excerpt, r.url, c.agent.id, Date.now());
-        assignResidentDomain(c.store, id);
         c.store.log(c.agent.id, "knowledge_added", { id, gist: r.title, from: "web_search" });
         return id;
       }));

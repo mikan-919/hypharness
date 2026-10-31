@@ -6,6 +6,7 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { TSchema, Tool } from "@earendil-works/pi-ai";
 import type { Store } from "./db.ts";
 import { sandboxCommand } from "./sandbox.ts";
+import { recordToolKnowledge, type Embed } from "./resident-memory.ts";
 
 type StdioConfig = { command: string; args?: string[]; env?: Record<string, string> };
 type HttpConfig = { type: "http"; url: string; headers?: Record<string, string> };
@@ -33,10 +34,10 @@ function parseConfig(value: unknown): Config {
 export class McpTools {
   private servers = new Map<string, Server>();
   private routes = new Map<string, { server: Server; tool: string }>();
-  private constructor(private store: Store, private workspace: string) {}
+  private constructor(private store: Store, private workspace: string, private embed?: Embed) {}
 
-  static async open(store: Store, workspace: string, log: (line: string) => void = console.error) {
-    const manager = new McpTools(store, workspace);
+  static async open(store: Store, workspace: string, log: (line: string) => void = console.error, embed?: Embed) {
+    const manager = new McpTools(store, workspace, embed);
     if (!store.db.filename || store.db.filename === ":memory:") return manager;
     const file = Bun.file(join(dirname(store.db.filename), "mcp.json"));
     if (!await file.exists()) return manager;
@@ -125,14 +126,15 @@ export class McpTools {
     if (!Array.isArray(result.content)) throw new Error("MCP tool returned invalid content");
     const raw = result.content.map((part: { type: string; text?: string }) => part.type === "text" ? part.text ?? "" : JSON.stringify(part)).join("\n");
     if (result.isError) throw new Error(this.safeError(server.config, new Error(raw)));
+    if (this.store.meta("resident") === "1") {
+      if (!this.embed) throw new Error("Resident knowledge requires an embedder");
+      const id = this.store.id("K");
+      await recordToolKnowledge(this.store, this.embed, { id, gist: `${name} result`, summary: raw.slice(0, 500), raw, source: `mcp:${server.name}/${tool}`, author: agent });
+      return `Recorded ${id} as unverified knowledge\n${raw}`;
+    }
     const id = this.store.tx(() => {
       const id = this.store.id("K"), source = `mcp:${server.name}/${tool}`;
       this.store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, ?, ?, ?, 'hypothesis', ?, ?)", id, `${name} result`, raw.slice(0, 500), raw, source, agent, Date.now());
-      if (this.store.meta("resident") === "1") {
-        const domain = this.store.get<{ id: string }>("select id from domains where status = 'active' order by id limit 1");
-        if (!domain) throw new Error("No active memory domain");
-        this.store.run("insert into domain_knowledge(domain, knowledge) values(?, ?)", domain.id, id);
-      }
       this.store.log(agent, "knowledge_added", { id, source });
       return id;
     });

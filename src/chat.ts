@@ -71,11 +71,13 @@ export async function reply(llm: Llm, store: Store, text: string, embed?: Embed)
   const resident = store.meta("resident") === "1";
   if (resident && !embed) throw new Error("Resident chat requires an embedder");
   store.run("insert into chat(role, text, at) values('user', ?, ?)", text, Date.now());
+  if (resident) store.notify();
   let remembered: number;
   if (resident) {
     // Recover messages whose embedding was interrupted by process shutdown.
     for (const m of history(store)) if (!store.get("select 1 from memory_vectors where chat_id = ?", m.id)) await remember(store, embed!, m.text, `chat:${m.id}`, m.id);
     remembered = store.run("update chat set remembered = 1 where remembered = 0 and id not in (select id from chat order by id desc limit ?)", WINDOW);
+    store.notify();
   } else remembered = rememberOld(store);
   const recent = history(store).slice(-WINDOW);
   const packet = resident ? frontPacket(store) : undefined;
@@ -119,6 +121,7 @@ export async function reply(llm: Llm, store: Store, text: string, embed?: Embed)
     await remember(store, embed!, answer, `chat:${message.id}`, message.id);
     store.run("update chat set remembered = 1 where remembered = 0 and id not in (select id from chat order by id desc limit ?)", WINDOW);
     store.setMeta(`packet:${message.id}`, JSON.stringify(packet!.ids));
+    store.notify();
   }
   return { reply: answer, calls, lookups, peakTokens, remembered };
 }

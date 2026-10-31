@@ -66,6 +66,21 @@ export type Task = {
 export class Store {
   readonly db: Database;
   private seq = 0;
+  private revision = 0;
+  private listeners = new Set<() => void>();
+
+  get changeVersion() { return this.revision; }
+  notify() { this.revision++; for (const listener of this.listeners) listener(); }
+  waitForChange(version: number, signal: AbortSignal, timeout = 60_000): Promise<void> {
+    if (signal.aborted || version !== this.revision) return Promise.resolve();
+    return new Promise(resolve => {
+      const done = () => { clearTimeout(timer); this.listeners.delete(done); signal.removeEventListener("abort", done); resolve(); };
+      const timer = setTimeout(done, timeout);
+      this.listeners.add(done);
+      signal.addEventListener("abort", done, { once: true });
+      if (signal.aborted || version !== this.revision) done();
+    });
+  }
 
   constructor(path: string) {
     this.db = new Database(path, { create: true, strict: true });
@@ -92,6 +107,7 @@ export class Store {
 
   log(agent: string | null, event: string, detail: unknown) {
     this.run("insert into log(at, agent, event, detail) values(?, ?, ?, ?)", Date.now(), agent, event, JSON.stringify(detail));
+    this.notify();
   }
 
   // The purpose is fixed for the lifetime of a store; constraints and limits are set alongside it.
@@ -131,6 +147,7 @@ export class Store {
     this.run("insert into tasks(id, goal, kind, description, status, author, assignee, exclude, target, budget, created_at) values(?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)",
       id, t.goal, t.kind, t.description, t.author, t.assignee ?? null, t.exclude ?? null, t.target ?? null, t.budget ?? null, Date.now());
     if (t.assignee) this.run("update agents set status = 'active', idle = 0 where id = ? and status = 'dormant'", t.assignee);
+    this.notify();
     return id;
   }
 

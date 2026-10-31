@@ -125,7 +125,7 @@ if (resident) {
   mkdirSync(join(chatDir, "workspace"), { recursive: true });
   chatLlm = await openModel();
   const controller = new AbortController();
-  void runWorkerPool({ store, ...chatLlm, workspace: join(chatDir, "workspace"), contextDir: join(chatDir, "contexts"), log: console.log }, controller.signal).catch(e => console.error(`worker pool: ${e}`));
+  void runWorkerPool({ store, ...chatLlm, embed, workspace: join(chatDir, "workspace"), contextDir: join(chatDir, "contexts"), log: console.log }, controller.signal).catch(e => console.error(`worker pool: ${e}`));
   void runMemoryMarket(store, embed, chatLlm, controller.signal).catch(e => console.error(`memory market: ${e}`));
 }
 

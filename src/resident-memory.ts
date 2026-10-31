@@ -43,6 +43,27 @@ export function vectors(store: Store) {
   return store.all<MemoryRow>("select v.knowledge, v.vector, d.domain from memory_vectors v join domain_knowledge d on d.knowledge = v.knowledge").map(r => ({ ...r, vector: JSON.parse(r.vector) as number[] }));
 }
 
+function nearestDomain(store: Store, vector: number[]) {
+  const nearest = vectors(store).map(v => ({ domain: v.domain, d: distance(vector, v.vector) })).sort((a, b) => a.d - b.d)[0];
+  return nearest?.domain ?? store.get<{ id: string }>("select id from domains where status = 'active' order by id limit 1")?.id ?? (() => { throw new Error("No active memory domain"); })();
+}
+
+export async function recordToolKnowledge(store: Store, embed: Embed, item: { id: string; gist: string; summary: string; raw: string; source: string; author: string; dedupeSource?: boolean }) {
+  const vector = await embed(item.raw, "passage");
+  return store.tx(() => {
+    if (item.dedupeSource) {
+      const existing = store.get<{ id: string }>("select id from knowledge where source = ?", item.source);
+      if (existing) return existing.id;
+    }
+    const domain = nearestDomain(store, vector);
+    store.run("insert into knowledge(id, gist, summary, raw, source, status, author, created_at) values(?, ?, ?, ?, ?, 'hypothesis', ?, ?)", item.id, item.gist, item.summary, item.raw, item.source, item.author, Date.now());
+    store.run("insert into domain_knowledge(domain, knowledge) values(?, ?)", domain, item.id);
+    store.run("insert into memory_vectors(knowledge, vector) values(?, ?)", item.id, JSON.stringify(vector));
+    store.log(item.author, "knowledge_added", { id: item.id, gist: item.gist });
+    return item.id;
+  });
+}
+
 // Quantiles adapt to each domain instead of assuming a model-specific distance scale.
 export function distanceThreshold(values: number[], quantile = 0.75) {
   if (!values.length) return undefined;
@@ -56,9 +77,7 @@ export async function remember(store: Store, embed: Embed, text: string, source:
   return store.tx(() => {
     const ids: string[] = [];
     for (let i = 0; i < pieces.length; i++) {
-      const piece = pieces[i]!, vector = embeddings[i]!, existing = vectors(store);
-      const nearest = existing.map(v => ({ ...v, d: distance(vector, v.vector) })).sort((a, b) => a.d - b.d)[0];
-      const domain = nearest?.domain ?? "D-memory", id = store.id("K");
+      const piece = pieces[i]!, vector = embeddings[i]!, domain = nearestDomain(store, vector), id = store.id("K");
       store.run("insert into knowledge(id, gist, summary, raw, source, status, author, verified_by, created_at) values(?, ?, ?, ?, ?, 'verified', 'ingest', 'ingest', ?)", id, piece, piece, piece, source, Date.now());
       store.run("insert into domain_knowledge(domain, knowledge) values(?, ?)", domain, id);
       store.run("insert into memory_vectors(knowledge, vector, chat_id) values(?, ?, ?)", id, JSON.stringify(vector), chatId ?? null);
@@ -74,11 +93,10 @@ export async function indexKnowledge(store: Store, embed: Embed) {
   const vector = await embed(item.raw, "passage");
   store.tx(() => {
     if (store.get("select 1 from memory_vectors where knowledge = ?", item.id)) return;
-    const existing = vectors(store);
-    const nearest = existing.map(v => ({ domain: v.domain, d: distance(vector, v.vector) })).sort((a, b) => a.d - b.d)[0];
+    const domain = nearestDomain(store, vector);
     const assigned = store.get("select 1 from domain_knowledge where knowledge = ?", item.id);
-    if (assigned && nearest) store.run("update domain_knowledge set domain = ? where knowledge = ?", nearest.domain, item.id);
-    else if (!assigned) store.run("insert into domain_knowledge(domain, knowledge) values(?, ?)", nearest?.domain ?? "D-memory", item.id);
+    if (assigned) store.run("update domain_knowledge set domain = ? where knowledge = ?", domain, item.id);
+    else store.run("insert into domain_knowledge(domain, knowledge) values(?, ?)", domain, item.id);
     store.run("insert into memory_vectors(knowledge, vector) values(?, ?)", item.id, JSON.stringify(vector));
   });
   return true;

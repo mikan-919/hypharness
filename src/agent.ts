@@ -4,6 +4,7 @@ import type { Agent, Store, Task } from "./db.ts";
 import { mirror, toolSchemas, tools, type ToolContext } from "./tools.ts";
 import { emit, isMarket, withheldTools } from "./triggers.ts";
 import type { McpTools } from "./mcp.ts";
+import type { Embed } from "./resident-memory.ts";
 
 export type Runtime = {
   store: Store;
@@ -15,6 +16,7 @@ export type Runtime = {
   log?: (line: string) => void;
   modelTimeoutMs?: number;
   mcp?: McpTools;
+  embed?: Embed;
 };
 
 // A provider connection that never answers would otherwise hold the whole run; a timed-out call counts as a model error.
@@ -111,7 +113,7 @@ export async function runEpisode(rt: Runtime, agent: Agent, task: Task) {
   if (!saved) store.run("insert into episodes(id, agent, task, messages, status) values(?, ?, ?, ?, 'running')", id, agent.id, task.id, JSON.stringify(messages));
   const save = () => { store.run("update episodes set messages = ? where id = ?", JSON.stringify(messages), id); mirror(rt, agent.id); };
   const end = (outcome: string) => { store.run("update episodes set status = ? where id = ?", outcome, id); mirror(rt, agent.id); return outcome; };
-  const ctx: ToolContext = { store, agent, task, workspace: rt.workspace, contextDir: rt.contextDir, episode: id, messages };
+  const ctx: ToolContext = { store, agent, task, workspace: rt.workspace, contextDir: rt.contextDir, episode: id, messages, embed: rt.embed };
   const system = systemPrompt(store, agent);
   const withheld = withheldTools(store, agent);
   const schemas = [...toolSchemas(), ...(rt.mcp?.schemas() ?? [])].filter(s => !withheld.has(s.name));

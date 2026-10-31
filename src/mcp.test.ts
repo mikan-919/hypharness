@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { openResident } from "./resident.ts";
+import { remember } from "./resident-memory.ts";
 import { sandboxShell } from "./sandbox.ts";
 import { McpTools } from "./mcp.ts";
 import { runEpisode } from "./agent.ts";
@@ -22,7 +23,7 @@ async function fixture() {
   const config = { mcpServers: { fake: { command: "bun", args: ["/workspace/mcp-server.js"], env: { FIXTURE_TOKEN: "fixture-value" } }, broken: { command: "no-such-fixture-secret", env: { TOKEN: "fixture-secret" } } } };
   await Bun.write(join(dir, "mcp.json"), JSON.stringify(config));
   const log: string[] = [];
-  const manager = await McpTools.open(store, workspace, line => log.push(line));
+  const manager = await McpTools.open(store, workspace, line => log.push(line), async () => [1, 0]);
   if (!manager.has("mcp__fake__echo")) throw new Error(log.join("; "));
   return { dir, workspace, store, manager, log };
 }
@@ -56,7 +57,7 @@ test("streamable HTTP uses the configured local URL and headers", async () => {
   const http = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: req => { seenHeaders.push(req.headers.get("x-fixture")); return transport.handleRequest(req); } });
   const manager = await (async () => {
     await Bun.write(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { local: { type: "http", url: `${http.url}mcp`, headers: { "x-fixture": "test-header" } } } }));
-    return McpTools.open(store, dir, line => log.push(line));
+    return McpTools.open(store, dir, line => log.push(line), async () => [1, 0]);
   })();
   try {
     expect(manager.has("mcp__local__hello")).toBe(true);
@@ -112,6 +113,18 @@ test.skipIf(!sandboxUsable())("agent receives MCP tools and the output limit pre
   } finally { await manager.close(); store.db.close(); }
 });
 
+test.skipIf(!sandboxUsable())("MCP output enters the nearest domain", async () => {
+  const { store, manager } = await fixture();
+  try {
+    await remember(store, async () => [0, 1], "first", "test");
+    store.run("insert into domains(id, name, description, steward, status) values('D-z', 'z', 'z', 'z', 'active')");
+    const [near] = await remember(store, async () => [1, 0], "near", "test");
+    store.run("update domain_knowledge set domain = 'D-z' where knowledge = ?", near);
+    await manager.call("mcp__fake__echo", { text: "result" }, "worker");
+    expect(store.get<{ domain: string }>("select d.domain from domain_knowledge d join knowledge k on k.id = d.knowledge where k.source = 'mcp:fake/echo'")!.domain).toBe("D-z");
+  } finally { await manager.close(); store.db.close(); }
+});
+
 test.skipIf(!sandboxUsable())("scheduler connects configured servers before assigning work", async () => {
   const { dir, workspace, store, manager } = await fixture();
   await manager.close();
@@ -121,7 +134,7 @@ test.skipIf(!sandboxUsable())("scheduler connects configured servers before assi
     store.addTask({ goal: "G1", kind: "work", author: "host", assignee: "worker", description: "work" });
     const faux = fauxProvider(), models = createModels(); models.setProvider(faux.provider);
     faux.setResponses([fauxAssistantMessage([fauxToolCall("mcp__fake__echo", { text: "scheduler result" })], { stopReason: "toolUse" }), fauxAssistantMessage([fauxToolCall("task_finish", { result: "done" })], { stopReason: "toolUse" })]);
-    await runScheduler({ store, models, model: faux.getModel(), workspace, contextDir: join(dir, "contexts"), log: () => {} }, 1);
+    await runScheduler({ store, models, model: faux.getModel(), workspace, contextDir: join(dir, "contexts"), log: () => {}, embed: async () => [1, 0] }, 1);
     expect(store.get<{ raw: string }>("select raw from knowledge where source = 'mcp:fake/echo'")!.raw).toBe("scheduler result");
   } finally { store.db.close(); }
 });
