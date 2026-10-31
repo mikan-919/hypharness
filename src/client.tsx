@@ -3,7 +3,9 @@ import { createRoot } from 'react-dom/client'
 
 createInertiaApp({
   resolve: async (name) => {
-    const pages = import.meta.glob<{ default: ResolvedComponent }>('./pages/**/*.tsx')
+    const pages = import.meta.glob<{ default: ResolvedComponent }>(
+      './pages/**/*.tsx',
+    )
     const page = await pages[`./pages/${name}.tsx`]()
     return page.default
   },
