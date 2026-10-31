@@ -1,5 +1,5 @@
 import { defineConfig } from "cf/config";
-import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
+import * as entrypoint from "./src/index.tsx" with { type: "cf-worker" };
 
 export default defineConfig({
 	worker: {

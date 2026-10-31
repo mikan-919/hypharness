@@ -1,17 +1,35 @@
 {
-	"name": "hypharness",
-	"private": true,
-	"type": "module",
-	"scripts": {
-		"dev": "cf dev",
-		"build": "cf build",
-		"deploy": "cf deploy",
-		"typecheck": "cf workers types && tsc"
-	},
-	"devDependencies": {
-		"@cloudflare/vite-plugin": "beta",
-		"cf": "^1.0.0-beta.26",
-		"typescript": "^7.0.2",
-		"vite": "^8.3.0"
-	}
+  "name": "hypharness",
+  "type": "module",
+  "scripts": {
+    "typecheck": "cf workers types && tsrs",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "$npm_execpath run build && vite preview",
+    "deploy": "$npm_execpath run build && cf deploy",
+    "cf-typegen": "cf workers types"
+  },
+  "dependencies": {
+    "@hono/inertia": "^0.8.1",
+    "@inertiajs/react": "^3.10.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "hono": "^4.13.14",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwindcss": "^4.3.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^2.0.0-beta.v.8",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "cf": "^1.0.0-beta.26",
+    "tsrs": "^0.20.1-ts7.1.0-beta",
+    "vite": "^8.1.4",
+    "vite-ssr-components": "^0.8.0"
+  },
+  "trustedDependencies": [
+    "esbuild",
+    "workerd"
+  ]
 }
