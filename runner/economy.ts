@@ -76,13 +76,6 @@ export function openEconomy(path: string) {
       result TEXT,
       cycle INTEGER NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS proposals (
-      id INTEGER PRIMARY KEY,
-      from_worker TEXT NOT NULL,
-      to_worker TEXT NOT NULL,
-      content TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending'
-    );
     CREATE TABLE IF NOT EXISTS votes (
       worker TEXT PRIMARY KEY,
       kind TEXT NOT NULL,
@@ -236,12 +229,6 @@ export function openEconomy(path: string) {
       db
         .query<Idea, [number]>('SELECT * FROM ideas ORDER BY id DESC LIMIT ?')
         .all(limit),
-    pendingProposals: (worker: string) =>
-      db
-        .query<{ id: number; from_worker: string; content: string }, [string]>(
-          "SELECT id, from_worker, content FROM proposals WHERE to_worker = ? AND status = 'pending'",
-        )
-        .all(worker),
     unread: (agent: string) =>
       db
         .query<Message, [string]>(
@@ -352,28 +339,6 @@ export function openEconomy(path: string) {
           'INSERT INTO messages (from_agent, to_agent, content) VALUES (?, ?, ?)',
         ).run(from, r, content)
       }
-    },
-    propose(from: string, to: string, content: string) {
-      if (!db.query('SELECT 1 FROM workers WHERE name = ?').get(to)) {
-        throw new Error(`${to} という worker はいません`)
-      }
-      db.query(
-        'INSERT INTO proposals (from_worker, to_worker, content) VALUES (?, ?, ?)',
-      ).run(from, to, content)
-    },
-    // 提案の採否を決める。採用した提案は呼び出し側が自分の記憶に入れる
-    decideProposal(worker: string, id: number, accept: boolean) {
-      const proposal = db
-        .query<{ from_worker: string; content: string }, [number, string]>(
-          "SELECT from_worker, content FROM proposals WHERE id = ? AND to_worker = ? AND status = 'pending'",
-        )
-        .get(id, worker)
-      if (!proposal) throw new Error(`提案 ${id} はありません`)
-      db.query('UPDATE proposals SET status = ? WHERE id = ?').run(
-        accept ? 'accepted' : 'rejected',
-        id,
-      )
-      return proposal
     },
     vote(
       worker: string,

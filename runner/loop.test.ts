@@ -1,15 +1,24 @@
+import { Database } from 'bun:sqlite'
 import { expect, test } from 'bun:test'
+import { openContexts } from './context'
 import { openEconomy } from './economy'
 import { startLoops, turnFor } from './loop'
 import type { RoleTool } from './tools'
 
-const deps = (e: ReturnType<typeof openEconomy>) => ({
-  economy: e,
-  readFile: async () => null,
-  agent: () => {
-    throw new Error('記憶の提案は使わない')
-  },
-})
+// エージェントごとに固有 DB を1つ持たせる
+const deps = (e: ReturnType<typeof openEconomy>) => {
+  const dbs = new Map<string, Database>()
+  return {
+    economy: e,
+    contexts: openContexts(e.db),
+    readFile: async () => null,
+    agent: (name: string) => {
+      const db = dbs.get(name) ?? new Database(':memory:')
+      dbs.set(name, db)
+      return { agent: { db } as never }
+    },
+  }
+}
 const use = (tools: RoleTool[], name: string, args: Record<string, unknown>) =>
   tools.find((t) => t.definition.name === name)?.run(args)
 
@@ -94,4 +103,30 @@ test('各エージェントが自分のループで動き、精算で期が進�
   const stopped = calls.length
   await Bun.sleep(50)
   expect(calls.length).toBe(stopped)
+})
+
+test('全員のプロンプトに2層のコンテキストが入り、受け取ったエントリーで worker が動く', async () => {
+  const e = openEconomy(':memory:')
+  e.setGoal('目的')
+  const d = deps(e)
+  expect(await turnFor('worker-1', d)).toBeNull()
+
+  // worker-2 が自分用のエントリーを作って worker-1 に渡す
+  e.sendMessage('worker-1', 'worker-2', '起きて')
+  const turn = await turnFor('worker-2', d)
+  expect(turn?.prompt).toContain('共有コンテキスト')
+  expect(turn?.prompt).toContain('自分用コンテキスト')
+  await use(turn?.tools ?? [], 'context_add', {
+    scope: 'own',
+    gist: '要点',
+    summary: '- 「猫の写真を整理する」',
+    raw: '猫の写真を整理する',
+  })
+  await use(turn?.tools ?? [], 'give_context', { to: 'worker-1', label: 'O1' })
+  expect(() =>
+    use(turn?.tools ?? [], 'give_context', { to: 'investor-1', label: 'O1' }),
+  ).toThrow()
+
+  const received = await turnFor('worker-1', d)
+  expect(received?.prompt).toContain('worker-2 から）: 要点')
 })

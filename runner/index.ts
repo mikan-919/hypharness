@@ -9,6 +9,7 @@ import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { createModels } from '@earendil-works/pi-ai/models'
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
 import { openAgent, respond } from './agent'
+import { openContexts } from './context'
 import { openEconomy } from './economy'
 import { startLoops } from './loop'
 import { createToolbox, type Toolbox, withTools } from './tools'
@@ -110,6 +111,7 @@ async function start(url: string | undefined) {
   const shared = new Database(join(DIR, 'state.sqlite'), { strict: true })
   shared.run('PRAGMA journal_mode = WAL')
   const economy = openEconomy(join(DIR, 'economy.sqlite'))
+  const contexts = openContexts(economy.db)
   const agents = new Map<
     string,
     { agent: ReturnType<typeof openAgent>; toolbox: Toolbox }
@@ -145,6 +147,11 @@ async function start(url: string | undefined) {
     investors: economy.investors(),
     ideas: economy.latestIdeas(),
     messages: economy.recentMessages(),
+    sharedContext: contexts.sharedEntries().map(({ label, gist, source }) => ({
+      label,
+      gist,
+      source,
+    })),
   })
 
   const call = async (request: Request) => {
@@ -162,6 +169,7 @@ async function start(url: string | undefined) {
         if (!economy.goal()) throw new Error('先に目的を設定してください')
         loops = startLoops({
           economy,
+          contexts,
           agent: agentFor,
           log,
           ask: (name, prompt, tools) => {

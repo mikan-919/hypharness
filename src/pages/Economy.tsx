@@ -38,6 +38,7 @@ type Status = {
     to_agent: string
     content: string
   }[]
+  sharedContext: { label: string; gist: string; source: string }[]
 }
 
 export default function Economy(props: PageProps<'Economy'>) {
@@ -169,6 +170,15 @@ export default function Economy(props: PageProps<'Economy'>) {
             <p className='whitespace-pre-wrap'>{i.body}</p>
             {i.file && <p>ファイル: {i.file}</p>}
           </div>
+        ))}
+      </section>
+
+      <section className='flex flex-col gap-1 text-sm'>
+        <h2 className='font-bold'>共有コンテキスト</h2>
+        {status.sharedContext.map((c) => (
+          <p key={c.label}>
+            [{c.label}] {c.gist}（{c.source}）
+          </p>
         ))}
       </section>
 

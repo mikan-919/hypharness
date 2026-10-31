@@ -1,5 +1,6 @@
 import { Type } from '@earendil-works/pi-ai'
 import type { openAgent } from './agent'
+import type { Contexts } from './context'
 import type { Economy } from './economy'
 import type { RoleTool } from './tools'
 
@@ -24,6 +25,7 @@ export type LoopDeps = {
   // 役割のツールを足したうえで、エージェントに依頼して回答を得る
   ask: (name: string, prompt: string, tools: RoleTool[]) => Promise<string>
   agent: (name: string) => { agent: Agent }
+  contexts: Contexts
   readFile: (path: string) => Promise<string | null>
   log: (line: string) => void
   idleMs?: number
@@ -71,13 +73,43 @@ const companyList = (e: Economy) =>
     .join('\n')
 
 // 各エージェントの「今やること」を状況から組み立てる。やることがなければ null を返し、モデルを呼ばない
-export async function turnFor(
+type TurnDeps = Pick<LoopDeps, 'economy' | 'agent' | 'readFile' | 'contexts'>
+
+// 役割ごとの turn に、2層のコンテキストとそのツールを足す
+export async function turnFor(name: string, d: TurnDeps): Promise<Turn | null> {
+  const turn = await roleTurn(name, d)
+  if (!turn) return null
+  const db = d.agent(name).agent.db
+  const e = d.economy
+  return {
+    ...turn,
+    prompt: `${turn.prompt}
+
+${d.contexts.prompt(db)}
+わかったことや判断の根拠は context_add でコンテキストに残してください。自分用のエントリーは give_context でほかの worker に渡せます。`,
+    tools: [
+      ...turn.tools,
+      ...d.contexts.tools(
+        name,
+        db,
+        async (path) => {
+          const content = await d.readFile(path)
+          if (content === null) throw new Error(`${path} を読めません`)
+          return content
+        },
+        // 渡せる相手は、稼働中の会社にいる worker
+        (to) => {
+          const companyId = e.workerCompany(to)
+          return companyId !== null && e.company(companyId) !== null
+        },
+      ),
+    ],
+  }
+}
+
+async function roleTurn(
   name: string,
-  {
-    economy: e,
-    agent,
-    readFile,
-  }: Pick<LoopDeps, 'economy' | 'agent' | 'readFile'>,
+  { economy: e, readFile, contexts }: TurnDeps,
 ): Promise<Turn | null> {
   const goal = e.goal()
   const cycle = e.cycle()
@@ -213,8 +245,8 @@ ${ideas || '（まだありません）'}
   const task = e.openTask(name)
   const pool = task ? [] : e.pool(c.id)
   const messages = e.unread(name)
-  const proposals = e.pendingProposals(name)
-  if (!task && !pool.length && !messages.length && !proposals.length) {
+  const gifts = contexts.pendingGifts(name)
+  if (!task && !pool.length && !messages.length && !gifts.length) {
     return null
   }
   return {
@@ -223,7 +255,7 @@ ${ideas || '（まだありません）'}
       task?.id,
       pool.map((t) => t.id).join(','),
       messages.map((m) => m.id).join(','),
-      proposals.map((p) => p.id).join(','),
+      gifts.map((g) => g.id).join(','),
     ].join('|'),
     prompt: `あなたは worker「${name}」で、会社「${c.name}」（id ${c.id}）に所属しています。
 利用者の目的: ${goal}
@@ -241,14 +273,13 @@ ${
 }
 届いたメッセージ:
 ${messages.map((m) => `- ${m.from_agent}: ${m.content}`).join('\n') || '（ありません）'}
-あなた宛ての記憶の提案:
-${proposals.map((p) => `- 提案 ${p.id}（${p.from_worker} から）: ${p.content}`).join('\n') || '（ありません）'}
+受け取ったエントリー（decide_gift で自分用コンテキストに入れるか決める）:
+${gifts.map((g) => `- id ${g.id}（${g.from_agent} から）: ${g.gist}`).join('\n') || '（ありません）'}
 会社の一覧:
 ${companyList(e)}
 
 成果は post_idea で登録し、詳しい内容は file_write でファイルに書いてください。
 同僚との相談は send_message で行えます（to に all で全員）。
-ほかの worker に覚えておいてほしいことは propose_memory で提案できます。届いた提案は decide_proposal で採否を決めてください。
 ほかの会社との合併や、会社の分裂に賛成なら vote で投票できます。`,
     done: () => e.markRead(messages.map((m) => m.id)),
     tools: [
@@ -300,34 +331,6 @@ ${companyList(e)}
             text(args.content, 'content'),
           )
           return '送りました'
-        },
-      ),
-      tool(
-        'propose_memory',
-        'ほかの worker の記憶に残してほしい内容を提案する。相手が採否を決める',
-        Type.Object({
-          to: Type.String({ description: '相手の worker 名' }),
-          content: Type.String(),
-        }),
-        (args) => {
-          e.propose(name, text(args.to, 'to'), text(args.content, 'content'))
-          return `${args.to} に提案しました`
-        },
-      ),
-      tool(
-        'decide_proposal',
-        '自分宛ての記憶の提案を採用するか決める。採用すると自分の記憶に入る',
-        Type.Object({ id: Type.Number(), accept: Type.Boolean() }),
-        (args) => {
-          const accept = args.accept === true
-          const proposal = e.decideProposal(name, number(args.id, 'id'), accept)
-          if (accept) {
-            agent(name).agent.remember(
-              'assistant',
-              `（${proposal.from_worker} からの提案を採用）${proposal.content}`,
-            )
-          }
-          return accept ? '採用しました' : '却下しました'
         },
       ),
       tool(
