@@ -242,7 +242,7 @@ export const tools: Record<string, Def<TSchema>> = {
     },
   }),
   goal_update: def({
-    description: "Refine the description of a goal you own, or drop it (its open tasks fail). The top-level goal G0 cannot be changed.",
+    description: "Refine the description of a goal you own, or drop it (its open tasks fail). The top-level goal G0 cannot be changed. The original description stays on record, and verification still judges the work against it: narrowing a goal does not lower what it must achieve.",
     parameters: Type.Object({ id: Str("Goal ID"), rev: Type.Integer({ description: "Revision from goal_list" }), description: Opt(Type.String()), drop: Opt(Type.Boolean()) }),
     run(c, a) {
       const goal = requireGoal(c.store, a.id);
@@ -250,7 +250,7 @@ export const tools: Record<string, Def<TSchema>> = {
       requireOwner(goal, c.agent);
       if (goal.status !== "open") fail(`Goal ${goal.id} is ${goal.status}`);
       c.store.tx(() => {
-        if (c.store.run("update goals set description = ?, status = ?, rev = rev + 1 where id = ? and rev = ?", a.description ?? goal.description, a.drop ? "dropped" : "open", goal.id, a.rev) !== 1) fail(`Revision conflict: goal is at rev ${goal.rev}; re-read it with goal_list`);
+        if (c.store.run("update goals set description = ?, status = ?, origin = coalesce(origin, ?), rev = rev + 1 where id = ? and rev = ?", a.description ?? goal.description, a.drop ? "dropped" : "open", a.description !== undefined && a.description !== goal.description ? goal.description : null, goal.id, a.rev) !== 1) fail(`Revision conflict: goal is at rev ${goal.rev}; re-read it with goal_list`);
         if (a.drop) c.store.run("update tasks set status = 'failed', feedback = 'goal dropped' where goal = ? and status = 'open'", goal.id);
         c.store.log(c.agent.id, a.drop ? "goal_dropped" : "goal_refined", { id: goal.id, description: a.description });
       });

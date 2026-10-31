@@ -26,7 +26,7 @@ const schema = `
 create table if not exists meta(key text primary key, value text not null);
 create table if not exists agents(id text primary key, role text not null, status text not null, parent text, idle int not null default 0, created_at int not null);
 create table if not exists goals(id text primary key, parent text, description text not null, status text not null, owner text not null,
-  deliverable text, feedback text, verified_by text, rev int not null default 0, created_at int not null);
+  deliverable text, feedback text, verified_by text, rev int not null default 0, created_at int not null, origin text);
 create table if not exists tasks(id text primary key, goal text not null, kind text not null, description text not null, status text not null,
   author text not null, assignee text, exclude text, target text, claimed_by text, lease_until int, result text, feedback text,
   verified_by text, rev int not null default 0, created_at int not null);
@@ -54,7 +54,9 @@ export function centralization(db: Database) {
 }
 
 export type Agent = { id: string; role: string; status: "active" | "dormant" | "merged"; parent: string | null; idle: number };
-export type Goal = { id: string; parent: string | null; description: string; status: "open" | "review" | "done" | "dropped"; owner: string; deliverable: string | null; feedback: string | null; verified_by: string | null; rev: number };
+export type Goal = { id: string; parent: string | null; description: string; status: "open" | "review" | "done" | "dropped"; owner: string; deliverable: string | null; feedback: string | null; verified_by: string | null; rev: number;
+  origin: string | null; // the description before the owner first refined it; verification still judges against it
+};
 export type Task = {
   id: string; goal: string; kind: "work" | "verify" | "steer" | "invest" | "critique" | "judge" | "organize"; description: string; status: "open" | "claimed" | "review" | "done" | "failed";
   author: string; assignee: string | null; exclude: string | null; target: string | null; claimed_by: string | null; lease_until: number | null;
@@ -89,6 +91,7 @@ export class Store {
     this.db.exec(schema);
     // Added after the first release; older stores get the column here.
     if (!this.all<{ name: string }>("pragma table_info(tasks)").some(c => c.name === "budget")) this.db.run("alter table tasks add column budget int");
+    if (!this.all<{ name: string }>("pragma table_info(goals)").some(c => c.name === "origin")) this.db.run("alter table goals add column origin text");
     if (!this.all<{ name: string }>("pragma table_info(tasks)").some(c => c.name === "panel")) this.db.run("alter table tasks add column panel text");
     if (!this.all<{ name: string }>("pragma table_info(knowledge)").some(c => c.name === "merged_into")) this.db.run("alter table knowledge add column merged_into text");
   }

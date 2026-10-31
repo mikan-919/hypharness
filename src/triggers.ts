@@ -158,7 +158,10 @@ export const EVENT_TRIGGERS: EventTrigger[] = [
     on: "goal_submitted",
     fire(store, agent, d) {
       const goal = store.goal(d.goal)!;
-      requestVerification(store, goal.id, agent, goal.id, `Verify that goal ${goal.id} is achieved.\nGoal: ${goal.description}\nClaimed deliverable: ${d.deliverable}\nInspect the actual artifacts; do not trust the claim.`);
+      // A goal its owner refined is judged against what it first asked for, so narrowing it cannot lower the bar.
+      const origin = goal.origin && goal.origin !== goal.description
+        ? `\nOriginal goal, before its owner refined it: ${goal.origin}\nJudge against the original goal. A requirement the refinement dropped counts as met only if the deliverable shows it cannot be done here (not merely that it was not done); otherwise fail and name what is missing.` : "";
+      requestVerification(store, goal.id, agent, goal.id, `Verify that goal ${goal.id} is achieved.\nGoal: ${goal.description}${origin}\nClaimed deliverable: ${d.deliverable}\nInspect the actual artifacts; do not trust the claim.`);
     },
   },
   {

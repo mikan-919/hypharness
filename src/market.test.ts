@@ -227,3 +227,26 @@ test("market prompts cast workers as innovators who argue their case and the mar
   for (const id of ["investor", "critic"]) expect(prompt(id)).toContain("You are a capitalist");
   expect(prompt("lead")).toContain("You are lead");
 });
+
+test("a goal its owner narrows keeps its original description, and verification judges against it", () => {
+  const store = new Store(":memory:");
+  store.init("p", "", defaultConfig);
+  store.addAgent("explorer-1", "explorer", "host");
+  store.run("insert into goals(id, parent, description, status, owner, created_at) values('G1', 'G0', 'Compare STOP and Gödel Agent from the full papers, with every table', 'open', 'explorer-1', 1)");
+  const steer = store.addTask({ goal: "G1", kind: "steer", description: "Goal G1 has no pending work.", author: "host", assignee: "explorer-1" });
+  expect(store.claim(steer, "explorer-1")).toBe(true);
+  const ctx = { store, agent: store.agent("explorer-1")!, task: store.task(steer)!, workspace: "", contextDir: "", episode: "e", messages: [] } as unknown as ToolContext;
+  tools.goal_update!.run(ctx, { id: "G1", rev: 0, description: "Compare them from search excerpts only" });
+  tools.goal_update!.run(ctx, { id: "G1", rev: 1, description: "Compare them from one excerpt" });
+  expect(store.goal("G1")).toMatchObject({ description: "Compare them from one excerpt", origin: "Compare STOP and Gödel Agent from the full papers, with every table" });
+  tools.goal_complete!.run(ctx, { id: "G1", deliverable: "reports/compare.md" });
+  const verify = store.get<{ description: string }>("select description from tasks where kind = 'verify' and target = 'G1'")!.description;
+  expect(verify).toContain("Original goal, before its owner refined it: Compare STOP and Gödel Agent from the full papers, with every table");
+  expect(verify).toContain("cannot be done here (not merely that it was not done)");
+  // A goal never refined is verified as written.
+  store.run("insert into goals(id, parent, description, status, owner, created_at) values('G2', 'G0', 'Write a.txt', 'open', 'explorer-1', 2)");
+  const steer2 = store.addTask({ goal: "G2", kind: "steer", description: "Goal G2 has no pending work.", author: "host", assignee: "explorer-1" });
+  expect(store.claim(steer2, "explorer-1")).toBe(true);
+  tools.goal_complete!.run({ ...ctx, task: store.task(steer2)! } as ToolContext, { id: "G2", deliverable: "a.txt" });
+  expect(store.get<{ description: string }>("select description from tasks where kind = 'verify' and target = 'G2'")!.description).not.toContain("Original goal");
+});
