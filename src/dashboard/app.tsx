@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ArrowDown, BookOpen, Brain, ChevronRight, CircleCheck, CircleX, Coins, ExternalLink, FilePen, FileText, Globe, Info, ListChecks, LoaderCircle, Merge, Search, Split, Target, Users, Wrench } from "lucide-react";
+import { ArrowDown, BookOpen, Brain, ChartLine, ChevronRight, CircleCheck, CircleX, Coins, ExternalLink, FilePen, FileText, FolderOpen, Globe, Info, ListChecks, LoaderCircle, Merge, MessageCircle, MessagesSquare, Network, Plus, RefreshCw, ScrollText, Search, Split, Stethoscope, Target, Users, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
@@ -47,21 +47,29 @@ function usePoll<T>(url: string | null, ms = REFRESH_MS) {
   return data;
 }
 
-const statusVariant: Record<string, "default" | "secondary" | "outline" | "destructive"> = {
-  done: "default", verified: "default", accepted: "default", active: "default", claimed: "secondary", review: "secondary", running: "secondary",
-  open: "outline", hypothesis: "outline", dormant: "outline", merged: "outline", failed: "destructive", rejected: "destructive", dropped: "destructive", expired: "destructive",
+// A state reads by its colour: finished green, in progress blue, waiting on someone amber, failed red, not started grey.
+const TONES = {
+  good: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300", busy: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
+  wait: "bg-amber-500/15 text-amber-700 dark:text-amber-300", bad: "bg-red-500/15 text-red-700 dark:text-red-300", idle: "bg-muted text-muted-foreground",
 };
-const Status = ({ value }: { value: string }) => <Badge variant={statusVariant[value] ?? "outline"}>{value}</Badge>;
+const statusTone: Record<string, keyof typeof TONES> = {
+  done: "good", verified: "good", accepted: "good", active: "good", finished: "good", claimed: "busy", running: "busy",
+  review: "wait", hypothesis: "wait", failed: "bad", rejected: "bad", dropped: "bad", expired: "bad",
+};
+const Status = ({ value }: { value: string }) => <Badge variant="outline" className={`border-transparent ${TONES[statusTone[value] ?? "idle"]}`}>{value}</Badge>;
 
-function Kpi({ label, value, note }: { label: string; value: string; note?: string }) {
+// Figures in one strip instead of a card each, so they take one line above the content rather than a screen.
+function Stats({ items, className = "grid-cols-2 sm:grid-cols-4 xl:grid-cols-8" }: { items: { label: string; value: string; note?: string }[]; className?: string }) {
   return (
-    <Card className="gap-1 py-4">
-      <CardHeader className="px-4"><CardDescription>{label}</CardDescription></CardHeader>
-      <CardContent className="px-4">
-        <div className="text-2xl font-semibold tabular-nums">{value}</div>
-        {note && <div className="text-xs text-muted-foreground">{note}</div>}
-      </CardContent>
-    </Card>
+    <div className={`grid gap-px overflow-hidden rounded-lg border bg-border ${className}`}>
+      {items.map(s => (
+        <div key={s.label} className="bg-card px-4 py-2.5">
+          <div className="text-xs text-muted-foreground">{s.label}</div>
+          <div className="text-lg font-semibold tabular-nums">{s.value}</div>
+          {s.note && <div className="truncate text-[11px] text-muted-foreground" title={s.note}>{s.note}</div>}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -478,7 +486,7 @@ function AgentGraph({ graph }: { graph: Graph }) {
                 <foreignObject x={-NODE_R} y={-NODE_R} width={NODE_R * 2} height={NODE_R * 2}>
                   <div className={`rounded-full ${n.id === selected ? "ring-2 ring-foreground" : ""} ${n.status === "active" ? "" : "opacity-60"}`}><Avatar agent={n.id} size="size-10" /></div>
                 </foreignObject>
-                <text y={NODE_R + 14} textAnchor="middle" className="fill-foreground text-xs">{n.id}</text>
+                <text y={NODE_R + 14} textAnchor="middle" className="fill-foreground stroke-background text-xs" style={{ paintOrder: "stroke", strokeWidth: 4, strokeLinejoin: "round" }}>{n.id}</text>
                 <title>{`${n.id}（${n.status}）`}</title>
               </g>
             );
@@ -585,13 +593,13 @@ function RunControl({ session, o, onDeleted }: { session: string; o?: Overview; 
   const done = o?.goals.find(g => g.id === "G0")?.status === "done";
 
   return (
-    <Card>
-      <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-4">
-        <div className="grid gap-1.5">
-          <CardTitle className="flex items-center gap-2">実行 <Badge variant={running ? "secondary" : "outline"}>{running ? "実行中" : "停止中"}</Badge></CardTitle>
-          <CardDescription>
-            {run ? (running ? `${time(run.startedAt)} に開始` : `${time(run.endedAt)} に終了（終了コード ${run.exitCode}）`) : out ? "前回までの実行出力（run.log）" : "このダッシュボードを起動してからは実行していません"}
-          </CardDescription>
+    <div className="rounded-lg border bg-card">
+      <div className="flex flex-wrap items-end justify-between gap-4 px-4 py-3">
+        <div className="flex min-w-0 items-center gap-2 self-center text-sm">
+          <Badge variant="outline" className={`border-transparent ${TONES[running ? "busy" : "idle"]}`}>{running ? "実行中" : "停止中"}</Badge>
+          <span className="text-muted-foreground">
+            {run ? (running ? `${time(run.startedAt)} に開始` : `${time(run.endedAt)} に終了（終了コード ${run.exitCode}）`) : "このダッシュボードを起動してからは実行していません"}
+          </span>
         </div>
         {running ? (
           <Button variant="destructive" onClick={() => act(() => post("/api/runs/stop", { dir: run!.dir }))}>停止する</Button>
@@ -609,18 +617,18 @@ function RunControl({ session, o, onDeleted }: { session: string; o?: Overview; 
             }}>削除する</Button>
           </form>
         )}
-      </CardHeader>
-      {(error || out) && (
-        <CardContent className="grid gap-2">
-          {error && <div className="text-sm text-destructive">{error}</div>}
-          {out && (
-            <pre ref={logRef} className="h-56 overflow-auto rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap">
-              {out.lines.slice(-400).join("\n") || "(出力なし)"}
-            </pre>
-          )}
-        </CardContent>
+      </div>
+      {error && <div className="border-t px-4 py-2 text-sm text-destructive">{error}</div>}
+      {/* The output is folded unless a run is going, so it does not push the page down. */}
+      {out && (
+        <details open={running} className="border-t px-4 py-2 text-sm">
+          <summary className="cursor-pointer text-muted-foreground">{run ? "実行出力" : "前回までの実行出力（run.log）"}</summary>
+          <pre ref={logRef} className="mt-2 h-56 overflow-auto rounded-md bg-muted/40 p-3 text-xs whitespace-pre-wrap">
+            {out.lines.slice(-400).join("\n") || "(出力なし)"}
+          </pre>
+        </details>
       )}
-    </Card>
+    </div>
   );
 }
 
@@ -653,11 +661,11 @@ function Files({ session }: { session: string }) {
 }
 
 // A read-only dashboard (the resident process's view) shows the state but not the run controls.
-function Dashboard({ session, onDeleted, readOnly = false }: { session: string; onDeleted: (dir: string) => void; readOnly?: boolean }) {
+// The section (tab) is chosen in the side bar and kept in the URL so a view can be linked and reopened.
+function Dashboard({ session, tab, onDeleted, readOnly = false }: { session: string; tab: string; onDeleted: (dir: string) => void; readOnly?: boolean }) {
   const o = usePoll<Overview>(`/api/overview?s=${encodeURIComponent(session)}`);
   const [agentId, setAgentId] = useState<string>();
   const [taskStatus, setTaskStatus] = useState("all");
-  const [tab, setTab] = useState(() => location.hash.slice(1) || "agents");
   useEffect(() => { history.replaceState(null, "", `#${tab}`); }, [tab]);
   useEffect(() => setAgentId(undefined), [session]);
   if (!o) return <div className="grid gap-6">{!readOnly && <RunControl session={session} onDeleted={onDeleted} />}<div className="text-muted-foreground">状態を読み込み中…</div></div>;
@@ -667,42 +675,25 @@ function Dashboard({ session, onDeleted, readOnly = false }: { session: string; 
   const tasks = taskStatus === "all" ? o.tasks : o.tasks.filter(x => x.status === taskStatus);
 
   return (
-    <div className="grid gap-6">
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
+      <header className="grid gap-1">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">最上位目的 {root && <Status value={root.status} />}</div>
+        <h2 className="text-lg leading-snug font-semibold">{o.purpose}</h2>
+        <div className="text-xs text-muted-foreground">制約: {o.constraints || "なし"} ／ シェル: {o.config.allowShell ? "許可" : "不許可"} ／ 最終呼び出し: {time(t.lastAt)}</div>
+      </header>
       {!readOnly && <RunControl session={session} o={o} onDeleted={onDeleted} />}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">最上位目的 {root && <Status value={root.status} />}</CardTitle>
-          <CardDescription className="text-foreground">{o.purpose}</CardDescription>
-        </CardHeader>
-        <CardContent className="text-sm text-muted-foreground">
-          制約: {o.constraints || "なし"} ／ シェル: {o.config.allowShell ? "許可" : "不許可"} ／ 最終呼び出し: {time(t.lastAt)}
-        </CardContent>
-      </Card>
+      <Stats items={[
+        { label: "モデル呼び出し", value: num.format(o.modelCalls), note: o.config.maxModelCalls == null ? "上限なし" : `上限 ${num.format(o.config.maxModelCalls)}` },
+        { label: "入力トークン", value: num.format(promptTokens(t)), note: `キャッシュ外 ${num.format(t.input)}` },
+        { label: "出力トークン", value: num.format(t.output) },
+        { label: "キャッシュ読み取り", value: pct(t.cacheRead, promptTokens(t)), note: `${num.format(t.cacheRead)} トークン` },
+        { label: "最大入力トークン", value: num.format(t.maxPromptTokens), note: "1回の呼び出しの入力（キャッシュ分を含む）" },
+        { label: "モデル待ち時間", value: `${num.format(Math.round(t.ms / 1000))} 秒` },
+        { label: "エージェント", value: `${o.agents.filter(a => a.status === "active").length} / ${o.agents.length}`, note: o.organization ? `稼働 / 全体・lead の呼び出し ${Math.round(o.organization.leadShare * 100)}%` : "稼働 / 全体" },
+        { label: "作業タスク", value: `${work.filter(x => x.status === "done").length} / ${work.length}`, note: "検証済み / 全体" },
+      ]} />
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-8">
-        <Kpi label="モデル呼び出し" value={num.format(o.modelCalls)} note={o.config.maxModelCalls == null ? "上限なし" : `上限 ${num.format(o.config.maxModelCalls)}`} />
-        <Kpi label="入力トークン" value={num.format(promptTokens(t))} note={`キャッシュ外 ${num.format(t.input)}`} />
-        <Kpi label="出力トークン" value={num.format(t.output)} />
-        <Kpi label="キャッシュ読み取り" value={pct(t.cacheRead, promptTokens(t))} note={`${num.format(t.cacheRead)} トークン`} />
-        <Kpi label="最大入力トークン" value={num.format(t.maxPromptTokens)} note="1回の呼び出しの入力（キャッシュ分を含む）" />
-        <Kpi label="モデル待ち時間" value={`${num.format(Math.round(t.ms / 1000))} 秒`} />
-        <Kpi label="エージェント" value={`${o.agents.filter(a => a.status === "active").length} / ${o.agents.length}`} note={o.organization ? `稼働 / 全体・lead の呼び出し ${Math.round(o.organization.leadShare * 100)}%` : "稼働 / 全体"} />
-        <Kpi label="作業タスク" value={`${work.filter(x => x.status === "done").length} / ${work.length}`} note="検証済み / 全体" />
-      </div>
-
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="flex-wrap">
-          <TabsTrigger value="agents">エージェント</TabsTrigger>
-          <TabsTrigger value="streams">ストリーム</TabsTrigger>
-          <TabsTrigger value="graph">関係</TabsTrigger>
-          <TabsTrigger value="files">成果物</TabsTrigger>
-          <TabsTrigger value="telemetry">テレメトリ</TabsTrigger>
-          <TabsTrigger value="tasks">タスク</TabsTrigger>
-          <TabsTrigger value="goals">目標</TabsTrigger>
-          <TabsTrigger value="knowledge">知識・領域</TabsTrigger>
-          <TabsTrigger value="diagnostics">診断</TabsTrigger>
-          <TabsTrigger value="log">ログ</TabsTrigger>
-        </TabsList>
+      <Tabs value={tab} className="min-w-0">
 
         <TabsContent value="agents" className="grid gap-4">
           <Card>
@@ -1256,16 +1247,16 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-8">
-        <Kpi label="現在の世代" value={current ? `${current.gen}` : "-"} note={current ? `${phase[current.phase] ?? current.phase}・${time(current.startedAt)} 開始` : undefined} />
-        <Kpi label="評価の進み" value={curEval ? `${curEval.judged} / ${curEval.expected}` : "-"} note={current ? `世代 ${current.gen} の採点済みの問題数` : undefined} />
-        <Kpi label="採用中" value={inc ? `世代 ${inc.gen}` : "-"} note={inc?.commit.slice(0, 10)} />
-        <Kpi label="採用中の点数" value={incGen?.eval?.score != null ? incGen.eval.score.toFixed(3) : "-"} note="0〜1（正解1・部分0.5）" />
-        <Kpi label="採用中のピーク平均" value={incGen?.eval?.context ? num.format(incGen.eval.context.meanPeakTokens) : "-"} note="1問ごとの最大入力トークンの平均" />
-        <Kpi label="採用 / 評価済み" value={`${gens.filter(g => g.gen > 0 && g.accepted).length} / ${gens.filter(g => g.gen > 0 && g.phase === "done").length}`} />
-        <Kpi label="総モデル呼び出し" value={num.format(totals.calls)} note={`改善 ${num.format(totals.improver)}・解答 ${num.format(totals.eval)}・採点 ${num.format(totals.judge)}・投資と審査 ${num.format(judges)}`} />
-        <Kpi label="総入力トークン" value={num.format(totals.tokens)} note="改善と解答（キャッシュ分を含む）" />
-      </div>
+      <Stats items={[
+        { label: "現在の世代", value: current ? `${current.gen}` : "-", note: current ? `${phase[current.phase] ?? current.phase}・${time(current.startedAt)} 開始` : undefined },
+        { label: "評価の進み", value: curEval ? `${curEval.judged} / ${curEval.expected}` : "-", note: current ? `世代 ${current.gen} の採点済みの問題数` : undefined },
+        { label: "採用中", value: inc ? `世代 ${inc.gen}` : "-", note: inc?.commit.slice(0, 10) },
+        { label: "採用中の点数", value: incGen?.eval?.score != null ? incGen.eval.score.toFixed(3) : "-", note: "0〜1（正解1・部分0.5）" },
+        { label: "採用中のピーク平均", value: incGen?.eval?.context ? num.format(incGen.eval.context.meanPeakTokens) : "-", note: "1問ごとの最大入力トークンの平均" },
+        { label: "採用 / 評価済み", value: `${gens.filter(g => g.gen > 0 && g.accepted).length} / ${gens.filter(g => g.gen > 0 && g.phase === "done").length}` },
+        { label: "総モデル呼び出し", value: num.format(totals.calls), note: `改善 ${num.format(totals.improver)}・解答 ${num.format(totals.eval)}・採点 ${num.format(totals.judge)}・投資と審査 ${num.format(judges)}` },
+        { label: "総入力トークン", value: num.format(totals.tokens), note: "改善と解答（キャッシュ分を含む）" },
+      ]} />
       {current?.error && <Card><CardContent className="text-sm text-destructive">世代 {current.gen} のエラー: {current.error}</CardContent></Card>}
 
       <Tabs value={tab} onValueChange={setTab}>
@@ -1398,9 +1389,11 @@ function Chat({ onOpen }: { onOpen: (id: string) => void }) {
         </CardContent>
       </Card>
       <div className="grid content-start gap-4">
-        <Kpi label="記憶の件数" value={num.format(info.memory.knowledge)} note={`domain ${info.memory.domains} 件・整理待ち ${info.memory.organizing} 件`} />
-        <Kpi label="直前の応答" value={last ? `${last.calls} 回` : "-"} note={last ? `検索 ${last.lookups} 回・記憶へ移した発言 ${last.remembered} 件` : "モデル呼び出しの回数"} />
-        <Kpi label="直前のピーク入力" value={last ? num.format(last.peakTokens) : "-"} note="応答中の1回の呼び出しの最大入力トークン" />
+        <Stats className="grid-cols-1" items={[
+          { label: "記憶の件数", value: num.format(info.memory.knowledge), note: `domain ${info.memory.domains} 件・整理待ち ${info.memory.organizing} 件` },
+          { label: "直前の応答", value: last ? `${last.calls} 回` : "-", note: last ? `検索 ${last.lookups} 回・記憶へ移した発言 ${last.remembered} 件` : "モデル呼び出しの回数" },
+          { label: "直前のピーク入力", value: last ? num.format(last.peakTokens) : "-", note: "応答中の1回の呼び出しの最大入力トークン" },
+        ]} />
         {n > 0 && <Button variant="outline" onClick={() => onOpen(info.dir)}>記憶の中身を見る</Button>}
       </div>
     </div>
@@ -1415,9 +1408,10 @@ function App() {
   const [session, setSession] = useState<string>();
   const [creating, setCreating] = useState(false);
   const [view, setView] = useState<"session" | "rsi" | "chat">(() => location.hash.startsWith("#rsi") ? "rsi" : location.hash === "#chat" || !location.hash ? "chat" : "session");
-  const toggle = (v: "rsi" | "chat") => { const next = view === v ? "session" : v; setView(next); history.replaceState(null, "", next === "session" ? "#agents" : `#${next}`); };
-  // The session view reads its tab from the hash, so leaving the RSI view must not hand it "rsi/<tab>".
-  const leaveRsi = (id: string) => { history.replaceState(null, "", "#agents"); setView("session"); setSession(id); };
+  const [tab, setTab] = useState(() => SECTIONS.find(s => `#${s.id}` === location.hash)?.id ?? "agents");
+  const go = (v: "rsi" | "chat") => { setView(v); history.replaceState(null, "", `#${v}`); };
+  const open = (id: string) => { setView("session"); setTab(id); };
+  const leaveRsi = (id: string) => { open("agents"); setSession(id); };
   // A just-started run may not have a state file yet; keep it selected.
   useEffect(() => {
     if (!list?.length || (session && list.some(s => s.id === session))) return;
@@ -1426,31 +1420,52 @@ function App() {
     // The resident process's own session comes first; otherwise the most recently active one.
     else if (!session) setSession(list.find(s => resident && s.id === chat?.dir)?.id ?? [...list].sort((a, b) => (b.lastAt ?? 0) - (a.lastAt ?? 0))[0]!.id);
   }, [list, session, resident]);
+  const item = (active: boolean) => `flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-sm ${active
+    ? "bg-background font-medium text-foreground shadow-sm" : "text-muted-foreground hover:bg-background/60 hover:text-foreground"}`;
   return (
-    <div className="mx-auto grid max-w-[1600px] gap-6 p-4 md:p-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold">hypharness</h1>
-        {chat && <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-        {!resident && <Button variant={creating ? "secondary" : "default"} onClick={() => setCreating(!creating)}>新規実行</Button>}
-        <Button variant={view === "chat" ? "secondary" : "outline"} onClick={() => toggle("chat")}>{resident && view === "chat" ? "監視" : "チャット"}</Button>
-        {!resident && <Button variant={view === "rsi" ? "secondary" : "outline"} onClick={() => toggle("rsi")}>自己改善</Button>}
+    <div className="grid min-h-screen md:grid-cols-[15rem_minmax(0,1fr)]">
+      {/* Every place to go sits in one side bar: the chat, the RSI loop, and the chosen session's sections. */}
+      <aside className="flex flex-col gap-5 border-b bg-muted/60 p-3 md:sticky md:top-0 md:h-screen md:overflow-y-auto md:border-r md:border-b-0">
+        <h1 className="px-2.5 pt-1 text-base font-semibold">hypharness</h1>
+        {chat && <nav className="flex flex-wrap gap-0.5 md:grid">
+          <button type="button" className={item(view === "chat")} onClick={() => go("chat")}><MessageCircle className="size-4" />チャット</button>
+          {!resident && <button type="button" className={item(view === "rsi")} onClick={() => go("rsi")}><RefreshCw className="size-4" />自己改善</button>}
+          {!resident && <button type="button" className={item(creating)} onClick={() => setCreating(!creating)}><Plus className="size-4" />新規実行</button>}
+        </nav>}
         {list && list.length > 0 && (
-          <Select value={session} onValueChange={leaveRsi}>
-            <SelectTrigger className="w-full sm:w-[28rem]" aria-label="セッション"><SelectValue placeholder="セッション" /></SelectTrigger>
-            <SelectContent>
-              {list.map(s => <SelectItem key={s.id} value={s.id}>{s.id} · {s.rootStatus} · {s.modelCalls} 回</SelectItem>)}
-            </SelectContent>
-          </Select>
+          <div className="grid gap-2">
+            <div className="px-2.5 text-xs font-medium text-muted-foreground">セッション</div>
+            <Select value={session} onValueChange={leaveRsi}>
+              <SelectTrigger className="w-full bg-background" aria-label="セッション"><SelectValue placeholder="セッション" /></SelectTrigger>
+              <SelectContent>
+                {list.map(s => <SelectItem key={s.id} value={s.id}>{s.id} · {s.rootStatus} · {s.modelCalls} 回</SelectItem>)}
+              </SelectContent>
+            </Select>
+            {session && <nav className="flex flex-wrap gap-0.5 md:grid">
+              {SECTIONS.map(({ id, label, icon: Icon }) => (
+                <button key={id} type="button" className={item(view === "session" && tab === id)} onClick={() => open(id)}><Icon className="size-4" />{label}</button>
+              ))}
+            </nav>}
+          </div>
         )}
-        </div>}
-      </header>
-      {!resident && creating && <NewRun onClose={() => setCreating(false)} onStarted={dir => { setCreating(false); setSession(dir); }} />}
-      {view === "chat" ? <Chat onOpen={leaveRsi} /> : view === "rsi" && !resident ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
-        {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
-        {session && <Dashboard session={session} readOnly={!!resident} onDeleted={dir => { setDeleted(dir); setSession(undefined); }} />}
-      </>}
+      </aside>
+      <main className="mx-auto grid w-full max-w-[1400px] min-w-0 grid-cols-[minmax(0,1fr)] content-start gap-4 p-4 md:p-6">
+        {!resident && creating && <NewRun onClose={() => setCreating(false)} onStarted={dir => { setCreating(false); setSession(dir); open("agents"); }} />}
+        {view === "chat" ? <Chat onOpen={leaveRsi} /> : view === "rsi" && !resident ? <Rsi sessions={list ?? []} onOpen={leaveRsi} /> : <>
+          {list && list.length === 0 && !creating && !session && <div className="text-muted-foreground">セッションがありません。「新規実行」から目的を渡して始めてください。</div>}
+          {session && <Dashboard session={session} tab={tab} readOnly={!!resident} onDeleted={dir => { setDeleted(dir); setSession(undefined); }} />}
+        </>}
+      </main>
     </div>
   );
 }
+
+const SECTIONS = [
+  { id: "agents", label: "エージェント", icon: Users }, { id: "streams", label: "ストリーム", icon: MessagesSquare },
+  { id: "graph", label: "関係", icon: Network }, { id: "files", label: "成果物", icon: FolderOpen },
+  { id: "telemetry", label: "テレメトリ", icon: ChartLine }, { id: "tasks", label: "タスク", icon: ListChecks },
+  { id: "goals", label: "目標", icon: Target }, { id: "knowledge", label: "知識・領域", icon: BookOpen },
+  { id: "diagnostics", label: "診断", icon: Stethoscope }, { id: "log", label: "ログ", icon: ScrollText },
+];
 
 createRoot(document.getElementById("root")!).render(<App />);
