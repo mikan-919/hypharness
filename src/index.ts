@@ -97,6 +97,10 @@ if (command === "serve") {
   for (const g of store.all<Record<string, string>>("select * from goals order by created_at")) console.log(`${g.id} [${g.status}] owner=${g.owner}: ${g.description}`);
   for (const a of store.agents()) console.log(`agent ${a.id} [${a.status}]: ${a.role}`);
   console.log(JSON.stringify(report(store, "rounds", 0, 0), null, 2));
+} else if (command === "mcp-login") {
+  if (!rest[0]) throw new Error("mcp-login requires a server name from mcp.json");
+  const { mcpLogin } = await import("./mcp.ts");
+  await mcpLogin(join(opts.dir!, "main"), rest[0]);
 } else if (command === "chat") {
   const base = `http://127.0.0.1:${int(opts.port, "port")}`;
   console.log("Front chat. An empty line ends it.");
