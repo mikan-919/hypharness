@@ -6,7 +6,7 @@ test("a start takes flags, then the previous start's settings, then the defaults
   const prev = resolveSettings(undefined, false, { purpose: "p", calls: "50", "eval-calls": "20", parallel: "4" });
   expect(prev).toMatchObject({ purpose: "p", calls: "50", evalCalls: "20", parallel: "4" });
   // A resume keeps the purpose and budgets but not the parallelism or generation limit.
-  expect(resolveSettings(prev, true, { mode: "fixed" })).toMatchObject({ purpose: "p", calls: "50", evalCalls: "20", mode: "fixed", parallel: undefined });
+  expect(resolveSettings(prev, true, { judges: "off" })).toMatchObject({ purpose: "p", calls: "50", evalCalls: "20", judges: "off", parallel: undefined });
 });
 
 test("the evaluation's questions and budget are fixed once generations exist", () => {
@@ -14,12 +14,12 @@ test("the evaluation's questions and budget are fixed once generations exist", (
   expect(() => resolveSettings(prev, true, { "eval-calls": "30" })).toThrow("fixed at 20");
   expect(() => resolveSettings(prev, true, { seed: "2" })).toThrow("fixed at 1");
   expect(resolveSettings(prev, true, { seed: "1" }).seed).toBe("1");
-  expect(() => resolveSettings(prev, true, { arm: "dynamic-memory" })).toThrow("fixed at dynamic");
+  expect(() => resolveSettings(prev, true, { arm: "market-memory" })).toThrow("fixed at market");
   expect(resolveSettings(prev, false, { "eval-calls": "30" }).evalCalls).toBe("30");
 });
 
 test("invalid values are refused", () => {
-  expect(() => resolveSettings(undefined, false, { mode: "solo" })).toThrow("--mode");
+  expect(() => resolveSettings(undefined, false, { arm: "dynamic" })).toThrow("--arm");
   expect(() => resolveSettings(undefined, false, { calls: "0" })).toThrow("--calls");
   expect(() => resolveSettings(undefined, false, { delta: "2" })).toThrow("--delta");
   expect(() => resolveSettings(undefined, false, { purpose: " " })).toThrow("--purpose");

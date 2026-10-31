@@ -36,8 +36,8 @@ async function main() {
       calls: { type: "string", default: "40" },
       "harness-concurrency": { type: "string", default: "4" },
       delta: { type: "string", default: "0.05" },
-      // The harness arm that answers: dynamic reads the conversation from files, memory finds it in DeLM.
-      arm: { type: "string", default: "dynamic" },
+      // The harness arm that answers: market reads the conversation from files, market-memory finds it in DeLM.
+      arm: { type: "string", default: "market" },
     },
   });
   if (!candidateArg) throw new Error("usage: bun scripts/rsi-eval.ts <candidate-dir> [--baseline eval.json] [--out DIR]");

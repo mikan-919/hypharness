@@ -276,7 +276,7 @@ const server = Bun.serve({
     "/": index,
     "/api/sessions": guard(async () => Response.json(await Promise.all((await sessions()).map(async id => {
       const d = (await session(id))!.db;
-      return { id, purpose: meta(d, "purpose"), mode: JSON.parse(meta(d, "config") ?? "{}").organization, modelCalls: Number(meta(d, "model_calls") ?? 0),
+      return { id, purpose: meta(d, "purpose"), modelCalls: Number(meta(d, "model_calls") ?? 0),
         rootStatus: (d.query("select status from goals where id = 'G0'").get() as { status: string } | null)?.status,
         lastAt: (d.query("select max(at) at from log").get() as { at: number | null }).at };
     })))),
@@ -296,7 +296,7 @@ const server = Bun.serve({
     "/api/file": guard(async req => { const p = params(req), s = await session(p.get("s")); return json(s && await file(join(s.id, "workspace"), p.get("path") ?? "")); }),
     "/api/runs": {
       GET: guard(() => Response.json(runs.list())),
-      // Starts a new session (or a bench group) in a new directory under the data directory.
+      // Starts a new session in a new directory under the data directory.
       POST: guard(async req => {
         const body = await req.json() as runs.RunRequest & { name?: string };
         if (typeof body.name !== "string" || !NAME.test(body.name)) throw new Error("name must be 1-40 lowercase letters, digits, '-' or '_'");

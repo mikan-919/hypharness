@@ -15,7 +15,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 type Row = Record<string, any>;
-type Session = { id: string; purpose: string; mode: string; modelCalls: number; rootStatus: string; lastAt: number | null };
+type Session = { id: string; purpose: string; modelCalls: number; rootStatus: string; lastAt: number | null };
 type Overview = {
   purpose: string; constraints: string; config: Row; modelCalls: number; totals: Row; organization?: { leadShare: number; agents: number; maxDomainsPerSteward: number };
   agents: Row[]; goals: Row[]; tasks: Row[]; knowledge: Row[]; domains: Row[]; usage: Row[]; log: Row[];
@@ -234,7 +234,7 @@ async function post(url: string, body: unknown) {
 
 const toInt = (v: string) => v.trim() ? Number(v) : undefined;
 const enc = encodeURIComponent;
-// A bench run owns several sessions under its directory, so a session belongs to the run whose dir contains it.
+// A session belongs to the run whose dir contains it.
 const runFor = (list: RunInfo[] | undefined, session: string) =>
   list?.filter(r => r.dir === session || session.startsWith(`${r.dir}/`)).sort((a, b) => b.startedAt - a.startedAt)[0];
 
@@ -249,7 +249,7 @@ function Field({ id, label, hint, children }: { id: string; label: string; hint?
 }
 
 function NewRun({ onStarted, onClose }: { onStarted: (dir: string) => void; onClose: () => void }) {
-  const [form, setForm] = useState({ name: "", purpose: "", constraints: "", mode: "dynamic", calls: "", agents: "", concurrency: "", check: "", allowShell: false });
+  const [form, setForm] = useState({ name: "", purpose: "", constraints: "", calls: "", agents: "", concurrency: "", check: "", allowShell: false });
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
@@ -257,9 +257,8 @@ function NewRun({ onStarted, onClose }: { onStarted: (dir: string) => void; onCl
     e.preventDefault();
     setBusy(true); setError(undefined);
     try {
-      const bench = form.mode === "bench";
       const run = await post("/api/runs", {
-        name: form.name, kind: bench ? "bench" : "run", mode: bench ? undefined : form.mode, purpose: form.purpose, constraints: form.constraints,
+        name: form.name, kind: "run", purpose: form.purpose, constraints: form.constraints,
         calls: toInt(form.calls), agents: toInt(form.agents), concurrency: toInt(form.concurrency), check: form.check, allowShell: form.allowShell,
       });
       onStarted(run.dir);
@@ -273,18 +272,6 @@ function NewRun({ onStarted, onClose }: { onStarted: (dir: string) => void; onCl
           <Field id="purpose" label="最上位目的"><Textarea id="purpose" required rows={3} value={form.purpose} onChange={set("purpose")} placeholder="例: CSV を集計する CLI を書き、テストを通す" /></Field>
           <Field id="constraints" label="制約" hint="任意"><Textarea id="constraints" rows={3} value={form.constraints} onChange={set("constraints")} placeholder="例: TypeScript のみ、外部パッケージを使わない" /></Field>
           <Field id="name" label="セッション名" hint="小文字・数字・- と _（.hyph/<名前> に保存）"><Input id="name" required pattern="[a-z0-9][a-z0-9_\-]{0,39}" value={form.name} onChange={set("name")} placeholder="csv-cli" /></Field>
-          <Field id="mode" label="組織" hint="bench は single・fixed・dynamic・market を同じ条件で順に実行して比較します">
-            <Select value={form.mode} onValueChange={v => setForm({ ...form, mode: v })}>
-              <SelectTrigger id="mode"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="dynamic">dynamic（エージェントが増減を判断）</SelectItem>
-                <SelectItem value="market">market（分割・出資・作業・批判をイベントで回す）</SelectItem>
-                <SelectItem value="fixed">fixed（3体で固定）</SelectItem>
-                <SelectItem value="single">single（1体）</SelectItem>
-                <SelectItem value="bench">bench（4方式を比較）</SelectItem>
-              </SelectContent>
-            </Select>
-          </Field>
           <div className="grid grid-cols-3 gap-3">
             <Field id="calls" label="呼び出し上限"><Input id="calls" type="number" min={1} value={form.calls} onChange={set("calls")} placeholder="なし" /></Field>
             <Field id="agents" label="エージェント上限"><Input id="agents" type="number" min={1} value={form.agents} onChange={set("agents")} placeholder="なし" /></Field>
@@ -415,7 +402,7 @@ function Dashboard({ session, onDeleted, readOnly = false }: { session: string; 
           <CardDescription className="text-foreground">{o.purpose}</CardDescription>
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground">
-          制約: {o.constraints || "なし"} ／ 組織: {o.config.organization} ／ シェル: {o.config.allowShell ? "許可" : "不許可"} ／ 最終呼び出し: {time(t.lastAt)}
+          制約: {o.constraints || "なし"} ／ シェル: {o.config.allowShell ? "許可" : "不許可"} ／ 最終呼び出し: {time(t.lastAt)}
         </CardContent>
       </Card>
 
@@ -592,7 +579,7 @@ type RsiInfo = {
   state: { incumbent?: { gen: number; commit: string }; settings: Row; generations: Generation[] } | null;
 };
 type RsiForm = {
-  purpose: string; constraints: string; mode: string; arm: string; judges: string; calls: string; evalCalls: string;
+  purpose: string; constraints: string; arm: string; judges: string; calls: string; evalCalls: string;
   perCategory: string; seed: string; delta: string; parallel?: string; generations?: string;
 };
 type RsiGen = { gen: number; usage: Row[]; agents: Row[]; samples: Row[] };
@@ -878,7 +865,7 @@ function GenerationChart({ title, description, rows, field, format }: { title: s
 // While the loop runs its settings cannot change; they are shown as they were given to it.
 function RsiSettingsView({ settings: s }: { settings: Partial<RsiForm> }) {
   const items: [string, string | undefined][] = [
-    ["改善役の組織", s.mode], ["評価する方式", s.arm ?? "dynamic"], ["投資と審査", s.judges === "off" ? "使わない" : "使う"], ["改善の呼び出し上限", s.calls], ["解答の呼び出し上限", s.evalCalls], ["世代数", s.generations ?? "無制限"],
+    ["評価する方式", s.arm ?? "market"], ["投資と審査", s.judges === "off" ? "使わない" : "使う"], ["改善の呼び出し上限", s.calls], ["解答の呼び出し上限", s.evalCalls], ["世代数", s.generations ?? "無制限"],
     ["分類ごとの問題数", s.perCategory], ["種", s.seed], ["評価の並列数", s.parallel ?? "全問"], ["許容幅 δ", s.delta],
   ];
   return (
@@ -948,7 +935,7 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
               // The questions and per-question budget are fixed by the first start; a resume keeps them.
               const sample = started ? {} : { perCategory: toInt(form.perCategory), seed: toInt(form.seed), evalCalls: toInt(form.evalCalls), arm: form.arm };
               act(() => post("/api/rsi/start", {
-                purpose: form.purpose, constraints: form.constraints, mode: form.mode, judges: form.judges !== "off", calls: toInt(form.calls), ...sample,
+                purpose: form.purpose, constraints: form.constraints, judges: form.judges !== "off", calls: toInt(form.calls), ...sample,
                 generations: toInt(form.generations ?? ""), parallel: toInt(form.parallel ?? ""), delta: form.delta.trim() ? Number(form.delta) : undefined,
               }));
             }}>
@@ -959,23 +946,10 @@ function Rsi({ sessions, onOpen }: { sessions: Session[]; onOpen: (id: string) =
                 <Textarea id="rsi-constraints" rows={8} className="font-mono text-xs" value={form.constraints} onChange={set("constraints")} />
               </Field>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 md:col-span-2">
-                <Field id="rsi-mode" label="改善役の組織">
-                  <Select value={form.mode} onValueChange={v => setForm({ ...form, mode: v })}>
-                    <SelectTrigger id="rsi-mode"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="dynamic">dynamic</SelectItem>
-                      <SelectItem value="market">market</SelectItem>
-                      <SelectItem value="fixed">fixed</SelectItem>
-                      <SelectItem value="single">single</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Field>
-                <Field id="rsi-arm" label="評価する方式" hint={started ? "初回の開始で固定" : "dynamic は会話をファイルで、dynamic-memory は DeLM の記憶で読む"}>
-                  <Select value={started ? settings.arm ?? "dynamic" : form.arm} onValueChange={v => setForm({ ...form, arm: v })} disabled={started}>
+                <Field id="rsi-arm" label="評価する方式" hint={started ? "初回の開始で固定" : "market は会話をファイルで、market-memory は DeLM の記憶で読む"}>
+                  <Select value={started ? settings.arm ?? "market" : form.arm} onValueChange={v => setForm({ ...form, arm: v })} disabled={started}>
                     <SelectTrigger id="rsi-arm"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="dynamic">dynamic</SelectItem>
-                      <SelectItem value="dynamic-memory">dynamic-memory</SelectItem>
                       <SelectItem value="market">market</SelectItem>
                       <SelectItem value="market-memory">market-memory</SelectItem>
                     </SelectContent>
@@ -1169,7 +1143,7 @@ function App() {
   const toggle = (v: "rsi" | "chat") => { const next = view === v ? "session" : v; setView(next); history.replaceState(null, "", next === "session" ? "#agents" : `#${next}`); };
   // The session view reads its tab from the hash, so leaving the RSI view must not hand it "rsi/<tab>".
   const leaveRsi = (id: string) => { history.replaceState(null, "", "#agents"); setView("session"); setSession(id); };
-  // A just-started run may not have a state file yet; keep it selected, and move into a bench run's first session once it appears.
+  // A just-started run may not have a state file yet; keep it selected.
   useEffect(() => {
     if (!list?.length || (session && list.some(s => s.id === session))) return;
     const child = session && list.find(s => s.id.startsWith(`${session}/`));
@@ -1189,7 +1163,7 @@ function App() {
           <Select value={session} onValueChange={leaveRsi}>
             <SelectTrigger className="w-full sm:w-[28rem]" aria-label="セッション"><SelectValue placeholder="セッション" /></SelectTrigger>
             <SelectContent>
-              {list.map(s => <SelectItem key={s.id} value={s.id}>{s.id} · {s.mode} · {s.rootStatus} · {s.modelCalls} 回</SelectItem>)}
+              {list.map(s => <SelectItem key={s.id} value={s.id}>{s.id} · {s.rootStatus} · {s.modelCalls} 回</SelectItem>)}
             </SelectContent>
           </Select>
         )}

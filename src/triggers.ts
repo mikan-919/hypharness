@@ -11,11 +11,9 @@ import { isSteward } from "./memory.ts";
 // evaluator rules on the objections. A task that spends its budget goes back to the investor.
 // These roles work inside a harness session; the RSI loop's own investor and judges (scripts/rsi-judges.ts) are separate.
 
-type Organization = Store["config"]["organization"];
-type EventTrigger = { on: string; modes?: Organization[]; fire: (store: Store, agent: string, detail: Record<string, any>) => void };
-type StateTrigger = { name: string; modes?: Organization[]; scan: (store: Store) => void };
+type EventTrigger = { on: string; fire: (store: Store, agent: string, detail: Record<string, any>) => void };
+type StateTrigger = { name: string; scan: (store: Store) => void };
 
-const CLASSIC: Organization[] = ["single", "fixed", "dynamic"];
 // Declined subgoals under one goal before the investor must fund something, so declining and re-splitting cannot loop.
 export const MAX_DECLINES = 3;
 
@@ -27,7 +25,6 @@ export const ROLES: Record<string, { role: string; kinds: Task["kind"][] }> = {
   evaluator: { role: "evaluator: rules on each objection by checking its evidence, and decides whether the work stands", kinds: ["judge"] },
 };
 
-export const isMarket = (store: Store) => store.config.organization === "market";
 
 // Several agents hold each market role: "critic-2" is a critic like "critic", and "worker-3" a worker.
 export const roleOf = (id: string) => id.replace(/-\d+$/, "");
@@ -41,11 +38,12 @@ export const PANEL = 3;
 export const ORGANIZE_EVERY = 12;
 const ORGANIZE_BUDGET = 12;
 
-// Whether an agent may claim a task: memory stewards take only organizing work and nobody else does; in market mode
-// the roles take only their own kinds, and workers take everything else.
-export function eligible(store: Store, agent: Agent, task: Pick<Task, "kind">) {
+// Whether an agent may claim a task: memory stewards take only organizing work and nobody else does; the market roles
+// take only their own kinds, and workers take everything else.
+export function eligible(agent: Agent, task: Pick<Task, "kind"> & { assignee?: string | null }) {
   if (isSteward(agent.id) || task.kind === "organize") return isSteward(agent.id) && task.kind === "organize";
-  if (!isMarket(store)) return true;
+  // A task assigned to an agent is its own to do, such as a goal's steer task for an owner that holds no market role.
+  if (task.assignee === agent.id) return true;
   const r = ROLES[roleOf(agent.id)];
   return r ? r.kinds.includes(task.kind) : !Object.values(ROLES).some(x => x.kinds.includes(task.kind));
 }
@@ -60,7 +58,7 @@ export function didWork(store: Store, agent: string, target: string) {
 
 // Whether an agent may claim a task now: its role allows it, it is not excluded, and a verifier never checks its own work.
 export function mayTake(store: Store, agent: Agent, task: Task) {
-  if (!eligible(store, agent, task) || agent.id === task.exclude) return false;
+  if (!eligible(agent, task) || agent.id === task.exclude) return false;
   return !(task.kind === "verify" && store.config.maxAgents > 1 && task.target && didWork(store, agent.id, task.target));
 }
 
@@ -69,8 +67,8 @@ export function withheldTools(store: Store, agent: Agent) {
   const withheld = new Set<string>();
   if (store.meta("resident") === "1") for (const t of ["domain_create", "domain_link", "domain_split", "domain_merge", "domain_transfer", "domain_request"]) withheld.add(t);
   if (isSteward(agent.id)) for (const t of ["file_write", "shell", "task_create", "task_assign", "agent_spawn", "goal_create", "goal_complete", "goal_update", "goal_transfer"]) withheld.add(t);
-  if (!(isMarket(store) && roleOf(agent.id) === "investor")) { withheld.add("goal_fund"); withheld.add("goal_decline"); }
-  if (isMarket(store) && agent.id === "lead") for (const t of ["file_write", "shell", "task_create", "task_assign", "agent_spawn"]) withheld.add(t);
+  if (roleOf(agent.id) !== "investor") { withheld.add("goal_fund"); withheld.add("goal_decline"); }
+  if (agent.id === "lead") for (const t of ["file_write", "shell", "task_create", "task_assign", "agent_spawn"]) withheld.add(t);
   return withheld;
 }
 
@@ -157,13 +155,6 @@ export const EVENT_TRIGGERS: EventTrigger[] = [
     },
   },
   {
-    on: "work_submitted", modes: CLASSIC,
-    fire(store, agent, d) {
-      const task = store.task(d.task)!;
-      requestVerification(store, task.goal, agent, task.id, `Verify task ${task.id}.\nTask: ${task.description}\nClaimed result: ${d.result}\nInspect the actual artifacts; do not trust the claim.`);
-    },
-  },
-  {
     on: "goal_submitted",
     fire(store, agent, d) {
       const goal = store.goal(d.goal)!;
@@ -171,14 +162,14 @@ export const EVENT_TRIGGERS: EventTrigger[] = [
     },
   },
   {
-    on: "goal_created", modes: ["market"],
+    on: "goal_created",
     fire(store, agent, d) {
       const goal = store.goal(d.id)!;
       if (goal.parent) invest(store, agent, goal, `A new subgoal was split from ${goal.parent}.`);
     },
   },
   {
-    on: "goal_funded", modes: ["market"],
+    on: "goal_funded",
     fire(store, agent, d) {
       const goal = store.goal(d.goal)!;
       store.addTask({
@@ -188,13 +179,13 @@ export const EVENT_TRIGGERS: EventTrigger[] = [
     },
   },
   {
-    on: "budget_exhausted", modes: ["market"],
+    on: "budget_exhausted",
     fire(store, agent, d) {
       invest(store, agent, store.goal(d.goal)!, `Funded task ${d.task} spent its budget of ${d.budget} model calls without finishing. Its last note: ${d.note ?? "-"}`);
     },
   },
   {
-    on: "work_submitted", modes: ["market"],
+    on: "work_submitted",
     fire(store, agent, d) {
       const task = store.task(d.task)!, record = criticRecord(store);
       convene(store, "critic", {
@@ -206,7 +197,7 @@ export const EVENT_TRIGGERS: EventTrigger[] = [
     },
   },
   {
-    on: "objections_raised", modes: ["market"],
+    on: "objections_raised",
     fire(store, agent, d) {
       const task = store.task(d.target)!;
       convene(store, "evaluator", {
@@ -223,9 +214,7 @@ export const STATE_TRIGGERS: StateTrigger[] = [
     // Any open goal with nothing pending goes back to its owner to decide the next step (plan, act, refine, drop, or submit).
     name: "goal_idle",
     scan(store) {
-      const next = isMarket(store)
-        ? "Decide the next step: split it into subgoals with goal_create (the investor funds or declines each), refine it, or submit it with goal_complete once its subgoals are done. You do not do the work yourself."
-        : "Decide the next step: do the work yourself, create tasks or subgoals, refine or drop the goal, or submit it with goal_complete.";
+      const next = "Decide the next step: split it into subgoals with goal_create (the investors fund or decline each), refine it, or submit it with goal_complete once its subgoals are done. You do not do the work yourself.";
       for (const g of store.all<Goal>("select * from goals where status = 'open'")) {
         const busy = store.get("select 1 from goals where parent = ?1 and status in ('open', 'review') union all select 1 from tasks where goal = ?1 and status in ('open', 'claimed', 'review')", g.id);
         if (busy) continue;
@@ -239,7 +228,7 @@ export const STATE_TRIGGERS: StateTrigger[] = [
   {
     // Funded work and verification need workers; the market roles never take them. Each open task gets a worker that is not
     // busy with another, so several innovators work on funded goals in parallel; a new one is staffed when none is free.
-    name: "unstaffed", modes: ["market"],
+    name: "unstaffed",
     scan(store) {
       const open = store.all<Task>("select * from tasks where status = 'open' and assignee is null and kind in ('work', 'verify') order by created_at");
       const busy = new Set(store.all<{ id: string }>("select claimed_by id from tasks where status = 'claimed' union select assignee from tasks where status = 'open' and assignee is not null").map(r => r.id));
@@ -258,14 +247,12 @@ export const STATE_TRIGGERS: StateTrigger[] = [
   },
 ];
 
-const applies = (t: { modes?: Organization[] }, store: Store) => !t.modes || t.modes.includes(store.config.organization);
-
 // Records the event and fires its triggers; call it inside the emitting tool's transaction.
 export function emit(store: Store, agent: string, event: string, detail: Record<string, any>) {
   store.log(agent, event, detail);
-  for (const t of EVENT_TRIGGERS) if (t.on === event && applies(t, store)) t.fire(store, agent, detail);
+  for (const t of EVENT_TRIGGERS) if (t.on === event) t.fire(store, agent, detail);
 }
 
 export function scan(store: Store) {
-  for (const t of STATE_TRIGGERS) if (applies(t, store)) t.scan(store);
+  for (const t of STATE_TRIGGERS) t.scan(store);
 }

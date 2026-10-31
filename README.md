@@ -75,10 +75,9 @@ bun run start mcp-login alphaxiv
 
 ## 比較と開発
 
-比較実験の `bench`、LoCoMo、自己改善の `rsi` は、常駐用とは別の保存先を使います。測定の使い方は [LoCoMo](docs/locomo.md) を参照してください。
+組織は市場（目標を分割する lead、出資を合議する投資家役、作業するイノベーター、成果を合議で審査する批判役と評価役）の1種類です。LoCoMo と自己改善の `rsi` は、常駐用とは別の保存先を使います。測定の使い方は [LoCoMo](docs/locomo.md) を参照してください。
 
 ```sh
-bun run bench 'ToDo 管理の CLI を作る' --calls 60
 bun run rsi --generations 3
 bun run check
 bun test

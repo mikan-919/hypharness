@@ -5,25 +5,25 @@
 ## 実行
 
 ```bash
-# 分類ごとに2問ずつ、direct と dynamic で解く（既定の設定）
+# 分類ごとに2問ずつ、direct と market で解く（既定の設定）
 bun run src/index.ts locomo
 
 # 方式と分類を選ぶ
-bun run src/index.ts locomo --arms direct,single,dynamic --per-category 2 --calls 40
+bun run src/index.ts locomo --arms direct,market,market-memory --per-category 2 --calls 40
 bun run src/index.ts locomo --arms direct --categories Cognitive,adversarial --per-category 10
 
 # 全問を、direct は8並列、ハーネスは4問並列で解く
-bun run src/index.ts locomo --arms direct,dynamic --per-category all --concurrency 8 --harness-concurrency 4 --out .hyph/locomo-full
+bun run src/index.ts locomo --arms direct,market --per-category all --concurrency 8 --harness-concurrency 4 --out .hyph/locomo-full
 
 # 中断した実行を同じ出力先で続ける
-bun run src/index.ts locomo --out .hyph/locomo-full --arms direct,dynamic --per-category all
+bun run src/index.ts locomo --out .hyph/locomo-full --arms direct,market --per-category all
 ```
 
 再開するときは、最初と同じ `--arms`、`--per-category`、`--categories`、`--seed` を指定してください。出力先の記録は問題 ID で照合され、済んだ問題は飛ばされます。
 
 | オプション | 意味 | 既定値 |
 | --- | --- | --- |
-| `--arms` | 比較する方式。`direct` は参照実装と同じく会話全体と質問を1回の呼び出しで渡す。`single`・`fixed`・`dynamic` はハーネスをその組織で1問ごとに実行する | `direct,dynamic` |
+| `--arms` | 比較する方式。`direct` は参照実装と同じく会話全体と質問を1回の呼び出しで渡す。`market` はハーネスを1問ごとに実行し、会話をファイルで読む。`market-memory` は会話を DeLM の知識として読む | `direct,market` |
 | `--per-category N` | 分類ごとの問題数。`all` で全問 | `2` |
 | `--categories` | 対象の分類（`multi-hop`、`temporal`、`common-sense`、`single-hop`、`adversarial`、`Cognitive`） | すべて |
 | `--seed N` | 問題の選び方を決める乱数の種。同じ種なら全方式が同じ問題を解く | `1` |
@@ -71,7 +71,7 @@ bun run src/index.ts locomo --out .hyph/locomo-full --arms direct,dynamic --per-
 | Cognitive | 401 | 48.88 |
 | 全体 | 2,387 | 59.11 |
 
-dynamic は multi-hop の186問で止めました。同じ186問での比較は次のとおりです。
+次の dynamic は、組織を market に統一する前にあった組織（エージェントが増減を判断する）での測定です。multi-hop の186問で止めました。同じ186問での比較は次のとおりです。
 
 | 項目 | direct | dynamic |
 | --- | --- | --- |

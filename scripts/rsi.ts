@@ -20,13 +20,11 @@ const { values: opts } = parseArgs({
     // Settings left out keep the value of the previous start (state.json), then the defaults in rsi-defaults.ts.
     purpose: { type: "string" },
     constraints: { type: "string" },
-    // Organization of the improver session.
-    mode: { type: "string" },
     // Model-call budget of one improver session, and of one question in an evaluation.
     calls: { type: "string" },
     "eval-calls": { type: "string" },
     "per-category": { type: "string" },
-    // Evaluated arm: dynamic (conversation in files) or memory (conversation in DeLM).
+    // Evaluated arm: market (conversation in files) or market-memory (conversation in DeLM).
     arm: { type: "string" },
     seed: { type: "string" },
     delta: { type: "string" },
@@ -144,11 +142,11 @@ async function improve(state: State, g: Generation) {
   const fresh = !existsSync(join(dir, "state.sqlite"));
   // A resumed session keeps the traces it started with, including the note the improver already wrote.
   if (fresh) await writeTraces(state, workspace);
-  // Purpose, constraints and organization belong to a new session; a resumed one keeps those it started with.
-  const { purpose, constraints, mode, calls, judges } = state.settings;
+  // Purpose and constraints belong to a new session; a resumed one keeps those it started with.
+  const { purpose, constraints, calls, judges } = state.settings;
   const shut = closed(ledger(state.generations));
   if (fresh && judges === "on" && !g.grant) g.grant = await judged(g, () => invest(ask, { history: history(state), incumbent: evalSummary(state.incumbent!.eval), ledger: ledger(state.generations), maxCalls: Number(calls) }));
-  const code = await run(["bun", join(state.incumbent!.tree, "src", "index.ts"), "run", ...(fresh ? [purpose + (g.grant ? brief(g.grant, shut) : ""), `--constraints=${constraints}`, "--mode", mode] : []),
+  const code = await run(["bun", join(state.incumbent!.tree, "src", "index.ts"), "run", ...(fresh ? [purpose + (g.grant ? brief(g.grant, shut) : ""), `--constraints=${constraints}`] : []),
     "--dir", dir, "--allow-shell", "--calls", String(g.grant?.calls ?? calls)], join(dir, "run.log"));
   const status = [...readFileSync(join(dir, "run.log"), "utf8").matchAll(/"status": "(\w+)"/g)].at(-1)?.[1];
   if (code !== 0 || !status || status === "error") throw new Error(`improver session ended with exit ${code}, status ${status ?? "unknown"}`);

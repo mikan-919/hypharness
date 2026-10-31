@@ -19,8 +19,8 @@ test("each memory domain gets its own dormant steward, and ingesting a benchmark
   expect(store.agent(stewardOf("D-s1"))!.status).toBe("dormant");
   expect(store.get("select 1 from tasks where kind = 'organize'")).toBeUndefined();
   // Stewards take only organizing work, and only stewards take it.
-  expect(eligible(store, store.agent(stewardOf("D-s1"))!, { kind: "verify" })).toBe(false);
-  expect(eligible(store, store.agent("lead")!, { kind: "organize" })).toBe(false);
+  expect(eligible(store.agent(stewardOf("D-s1"))!, { kind: "verify" })).toBe(false);
+  expect(eligible(store.agent("lead")!, { kind: "organize" })).toBe(false);
 });
 
 test("chat memory that grows past the threshold sets its steward to organize, and the organizing pass runs it", async () => {

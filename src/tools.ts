@@ -63,10 +63,6 @@ function decideInvestment(c: ToolContext, task: Task) {
   return `Investors declined ${goal.id} (${funds.length} of ${votes.length} voted to fund)`;
 }
 
-function dynamicOnly(store: Store) {
-  if (store.config.organization !== "dynamic" && store.config.organization !== "market") fail(`Agent composition is fixed in ${store.config.organization} mode`);
-}
-
 
 function applyVerdict(store: Store, verifier: string, target: string, pass: boolean, reason: string) {
   if (target.startsWith("T-")) {
@@ -599,7 +595,6 @@ export const tools: Record<string, Def<TSchema>> = {
     description: "Create a new agent with its own persistent context. Only when existing or dormant agents cannot be reused and the expected benefit exceeds the cost of another agent.",
     parameters: Type.Object({ id: Type.String({ pattern: "^[a-z][a-z0-9-]{1,30}$" }), role: Str("Responsibility and expertise"), reason: Str("Why no existing agent can do this") }),
     run(c, a) {
-      dynamicOnly(c.store);
       return c.store.tx(() => {
         const n = c.store.get<{ n: number }>("select count(*) n from agents")!.n;
         if (n >= c.store.config.maxAgents) fail(`Agent limit ${c.store.config.maxAgents} reached; reuse a dormant agent with task_assign`);
@@ -614,7 +609,6 @@ export const tools: Record<string, Def<TSchema>> = {
     description: "Put an agent you created (or yourself) to sleep when it is no longer useful. Its context is kept; assigning it a task wakes it.",
     parameters: Type.Object({ id: Type.String(), reason: Type.String() }),
     run(c, a) {
-      dynamicOnly(c.store);
       const target = c.store.agent(a.id) ?? fail(`Unknown agent ${a.id}`);
       if (target.id === "lead") fail("lead cannot sleep");
       if (target.id !== c.agent.id && target.parent !== c.agent.id) fail(`Only ${target.parent} or ${target.id} can put it to sleep`);
@@ -633,7 +627,6 @@ export const tools: Record<string, Def<TSchema>> = {
       reason: Str("Why these parts go faster or better in parallel"),
     }),
     run(c, a) {
-      dynamicOnly(c.store);
       const task = requireCurrent(c);
       if (task.kind !== "work") fail("Only a work task can be split");
       const budgeted = task.budget !== null;
@@ -673,7 +666,6 @@ export const tools: Record<string, Def<TSchema>> = {
     description: "Merge yourself into another agent of the same role when you are no longer needed as a separate agent: your working memory is appended to its memory and you retire for good. Finish your current task afterwards.",
     parameters: Type.Object({ into: Str("Agent of your role that takes over your memory"), reason: Str("Why a separate agent is no longer worth it") }),
     run(c, a) {
-      dynamicOnly(c.store);
       const target = c.store.agent(a.into) ?? fail(`Unknown agent ${a.into}`);
       if (target.id === c.agent.id) fail("Cannot merge into yourself");
       if (target.role !== c.agent.role || target.status === "merged") fail(`${a.into} is not an agent of your role that can take you over`);

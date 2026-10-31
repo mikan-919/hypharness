@@ -14,7 +14,8 @@ function claimable(store: Store, agent: Agent) {
   for (const t of candidates) if (mayTake(store, agent, t) && store.claim(t.id, agent.id)) return store.task(t.id)!;
 }
 
-// A verify task excludes its author and anyone who did the work; if no active agent can take it, wake or create one rather than self-verify.
+// A verify task excludes its author and anyone who did the work; if no active agent can take it, wake one rather than self-verify
+// (the unstaffed trigger creates a verifier when nobody can).
 function unblockVerification(store: Store) {
   const blocked = store.all<Task>("select * from tasks where status = 'open' and kind = 'verify' and exclude is not null");
   for (const t of blocked) {
@@ -24,10 +25,6 @@ function unblockVerification(store: Store) {
     if (dormant) {
       store.run("update agents set status = 'active', idle = 0 where id = ?", dormant.id);
       store.log("host", "agent_woken", { id: dormant.id, for: t.id });
-      return true;
-    }
-    if (store.config.organization === "dynamic" && store.agents().length < store.config.maxAgents && !store.agent("verifier")) {
-      store.addAgent("verifier", "verifier: independently checks results and knowledge against the actual artifacts and sources", "host");
       return true;
     }
   }
@@ -82,7 +79,7 @@ async function schedule(rt: Runtime, maxRounds: number): Promise<Report> {
       if (task) {
         work.push([agent, task]);
         store.run("update agents set idle = 0 where id = ?", agent.id);
-      } else if ((store.config.organization === "dynamic" || store.config.organization === "market") && agent.id !== "lead" && agent.idle + 1 >= store.config.idleRounds) {
+      } else if (agent.id !== "lead" && agent.idle + 1 >= store.config.idleRounds) {
         store.run("update agents set status = 'dormant', idle = 0 where id = ?", agent.id);
         store.log("host", "agent_dormant", { id: agent.id, reason: "idle" });
       } else {

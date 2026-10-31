@@ -3,10 +3,9 @@ import { Database } from "bun:sqlite";
 // Shared state of the whole organization (DeLM) and each agent's persistent context (CLM).
 // Every multi-row change runs inside a transaction; single-row ownership changes use conditional UPDATEs.
 
+// The organization is a market (src/triggers.ts): lead only splits goals; panels of investors fund each subgoal with
+// a call budget, workers do funded work, panels of critics object to results and panels of evaluators rule.
 export type Config = {
-  // market: lead only splits goals; an investor funds each subgoal with a call budget, workers do funded work,
-  // a critic objects to results and an evaluator rules (src/triggers.ts).
-  organization: "single" | "fixed" | "dynamic" | "market";
   maxAgents: number;
   maxConcurrency: number;
   maxModelCalls: number;
@@ -14,12 +13,12 @@ export type Config = {
   memoryLimit: number; // characters of working memory per agent
   toolOutputLimit: number;
   leaseMs: number;
-  idleRounds: number; // rounds without work before a dynamic agent goes dormant
+  idleRounds: number; // rounds without work before an agent other than lead goes dormant
   allowShell: boolean;
 };
 
 export const defaultConfig: Config = {
-  organization: "dynamic", maxAgents: Infinity, maxConcurrency: Infinity, maxModelCalls: Infinity, maxSteps: 16,
+  maxAgents: Infinity, maxConcurrency: Infinity, maxModelCalls: Infinity, maxSteps: 16,
   memoryLimit: 6000, toolOutputLimit: 4000, leaseMs: 10 * 60_000, idleRounds: 3, allowShell: false,
 };
 
@@ -126,10 +125,6 @@ export class Store {
       this.setMeta("config", JSON.stringify(config));
       this.setMeta("model_calls", "0");
       this.addAgent("lead", "lead: owns the top-level purpose, plans, organizes, and delivers", null, "agent_initialized");
-      if (config.organization === "fixed") {
-        this.addAgent("worker", "worker: carries out assigned work and produces artifacts", "lead", "agent_initialized");
-        this.addAgent("reviewer", "reviewer: verifies results and knowledge independently", "lead", "agent_initialized");
-      }
       this.run("insert into goals(id, parent, description, status, owner, created_at) values('G0', null, ?, 'open', 'lead', ?)", purpose, Date.now());
     });
   }

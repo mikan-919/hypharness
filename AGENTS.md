@@ -18,7 +18,6 @@
 
 - 実行コマンド: Bun を使用する。
   - 実行: `bun run start`
-  - ベンチマーク: `bun run bench`
   - 型検査: `bun run check`
   - テスト: `bun test`
   - ※ `README.md` や `CLAUDE.md` と齟齬がある場合は `package.json` を正とする。

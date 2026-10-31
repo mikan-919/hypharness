@@ -63,9 +63,9 @@ test("runs start only from the dashboard's own origin, and their output and exit
     expect((await post("/api/runs", { name: "../x", kind: "run", purpose: "p" })).status).toBe(400);
     expect((await post("/api/runs", { name: "x", kind: "run", purpose: "p", calls: -1 })).status).toBe(400);
 
-    const started = await (await post("/api/runs", { name: "first", kind: "run", purpose: "Write a file", mode: "single", calls: 5 })).json() as { dir: string; args: string[] };
+    const started = await (await post("/api/runs", { name: "first", kind: "run", purpose: "Write a file", calls: 5 })).json() as { dir: string; args: string[] };
     expect(started.dir).toBe(".hyph/first");
-    expect(started.args).toEqual(["run", "Write a file", "--dir", ".hyph/first", "--calls", "5", "--mode", "single"]);
+    expect(started.args).toEqual(["run", "Write a file", "--dir", ".hyph/first", "--calls", "5"]);
     let out: { exitCode: number | null; lines: string[] };
     do {
       await Bun.sleep(100);
@@ -101,7 +101,7 @@ test("output of earlier runs stays readable from the session's run.log", async (
 
 test("the RSI view reads the loop's state and log, and per-question evaluation sessions stay out of the session list", async () => {
   const dir = mkdtempSync(join(tmpdir(), "hyph-rsi-"));
-  for (const session of ["rsi/gen-1", "rsi/gen-1/eval/locomo/dynamic/q1"]) {
+  for (const session of ["rsi/gen-1", "rsi/gen-1/eval/locomo/market/q1"]) {
     mkdirSync(join(dir, ".hyph", session), { recursive: true });
     const store = new Store(join(dir, ".hyph", session, "state.sqlite"));
     store.init(session, "", defaultConfig);
@@ -116,7 +116,7 @@ test("the RSI view reads the loop's state and log, and per-question evaluation s
     expect([rsi.dir, rsi.pid, rsi.lines, rsi.state.generations.length]).toEqual([".hyph/rsi", null, ["loop started"], 1]);
     expect(rsi.defaults.calls).toBe("150");
     expect((await post("/api/rsi/start", { delta: 2 })).status).toBe(400);
-    expect((await post("/api/rsi/start", { mode: "solo" })).status).toBe(400);
+    expect((await post("/api/rsi/start", { arm: "solo" })).status).toBe(400);
     expect((await post("/api/rsi/start", { purpose: " " })).status).toBe(400);
     expect((await post("/api/rsi/stop", {})).status).toBe(400);
   } finally {
@@ -160,8 +160,8 @@ test("the chat view is empty until the first message and refuses an empty one", 
 test("diagnostics summarize a session's tool use and a generation's questions, and refuse unknown questions", async () => {
   const dir = mkdtempSync(join(tmpdir(), "hyph-diag-"));
   const out = join(dir, ".hyph", "rsi", "gen-0", "eval", "locomo");
-  mkdirSync(join(out, "dynamic", "q-1"), { recursive: true });
-  const store = new Store(join(out, "dynamic", "q-1", "state.sqlite"));
+  mkdirSync(join(out, "market", "q-1"), { recursive: true });
+  const store = new Store(join(out, "market", "q-1", "state.sqlite"));
   store.init("p", "", defaultConfig);
   store.run("insert into episodes(id, agent, task, messages, status) values('e1', 'lead', 'T1', ?, 'finished')", JSON.stringify([
     { role: "user", content: "start", timestamp: 1 },
@@ -169,7 +169,7 @@ test("diagnostics summarize a session's tool use and a generation's questions, a
   ]));
   store.run("insert into ops(episode, call_id, result, is_error) values('e1', 'c1', 'No matches', 0)");
   store.db.close();
-  await Bun.write(join(out, "judgments.jsonl"), `${JSON.stringify({ arm: "dynamic", id: "q:1", score: 0 })}\n`);
+  await Bun.write(join(out, "judgments.jsonl"), `${JSON.stringify({ arm: "market", id: "q:1", score: 0 })}\n`);
   mkdirSync(join(dir, ".hyph", "run"), { recursive: true });
   new Store(join(dir, ".hyph", "run", "state.sqlite")).init("p", "", defaultConfig);
   const { proc, base } = await serve(dir);
