@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { ArrowDown, ChevronRight, CircleCheck, CircleX, Info, LoaderCircle, Wrench } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -195,32 +196,119 @@ function AgentPanel({ session, agent }: { session: string; agent: Row }) {
   );
 }
 
-type Stream = { id: string; agent: string; task: string; kind: string | null; description: string | null; steps: number; text: string };
+type StreamSummary = { id: string; agent: string; task: string; status: string; kind: string | null; description: string | null; steps: number; lastAt: number | null; last: string };
+type StreamItem = { type: "task"; text: string } | { type: "note"; text: string } | { type: "text"; text: string } | { type: "tool"; id: string; name: string; args: Record<string, unknown>; result?: string; error?: boolean; context?: string };
+type StreamDetail = Omit<StreamSummary, "steps" | "lastAt" | "last"> & { items: StreamItem[] };
 
-// One episode's context as it grows; it follows the newest step unless the reader has scrolled up.
-function StreamCard({ stream }: { stream: Stream }) {
-  const ref = useRef<HTMLPreElement>(null), follow = useRef(true);
-  useEffect(() => { if (follow.current) ref.current?.scrollTo(0, ref.current.scrollHeight); }, [stream.text]);
+// Each role keeps one colour, so an agent is recognisable in the list and in the conversation.
+const ROLE_COLORS: Record<string, string> = {
+  lead: "bg-violet-600", investor: "bg-amber-600", critic: "bg-rose-600", evaluator: "bg-sky-600",
+  worker: "bg-emerald-600", verifier: "bg-teal-600", explorer: "bg-indigo-600", steward: "bg-stone-500",
+};
+// worker-2, explorer-p-… and steward-d-… share the colour of the word before the first hyphen.
+const roleOf = (agent: string) => agent.split("-")[0]!;
+function Avatar({ agent, size = "size-8" }: { agent: string; size?: string }) {
+  return <div className={`${size} ${ROLE_COLORS[roleOf(agent)] ?? "bg-zinc-500"} flex shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white uppercase`}>{agent.slice(0, 2)}</div>;
+}
+
+// The argument a reader looks for first (the path written, the query searched, the verdict given), on one line.
+const KEY_ARGS = ["path", "url", "queries", "query", "id", "goal", "verdict", "budget", "description", "objective", "content", "result", "note"];
+function argSummary(args: Record<string, unknown>) {
+  const key = KEY_ARGS.find(k => args[k] !== undefined) ?? Object.keys(args)[0];
+  if (!key) return "";
+  const v = args[key], text = Array.isArray(v) ? v.join(", ") : typeof v === "string" ? v : JSON.stringify(v);
+  return text.replace(/\s+/g, " ").slice(0, 120);
+}
+
+function ToolStep({ item, pending }: { item: Extract<StreamItem, { type: "tool" }>; pending: boolean }) {
+  const icon = pending ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
+    : item.error ? <CircleX className="size-4 text-destructive" /> : item.result === undefined ? <Wrench className="size-4 text-muted-foreground" /> : <CircleCheck className="size-4 text-emerald-600" />;
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">{stream.agent} <Badge variant="secondary">{stream.kind ?? "-"}</Badge> <span className="text-muted-foreground text-sm font-normal">{stream.steps} ステップ</span></CardTitle>
-        <CardDescription><Clip text={`${stream.task}: ${stream.description ?? ""}`} width="max-w-full" /></CardDescription>
-      </CardHeader>
-      <CardContent>
-        <pre ref={ref} onScroll={e => { const el = e.currentTarget; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}
-          className="h-96 overflow-auto rounded-md border p-3 text-xs whitespace-pre-wrap">{stream.text}</pre>
-      </CardContent>
-    </Card>
+    <details className="group rounded-lg border bg-muted/30 open:bg-muted/50">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-sm">
+        <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
+        {icon}
+        <span className="font-mono font-medium">{item.name}</span>
+        <span className="min-w-0 truncate text-muted-foreground">{argSummary(item.args)}</span>
+        {pending && <span className="ml-auto shrink-0 text-xs text-muted-foreground">実行中…</span>}
+      </summary>
+      <div className="grid gap-2 border-t px-3 py-2 text-xs">
+        <div><div className="mb-1 text-muted-foreground">引数</div><pre className="max-h-60 overflow-auto rounded bg-background p-2 whitespace-pre-wrap">{JSON.stringify(item.args, null, 2)}</pre></div>
+        {item.result !== undefined && <div>
+          <div className="mb-1 text-muted-foreground">{item.error ? "エラー" : "結果"}{item.context && ` ・ ${item.context}`}</div>
+          <pre className={`max-h-80 overflow-auto rounded bg-background p-2 whitespace-pre-wrap ${item.error ? "text-destructive" : ""}`}>{item.result || "(空)"}</pre>
+        </div>}
+      </div>
+    </details>
   );
 }
 
-// Every agent's episode in progress side by side, refreshed as the agents take steps.
+// One episode as a conversation: the task as the opening message, the model's text beside its avatar, tool calls as
+// folded steps. It follows the newest step unless the reader has scrolled up.
+function Conversation({ session, id }: { session: string; id: string }) {
+  const s = usePoll<StreamDetail>(`/api/stream?s=${enc(session)}&id=${enc(id)}`, 2000);
+  const ref = useRef<HTMLDivElement>(null);
+  const [follow, setFollow] = useState(true);
+  useEffect(() => { if (follow) ref.current?.scrollTo(0, ref.current.scrollHeight); }, [s?.items.length, follow, id]);
+  useEffect(() => setFollow(true), [id]);
+  if (!s) return <div className="p-6 text-muted-foreground">読み込み中…</div>;
+  const running = s.status === "running";
+  const lastTool = [...s.items].reverse().find(i => i.type === "tool") as Extract<StreamItem, { type: "tool" }> | undefined;
+  return (
+    <div className="flex min-h-0 min-w-0 flex-col">
+      <div className="flex items-center gap-3 border-b px-4 py-3">
+        <Avatar agent={s.agent} />
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 font-medium">{s.agent} <Badge variant="secondary">{s.kind ?? "-"}</Badge> <Status value={s.status} /></div>
+          <div className="truncate text-xs text-muted-foreground" title={s.description ?? ""}>{s.task}: {s.description}</div>
+        </div>
+      </div>
+      <div ref={ref} onScroll={e => { const el = e.currentTarget; setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 60); }} className="relative min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto grid max-w-3xl gap-4 px-4 py-6">
+          {s.items.map((item, i) => item.type === "task" ? (
+            <details key={i} className="rounded-2xl bg-muted px-4 py-3 text-sm">
+              <summary className="cursor-pointer font-medium">タスクの指示（作業記憶と目標を含む）</summary>
+              <div className="mt-2 whitespace-pre-wrap">{item.text}</div>
+            </details>
+          ) : item.type === "note" ? (
+            <div key={i} className="flex items-start gap-2 text-xs text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" /><span className="whitespace-pre-wrap">{item.text}</span></div>
+          ) : item.type === "text" ? (
+            <div key={i} className="flex gap-3"><Avatar agent={s.agent} size="size-7" /><div className="min-w-0 pt-1 text-sm leading-relaxed whitespace-pre-wrap">{item.text}</div></div>
+          ) : (
+            <div key={item.id} className="pl-10"><ToolStep item={item} pending={running && item === lastTool && item.result === undefined} /></div>
+          ))}
+          {running && lastTool?.result !== undefined && <div className="flex items-center gap-2 pl-10 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />考えています…</div>}
+        </div>
+      </div>
+      {!follow && <Button size="sm" variant="secondary" className="absolute right-6 bottom-6 shadow" onClick={() => setFollow(true)}><ArrowDown className="size-4" />最新へ</Button>}
+    </div>
+  );
+}
+
+// Agents' episodes as a list of conversations, those in progress first, with the selected one open beside it.
 function Streams({ session }: { session: string }) {
-  const list = usePoll<Stream[]>(`/api/streams?s=${enc(session)}`, 2000);
+  const list = usePoll<StreamSummary[]>(`/api/streams?s=${enc(session)}`, 2000);
+  const [selected, setSelected] = useState<string>();
+  const current = list?.find(s => s.id === selected) ?? list?.[0];
   if (!list) return <div className="text-muted-foreground">読み込み中…</div>;
-  if (!list.length) return <div className="text-muted-foreground">実行中のエピソードはありません</div>;
-  return <div className="grid gap-4 xl:grid-cols-2">{list.map(s => <StreamCard key={s.id} stream={s} />)}</div>;
+  if (!list.length) return <div className="text-muted-foreground">エピソードはまだありません</div>;
+  return (
+    <Card className="relative grid h-[75vh] grid-rows-[12rem_1fr] gap-0 overflow-hidden py-0 md:grid-cols-[18rem_minmax(0,1fr)] md:grid-rows-1">
+      <div className="min-h-0 overflow-y-auto border-b md:border-r md:border-b-0">
+        {list.map(s => (
+          <button key={s.id} type="button" onClick={() => setSelected(s.id)}
+            className={`flex w-full items-start gap-3 px-3 py-2.5 text-left hover:bg-muted/60 ${s.id === current?.id ? "bg-muted" : ""}`}>
+            <div className="relative"><Avatar agent={s.agent} />{s.status === "running" && <span className="absolute -right-0.5 -bottom-0.5 size-3 rounded-full border-2 border-background bg-emerald-500" />}</div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 text-sm font-medium"><span className="truncate">{s.agent}</span><span className="ml-auto shrink-0 text-xs font-normal text-muted-foreground">{s.kind}</span></div>
+              <div className="truncate text-xs text-muted-foreground">{s.last || s.description}</div>
+            </div>
+          </button>
+        ))}
+      </div>
+      {current && <Conversation session={session} id={current.id} />}
+    </Card>
+  );
 }
 
 type RunInfo = { dir: string; kind: string; args: string[]; startedAt: number; endedAt: number | null; exitCode: number | null; running: boolean };
