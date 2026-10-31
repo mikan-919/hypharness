@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Store } from "./db.ts";
-import { distance, distanceThreshold, indexKnowledge, initMemory, remember, sentences, vectors, type Embed } from "./resident-memory.ts";
+import { distance, distanceThreshold, indexKnowledge, initMemory, remember, recordToolKnowledge, sentences, vectors, type Embed } from "./resident-memory.ts";
 
 const embed: Embed = async text => text.includes("犬") ? [1, 0] : [0, 1];
 
@@ -17,6 +17,21 @@ test("resident memory preserves sentence text and stores exactly one vector and 
   expect(store.get<{ n: number }>("select count(*) n from domain_knowledge")!.n).toBe(2);
   expect(distance([1, 0], [0, 1])).toBe(1);
   expect(distanceThreshold([0.1, 0.2, 0.4, 0.9])).toBe(0.4);
+  store.db.close();
+});
+
+test("tool knowledge is embedded once and placed in the closest domain atomically", async () => {
+  const store = new Store(":memory:"); initMemory(store);
+  await remember(store, embed, "犬", "test");
+  store.run("insert into domains(id, name, description, steward, status) values('D-z', 'z', 'z', 'z', 'active')");
+  const [other] = await remember(store, embed, "猫", "test");
+  store.run("update domain_knowledge set domain = 'D-z' where knowledge = ?", other);
+  let calls = 0;
+  await recordToolKnowledge(store, async text => { calls++; return embed(text, "passage"); }, { id: "K-tool", gist: "cat", summary: "cat", raw: "猫", source: "tool", author: "worker" });
+  expect(store.get<{ domain: string }>("select domain from domain_knowledge where knowledge = 'K-tool'")!.domain).toBe("D-z");
+  expect(calls).toBe(1);
+  await expect(recordToolKnowledge(store, async () => { throw new Error("embed failed"); }, { id: "K-failed", gist: "x", summary: "x", raw: "x", source: "tool", author: "worker" })).rejects.toThrow("embed failed");
+  expect(store.get("select 1 from knowledge where id = 'K-failed'")).toBeUndefined();
   store.db.close();
 });
 

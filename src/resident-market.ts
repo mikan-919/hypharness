@@ -2,6 +2,9 @@ import { MODEL_TIMEOUT_MS, withTimeout } from "./agent.ts";
 import type { Store } from "./db.ts";
 import type { Llm } from "./locomo.ts";
 import { distance, distanceThreshold, indexKnowledge, remember, type Embed, vectors } from "./resident-memory.ts";
+import { proposeOrder } from "./resident-order.ts";
+import { initRoles, rewardStrategy, roleStrategy } from "./resident-roles.ts";
+import { initStewardAccounting, rewardSteward, transferSteward } from "./resident-stewards.ts";
 
 export function initMarket(store: Store) {
   store.db.exec(`
@@ -13,6 +16,8 @@ export function initMarket(store: Store) {
   `);
   if (!store.meta("market_rng")) store.setMeta("market_rng", "1");
   if (!store.meta("evaluator_credit")) store.setMeta("evaluator_credit", "1");
+  initRoles(store);
+  initStewardAccounting(store);
 }
 
 export async function evaluateFeedback(store: Store, llm: Llm) {
@@ -32,9 +37,13 @@ export async function evaluateFeedback(store: Store, llm: Llm) {
         store.run("insert into market_feedback(discovery, chat_id, value) values(?, ?, ?)", id, user.id, value);
         if (value) {
           store.run("update discoveries set score = max(0, min(1, score * 0.8 + ? * 0.2)) where id = ?", (value + 1) / 2, id);
-          store.run("update memory_stewards set capital = max(0, capital * 0.8 + ? * 0.2), credit = max(0, credit * 0.8 + ? * 0.2) where domain = ?", (value + 1) / 2, (value + 1) / 2, discovery.domain);
-          if (value < 0 && discovery.score >= 0.5) store.setMeta("evaluator_credit", String(Number(store.meta("evaluator_credit")) * 0.8));
-          if (value > 0) store.setMeta("evaluator_credit", String(Number(store.meta("evaluator_credit")) * 0.8 + 0.2));
+          const owner = store.get<{ steward: string }>("select steward from discovery_stewards where discovery = ?", id)
+            ?? store.get<{ steward: string }>("select steward from domains where id = ?", discovery.domain);
+          if (owner) rewardSteward(store, owner.steward, (value + 1) / 2);
+          const roles = store.all<{ strategy: string }>("select strategy from discovery_strategies where discovery = ?", id);
+          if (!roles.length && value < 0 && discovery.score >= 0.5) store.setMeta("evaluator_credit", String(Number(store.meta("evaluator_credit")) * 0.8));
+          if (!roles.length && value > 0) store.setMeta("evaluator_credit", String(Number(store.meta("evaluator_credit")) * 0.8 + 0.2));
+          for (const row of roles) rewardStrategy(store, row.strategy, (value + 1) / 2);
         }
       });
       return true;
@@ -65,7 +74,10 @@ export async function recordCompletion(store: Store, embed: Embed, llm: Llm) {
     }
     store.run("insert into completed_memories(goal, chat_id) values(?, ?)", goal.id, chatId);
     store.run("update discoveries set score = min(1, score * 0.8 + 0.2) where goal = ?", goal.id);
-    store.run("update memory_stewards set capital = capital * 0.8 + 0.2 where domain in (select domain from discoveries where goal = ?)", goal.id);
+    for (const row of store.all<{ steward: string }>("select distinct coalesce(ds.steward, d.steward) steward from discoveries p left join discovery_stewards ds on ds.discovery = p.id join domains d on d.id = p.domain where p.goal = ?", goal.id)) rewardSteward(store, row.steward, 1);
+    const orderSteward = store.get<{ steward: string }>("select steward from order_stewards where goal = ?", goal.id);
+    if (orderSteward) rewardSteward(store, orderSteward.steward, 1);
+    for (const row of store.all<{ strategy: string }>("select strategy from order_strategies where goal = ? union select s.strategy from discovery_strategies s join discoveries p on p.id = s.discovery where p.goal = ?", goal.id, goal.id)) rewardStrategy(store, row.strategy, 1);
   });
   if (response && chatId !== null) await remember(store, embed, response, `chat:${chatId}`, chatId);
   return true;
@@ -108,14 +120,14 @@ async function reconsiderDomain(store: Store, llm: Llm, domain: string) {
   const request = store.get<{ id: number; source: string; kind: string }>("select id, source, kind from domain_requests where target = ? and status = 'open' order by id limit 1", domain);
   const active = store.all<{ domain: string; capital: number; strategy: string }>("select domain, capital, strategy from memory_stewards where active = 1 order by capital");
   const current = active.find(s => s.domain === domain), strongest = active.at(-1);
-  const dormantCandidate = store.get("select 1 from memory_stewards where active = 0");
+  const dormantCandidate = store.get("select 1 from memory_stewards s join domains d on d.id = s.domain where s.active = 0 and not exists (select 1 from domains live where live.steward = d.steward and live.status = 'active')");
   const weak = !!(dormantCandidate && current && strongest && active.length > 1 && current.capital < strongest.capital && current.capital <= distanceThreshold(active.map(s => s.capital), 0.25)!);
   if (!request && !weak && !(own.length >= 12 || (own.length >= 4 && boundary && spread !== undefined && boundary.d > spread))) return;
   const other = all.filter(v => v.domain !== domain).map(v => ({ domain: v.domain, d: Math.min(...own.map(x => distance(x.vector, v.vector))) })).sort((a, b) => a.d - b.d)[0];
   const best = store.get<{ strategy: string }>("select strategy from memory_stewards where active = 1 order by capital desc limit 1");
   const decision = await ask(llm, store, "memory-steward", `Your domain ${domain} contains ${own.length} memories. Proposed split boundary: ${boundary ? `${boundary.a.knowledge} / ${boundary.b.knowledge}` : "none"}. Nearest other domain: ${other?.domain ?? "none"}. Incoming request: ${request ? `${request.kind} from ${request.source}` : "none"}. Lowest-capital strategy eligible for replacement: ${weak ? current!.strategy : "none"}. Highest-capital strategy: ${best?.strategy ?? ""}. Choose only one action: none, split, request_merge, request_transfer, accept_request, or replace_strategy. When splitting or replacing, mutate the highest-capital strategy for the dormant or new steward. Return JSON {"action":string,"new_strategy":string}.`);
   store.tx(() => {
-    const dormant = store.get<{ domain: string; steward: string }>("select s.domain, d.steward from memory_stewards s join domains d on d.id = s.domain where s.active = 0 order by s.capital limit 1");
+    const dormant = store.get<{ domain: string; steward: string }>("select s.domain, d.steward from memory_stewards s join domains d on d.id = s.domain where s.active = 0 and not exists (select 1 from domains live where live.steward = d.steward and live.status = 'active') order by s.capital limit 1");
     if (decision.action === "replace_strategy" && weak && dormant && typeof decision.new_strategy === "string" && decision.new_strategy.trim()) {
       const previous = store.get<{ steward: string }>("select steward from domains where id = ?", domain)!;
       const temporary = store.id("retired");
@@ -124,8 +136,11 @@ async function reconsiderDomain(store: Store, llm: Llm, domain: string) {
       store.run("update memory_stewards set domain = ? where domain = ?", dormant.domain, temporary);
       store.run("update domains set steward = ?, rev = rev + 1 where id = ?", dormant.steward, domain);
       store.run("update domains set steward = ? where id = ?", previous.steward, dormant.domain);
+      store.run("update domains set steward = ?, rev = rev + 1 where steward = ? and status = 'active'", dormant.steward, previous.steward);
+      const replacement = store.get<{ credit: number; capital: number; strategy: string }>("select credit, capital, strategy from memory_stewards where domain = ?", domain)!;
+      store.run("update memory_stewards set credit = ?, capital = ?, strategy = ? where domain in (select id from domains where steward = ? and status = 'active')", replacement.credit, replacement.capital, replacement.strategy, dormant.steward);
       store.log("memory-market", "strategy_replaced", { domain, steward: dormant.steward });
-    } else if (decision.action === "split" && boundary && own.length >= 2 && (dormant || store.get<{ n: number }>("select count(*) n from memory_stewards")!.n < 1000)) {
+    } else if (decision.action === "split" && boundary && own.length >= 2 && (dormant || store.get<{ n: number }>("select count(distinct steward) n from domains")!.n < 1000)) {
       const moved = own.filter(v => v.knowledge === boundary.b.knowledge || (v.knowledge !== boundary.a.knowledge && distance(v.vector, boundary.b.vector) < distance(v.vector, boundary.a.vector)));
       if (!moved.length || moved.length === own.length) return;
       const id = store.id("D"), steward = dormant?.steward ?? store.id("memory");
@@ -133,7 +148,7 @@ async function reconsiderDomain(store: Store, llm: Llm, domain: string) {
       store.run("insert into domains(id, name, description, steward, parent, status) values(?, 'Memory', 'Split memory', ?, ?, 'active')", id, steward, domain);
       const strategy = typeof decision.new_strategy === "string" && decision.new_strategy.trim() ? decision.new_strategy.slice(0, 500) : state.strategy;
       if (dormant) store.run("update memory_stewards set domain = ?, mandate = ?, strategy = ?, active = 1 where domain = ?", id, state.mandate, strategy, dormant.domain);
-      else store.run("insert into memory_stewards(domain, mandate, credit, capital, strategy) values(?, ?, ?, ?, ?)", id, state.mandate, state.credit, state.capital, strategy);
+      else store.run("insert into memory_stewards(domain, mandate, credit, capital, strategy) values(?, ?, 1, 1, ?)", id, state.mandate, strategy);
       for (const row of moved) store.run("update domain_knowledge set domain = ? where knowledge = ?", id, row.knowledge);
       store.log("memory-market", "domain_split", { domain, id });
     } else if ((decision.action === "request_merge" || decision.action === "request_transfer") && other && !store.get("select 1 from domain_requests where source = ? and target = ? and status = 'open'", domain, other.domain)) {
@@ -146,11 +161,9 @@ async function reconsiderDomain(store: Store, llm: Llm, domain: string) {
       store.run("update domain_requests set status = 'accepted' where id = ?", request.id);
       store.log("memory-market", "domain_merged", { source: request.source, target: domain });
     } else if (decision.action === "accept_request" && request?.kind === "transfer") {
-      const source = store.get<{ steward: string }>("select steward from domains where id = ? and status = 'active'", request.source);
-      if (!source) return;
-      store.run("update domains set steward = ?, rev = rev + 1 where id = ?", source.steward, domain);
+      const steward = transferSteward(store, domain, request.source);
       store.run("update domain_requests set status = 'accepted' where id = ?", request.id);
-      store.log("memory-market", "domain_transferred", { domain, to: source.steward });
+      store.log("memory-market", "domain_transferred", { domain, to: steward });
     }
   });
 }
@@ -163,7 +176,19 @@ function random(store: Store) {
 export async function marketTick(store: Store, embed: Embed, llm: Llm) {
   initMarket(store);
   const rows = vectors(store).filter(v => store.get("select 1 from memory_vectors v left join chat c on c.id = v.chat_id where v.knowledge = ? and (v.chat_id is null or c.remembered = 1)", v.knowledge));
-  if (rows.length < 2 || !store.purpose) return false;
+  if (!store.purpose) return false;
+  if (rows.length < 2) {
+    const order = store.get<{ id: number }>("select id from log where event = 'order_changed' order by id desc limit 1");
+    if (!order || store.meta(`order_proposal:${order.id}`)) return false;
+    await roleStrategy(store, "memory-evaluator", (r, p) => ask(llm, store, r, p));
+    return proposeOrder(store, embed, async (role, prompt) => {
+    if (role === "memory-investor" || role === "memory-evaluator") {
+      const strategy = await roleStrategy(store, role, (r, p) => ask(llm, store, r, p));
+      return ask(llm, store, role, `${prompt}\nYour strategy: ${strategy.strategy}`);
+    }
+    return ask(llm, store, role, prompt);
+    });
+  }
   const purpose = store.purpose;
   const query = await embed(purpose, "query");
   const knowledge = new Map(store.all<{ id: string; raw: string }>("select id, raw from knowledge").map(k => [k.id, k.raw]));
@@ -199,9 +224,12 @@ export async function marketTick(store: Store, embed: Embed, llm: Llm) {
   const selected = far ? candidates.find(c => c.pairDistance >= thresholds.get(c.domain)!) ?? candidates[0]! : candidates[0]!;
   const index = candidates.indexOf(selected), neighbours = candidates.slice(Math.max(0, index - 1), index + 2).filter(c => c !== selected);
   const state = store.get<{ mandate: string; strategy: string; capital: number; credit: number }>("select * from memory_stewards where domain = ?", selected.domain)!;
+  const evaluator = await roleStrategy(store, "memory-evaluator", (r, p) => ask(llm, store, r, p));
+  if (store.purpose !== purpose) return true;
   const expectedPerCost = Math.max(0, selected.score) * state.credit * state.capital * Number(store.meta("evaluator_credit"));
   if (expectedPerCost < 0.05) return false;
-  const investment = await ask(llm, store, "memory-investor", `Purpose: ${store.purpose}\nEvidence:\n${selected.text}\nCapital: ${state.capital}; steward credit: ${state.credit}; estimated relevance: ${selected.score}. Estimate the benefit and cost of evaluating this combination. Return JSON {"fund":boolean,"expected":number,"cost":number}; both numbers must be nonnegative and cost must be positive.`);
+  const investor = await roleStrategy(store, "memory-investor", (r, p) => ask(llm, store, r, p));
+  const investment = await ask(llm, store, "memory-investor", `Purpose: ${store.purpose}\nEvidence:\n${selected.text}\nCapital: ${state.capital}; steward credit: ${state.credit}; estimated relevance: ${selected.score}. Your strategy: ${investor.strategy}. Estimate the benefit and cost of evaluating this combination. Return JSON {"fund":boolean,"expected":number,"cost":number}; both numbers must be nonnegative and cost must be positive.`);
   if (store.purpose !== purpose) return true;
   const expected = Number(investment.expected), cost = Number(investment.cost);
   if (typeof investment.fund !== "boolean" || !Number.isFinite(expected) || expected < 0 || !Number.isFinite(cost) || cost <= 0) throw new Error("Invalid investment decision");
@@ -209,7 +237,7 @@ export async function marketTick(store: Store, embed: Embed, llm: Llm) {
     store.run("insert or ignore into market_declines(first, second, purpose) values(?, ?, ?)", selected.first, selected.second, store.purpose);
     return true;
   }
-  const result = await ask(llm, store, "memory-evaluator", `Purpose: ${store.purpose}\nCandidate evidence:\n${selected.text}\nNeighbouring candidates:\n${neighbours.map(n => n.text).join("\n---\n")}\nMandate: ${state.mandate}\nStrategy: ${state.strategy}\nEvaluate whether the candidate connects both pieces to the purpose, adds evidence beyond existing discoveries and survives counterarguments. If it identifies actionable work, provide a goal; otherwise use an empty goal. Return JSON {"hypothesis":string,"objection":string,"score":number from 0 to 1,"goal":string,"mandate":string,"strategy":string}.`);
+  const result = await ask(llm, store, "memory-evaluator", `Purpose: ${store.purpose}\nCandidate evidence:\n${selected.text}\nNeighbouring candidates:\n${neighbours.map(n => n.text).join("\n---\n")}\nMandate: ${state.mandate}\nSteward strategy: ${state.strategy}\nEvaluator strategy: ${evaluator.strategy}\nEvaluate whether the candidate connects both pieces to the purpose, adds evidence beyond existing discoveries and survives counterarguments. If it identifies actionable work, provide a goal; otherwise use an empty goal. Return JSON {"hypothesis":string,"objection":string,"score":number from 0 to 1,"goal":string,"mandate":string,"strategy":string}.`);
   if (store.purpose !== purpose) return true;
   const hypothesis = typeof result.hypothesis === "string" ? result.hypothesis.slice(0, 1000) : "";
   const objection = typeof result.objection === "string" ? result.objection.slice(0, 1000) : "";
@@ -225,6 +253,12 @@ export async function marketTick(store: Store, embed: Embed, llm: Llm) {
       store.run("insert into goals(id, parent, description, status, owner, created_at) values(?, 'G0', ?, 'open', ?, ?)", goal, result.goal.slice(0, 1000), owner, Date.now());
     }
     store.run("insert into discoveries(id, first, second, hypothesis, objection, score, domain, goal, created_at) values(?, ?, ?, ?, ?, ?, ?, ?, ?)", id, selected.first, selected.second, hypothesis, objection, score, selected.domain, goal, Date.now());
+    const steward = store.get<{ steward: string }>("select steward from domains where id = ?", selected.domain)!;
+    store.run("insert into discovery_stewards(discovery, steward) values(?, ?)", id, steward.steward);
+    for (const strategy of [investor, evaluator]) {
+      store.run("insert into discovery_strategies(discovery, role, strategy) values(?, ?, ?)", id, strategy.role, strategy.id);
+      rewardStrategy(store, strategy.id, score);
+    }
     store.run("update memory_stewards set credit = credit * 0.8 + ? * 0.2, capital = capital * 0.8 + ? * 0.2, mandate = ?, strategy = ? where domain = ?", score, score, typeof result.mandate === "string" ? result.mandate.slice(0, 500) : state.mandate, typeof result.strategy === "string" ? result.strategy.slice(0, 500) : state.strategy, selected.domain);
     store.log("memory-market", "discovery_evaluated", { id, goal });
   });
@@ -249,8 +283,9 @@ export function frontPacket(store: Store, limit = 4000) {
 
 export async function runMemoryMarket(store: Store, embed: Embed, llm: Llm, signal: AbortSignal) {
   while (!signal.aborted) {
-    try { if (await indexKnowledge(store, embed) || await rememberOrder(store, embed) || await recordCompletion(store, embed, llm) || await evaluateFeedback(store, llm) || await marketTick(store, embed, llm)) { await Bun.sleep(250); continue; } }
+    const version = store.changeVersion;
+    try { if (await indexKnowledge(store, embed) || await rememberOrder(store, embed) || await recordCompletion(store, embed, llm) || await evaluateFeedback(store, llm) || await marketTick(store, embed, llm)) continue; }
     catch (e) { store.log("memory-market", "market_error", { error: String(e) }); await Bun.sleep(/usage limit|quota|rate.limit/i.test(String(e)) ? 60_000 : 5_000); }
-    await Bun.sleep(1000);
+    await store.waitForChange(version, signal);
   }
 }

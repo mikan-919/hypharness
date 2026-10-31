@@ -5,6 +5,7 @@ import type { Runtime } from "./agent.ts";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { history, reply, waitForFront } from "./chat.ts";
 import { tools, type ToolContext } from "./tools.ts";
+import { remember } from "./resident-memory.ts";
 
 test("orders change only the resident purpose and request each goal owner to reconsider", () => {
   const store = openResident(":memory:");
@@ -21,11 +22,33 @@ test("orders change only the resident purpose and request each goal owner to rec
   store.db.close();
 });
 
-test("knowledge created by a worker is assigned a domain immediately", () => {
+test("knowledge created by a worker is assigned a domain immediately", async () => {
   const store = openResident(":memory:"); store.addAgent("worker", "worker", null);
-  const context = { store, agent: store.agent("worker")! } as ToolContext;
-  tools.knowledge_add!.run(context, { gist: "fact", summary: "fact", raw: "fact", source: "file" });
+  const context = { store, agent: store.agent("worker")!, embed: async () => [1, 0] } as unknown as ToolContext;
+  await tools.knowledge_add!.run(context, { gist: "fact", summary: "fact", raw: "fact", source: "file" });
   expect(store.get<{ n: number }>("select count(*) n from domain_knowledge")!.n).toBe(1);
+  store.db.close();
+});
+
+test("knowledge tools assign results to the nearest domain", async () => {
+  const store = openResident(":memory:"); store.addAgent("worker", "worker", null);
+  const embed = async (text: string) => text.includes("near") ? [1, 0] : [0, 1];
+  await remember(store, embed, "far", "test");
+  store.run("insert into domains(id, name, description, steward, status) values('D-z', 'z', 'z', 'z', 'active')");
+  const [near] = await remember(store, embed, "near", "test");
+  store.run("update domain_knowledge set domain = 'D-z' where knowledge = ?", near);
+  const context = { store, agent: store.agent("worker")!, task: { id: "task" }, embed, fetchPage: async () => ({ url: "https://example.org/page", text: "near fetch" }) } as unknown as ToolContext;
+  await tools.knowledge_add!.run(context, { gist: "near", summary: "near", raw: "near direct", source: "direct" });
+  await tools.web_fetch!.run(context, { url: "https://example.org/page" });
+  const original = globalThis.fetch, key = process.env.PARALLEL_API_KEY;
+  try {
+    process.env.PARALLEL_API_KEY = "test-key";
+    globalThis.fetch = (async () => Response.json({ results: [{ url: "https://example.org/search", title: "result", excerpts: ["near search"] }] })) as unknown as typeof fetch;
+    await tools.web_search!.run(context, { objective: "test", queries: ["test"] });
+  } finally { globalThis.fetch = original; if (key === undefined) delete process.env.PARALLEL_API_KEY; else process.env.PARALLEL_API_KEY = key; }
+  for (const source of ["direct", "https://example.org/page", "https://example.org/search"]) {
+    expect(store.get<{ domain: string }>("select d.domain from domain_knowledge d join knowledge k on k.id = d.knowledge where k.source = ?", source)!.domain).toBe("D-z");
+  }
   store.db.close();
 });
 
@@ -69,5 +92,23 @@ test("a free worker takes another task without waiting for the slow episode", as
   });
   await pool;
   expect(completed.indexOf("fast two")).toBeLessThan(completed.indexOf("slow"));
+  store.db.close();
+});
+
+test("notifications wake an idle pool and changes before waiting are not lost", async () => {
+  const store = openResident(":memory:"), controller = new AbortController();
+  const before = store.changeVersion;
+  setOrder(store, "work");
+  await store.waitForChange(before, controller.signal, 60_000);
+  store.addAgent("worker", "worker", null);
+  store.run("insert into goals(id, parent, description, status, owner, created_at) values('G1', 'G0', 'work', 'review', 'worker', 1)");
+  let completed = false;
+  const pool = runWorkerPool({ store } as Runtime, controller.signal, async (_rt, _agent, task) => {
+    completed = true; store.run("update tasks set status = 'done' where id = ?", task.id); controller.abort(); return "finished";
+  });
+  await Bun.sleep(20);
+  store.addTask({ goal: "G1", kind: "work", author: "host", assignee: "worker", description: "wake" });
+  await Promise.race([pool, Bun.sleep(1000).then(() => { throw new Error("Pool did not wake"); })]);
+  expect(completed).toBe(true);
   store.db.close();
 });
