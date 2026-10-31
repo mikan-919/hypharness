@@ -15,11 +15,16 @@ export default defineConfig({
         worker: 'hypharness',
         exportName: 'Agent',
       }),
+      RUNNER: bindings.durableObject({
+        worker: 'hypharness',
+        exportName: 'Runner',
+      }),
       AI: bindings.ai({ dev: { remote: true } }),
     },
     exports: {
       Accounts: exports.durableObject({ storage: 'sqlite' }),
       Agent: exports.durableObject({ storage: 'sqlite' }),
+      Runner: exports.durableObject({ storage: 'sqlite' }),
     },
   },
 })

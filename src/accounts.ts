@@ -46,6 +46,10 @@ export class Accounts extends DurableObject<Env> {
         user_id TEXT NOT NULL REFERENCES users(id),
         expires INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS runner_tokens (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL UNIQUE REFERENCES users(id)
+      );
     `)
   }
 
@@ -165,6 +169,27 @@ export class Accounts extends DurableObject<Env> {
           WHERE s.id = ? AND s.expires > ?`,
         await hash(token),
         Date.now(),
+      )
+      .toArray()[0]
+    return row ?? null
+  }
+
+  // ランナー用のトークンはアカウントごとに1つ。発行し直すと古いトークンは使えなくなる
+  async issueRunnerToken(userId: string) {
+    const token = crypto.randomUUID()
+    this.ctx.storage.sql.exec(
+      'INSERT INTO runner_tokens (id, user_id) VALUES (?, ?) ON CONFLICT (user_id) DO UPDATE SET id = excluded.id',
+      await hash(token),
+      userId,
+    )
+    return token
+  }
+
+  async runnerUser(token: string): Promise<User | null> {
+    const row = this.ctx.storage.sql
+      .exec<User>(
+        'SELECT u.id, u.name FROM runner_tokens r JOIN users u ON u.id = r.user_id WHERE r.id = ?',
+        await hash(token),
       )
       .toArray()[0]
     return row ?? null

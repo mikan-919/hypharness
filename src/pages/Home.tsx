@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input'
 import { post } from '@/lib/api'
 import type { PageProps } from '../pages.gen'
 
-export default function Home({ user }: PageProps<'Home'>) {
+export default function Home({ user, runnerConnected }: PageProps<'Home'>) {
   const logout = async () => {
     await post('/auth/logout')
     router.visit('/login')
@@ -19,8 +19,36 @@ export default function Home({ user }: PageProps<'Home'>) {
           ログアウト
         </Button>
       </header>
+      <RunnerSetup connected={runnerConnected} />
       <Chat />
     </main>
+  )
+}
+
+function RunnerSetup({ connected }: { connected: boolean }) {
+  const [token, setToken] = useState('')
+
+  const issue = async () => {
+    setToken((await post<{ token: string }>('/runner/token')).token)
+  }
+
+  return (
+    <section className='flex flex-col gap-2 text-sm'>
+      <p>
+        {connected
+          ? 'ランナーが接続中です。Codex で応答します。'
+          : 'ランナーが未接続です。Workers AI で応答します。'}
+      </p>
+      {token ? (
+        <pre className='overflow-x-auto rounded-lg bg-muted p-3'>
+          {`bun run runner login\nbun run runner setup ${location.origin} ${token}\nbun run runner`}
+        </pre>
+      ) : (
+        <Button variant='outline' onClick={issue}>
+          ランナー用トークンを発行
+        </Button>
+      )}
+    </section>
   )
 }
 

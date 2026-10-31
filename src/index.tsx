@@ -7,12 +7,16 @@ import { HTTPException } from 'hono/http-exception'
 import type { Accounts, RelyingParty, User } from './accounts'
 import type { Agent } from './agent'
 import { rootView } from './renderer'
+import type { Runner } from './runner'
 
 type AppEnv = { Bindings: Env; Variables: { user: User } }
 
 // cf の型生成は自分自身の Durable Object にクラス型を付けないため、ここで型を与える
 const accounts = (env: Env) =>
   (env.ACCOUNTS as DurableObjectNamespace<Accounts>).getByName('default')
+
+const runner = (env: Env, userId: string) =>
+  (env.RUNNER as DurableObjectNamespace<Runner>).getByName(userId)
 
 const relyingParty = (c: Context): RelyingParty => {
   const url = new URL(c.req.url)
@@ -58,7 +62,12 @@ app.onError((err, c) => {
 })
 
 const routes = app
-  .get('/', auth, (c) => c.render('Home', { user: c.var.user }))
+  .get('/', auth, async (c) =>
+    c.render('Home', {
+      user: c.var.user,
+      runnerConnected: await runner(c.env, c.var.user.id).connected(),
+    }),
+  )
   .get('/login', (c) => c.render('Login'))
   .post('/auth/register/options', async (c) => {
     const { name } = await c.req.json<{ name?: unknown }>()
@@ -98,6 +107,16 @@ const routes = app
     deleteCookie(c, 'session', { path: '/' })
     return c.json({ ok: true })
   })
+  .post('/runner/token', auth, async (c) =>
+    c.json({ token: await accounts(c.env).issueRunnerToken(c.var.user.id) }),
+  )
+  // 手元のランナーが WebSocket で接続する。Cookie ではなくランナー用トークンで認証する
+  .get('/runner/socket', async (c) => {
+    const token = c.req.header('Authorization')?.replace(/^Bearer /, '')
+    const user = token ? await accounts(c.env).runnerUser(token) : null
+    if (!user) return c.json({ error: 'ランナー用トークンが不正です' }, 401)
+    return runner(c.env, user.id).fetch(c.req.raw)
+  })
   .post('/agents/:name/chat', auth, async (c) => {
     const name = c.req.param('name')
     const { message } = await c.req.json<{ message?: unknown }>()
@@ -114,7 +133,7 @@ const routes = app
     const agent = (c.env.AGENT as DurableObjectNamespace<Agent>).getByName(
       `${c.var.user.id}/${name}`,
     )
-    return c.json({ reply: await agent.chat(message) })
+    return c.json({ reply: await agent.chat(c.var.user.id, message) })
   })
   .get('/agents/:name/memories', auth, async (c) =>
     c.json(
@@ -127,3 +146,4 @@ const routes = app
 export default routes
 export { Accounts } from './accounts'
 export { Agent } from './agent'
+export { Runner } from './runner'
