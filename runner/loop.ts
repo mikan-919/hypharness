@@ -157,6 +157,8 @@ async function roleTurn(
 - 3点以下: 抽象的、根拠がない、または既存のアイデアの言い換え
 - 既存のアイデアとほぼ同じ内容は、そのぶん3点以上減点する
 - 根拠のエントリーが無いアイデアは、具体性を低く見る
+- 新しさは、根拠に近い先行研究の URL と、それとの違いが書かれている場合だけ認める。調べた形跡の無い「新規」「未確認」の主張は加点しない。必要なら Web 検索で先行研究を確かめる
+- 実験のコードと結果（run_command の出力など）があるアイデアは、設計だけのアイデアより具体性を高く見る
 これまでの採点の分布: ${distribution || 'まだありません'}
 比較用の、最近の採点済みアイデア:
 ${scored || '（まだありません）'}
@@ -233,6 +235,13 @@ ${companyList(e) || '（ありません）'}
     // 仕事を持たない worker の数だけ、プールに仕事があればよい
     const needed = workers.filter((w) => !e.openTask(w)).length - pool.length
     if (needed <= 0 && c.philosophy) return null
+    // 設計思想は id の小さい会社から順に決め、先に決まった他社の思想と重ならないようにする
+    if (
+      !c.philosophy &&
+      e.companies().some((o) => o.id < c.id && !o.philosophy)
+    ) {
+      return null
+    }
     const ideas = e
       .recentIdeas(c.id)
       .map((i) => `- ${i.title}（${i.worker}、評価 ${i.score ?? '未評価'}）`)
@@ -250,8 +259,10 @@ ${pool.map((t) => `- ${t.body}`).join('\n') || '（ありません）'}
 ${ideas || '（まだありません）'}
 会社の掲示板:
 ${boardLines(e, c.id)}
+会社の一覧（他社の設計思想と重ならない方向を選ぶ）:
+${companyList(e)}
 
-設計思想に沿って、会社のタスクプールに add_task で仕事を足してください。評価の高い方向を伸ばし、既存のアイデアと重ならない仕事にしてください。worker は自分でプールから仕事を選びます。手の空いている worker は ${Math.max(needed, 0)} 人です。`,
+設計思想は、他社と違う問いや手法の方向にしてください。設計思想に沿って、会社のタスクプールに add_task で仕事を足してください。評価の高い方向を伸ばし、既存のアイデアと重ならない仕事にしてください。worker は自分でプールから仕事を選びます。手の空いている worker は ${Math.max(needed, 0)} 人です。`,
       tools: [
         tool(
           'set_philosophy',
@@ -327,6 +338,8 @@ ${
 会社の一覧:
 ${companyList(e)}
 
+アイデアを出す前に、Web 検索で近い先行研究を調べてください。根拠のエントリーには、近い研究の URL と、それとの違いを書いてください（URL が無いと post_idea は受け付けません）。既にある手法なら、別の案に切り替えてください。
+検証できる部分は、run_command（ネットワークの無い隔離環境。/work が作業用ディレクトリ）で小さな実験のコードを書いて実行し、その結果も根拠に含めてください。
 成果は context_add（scope: shared）で共有コンテキストに残し、そのラベル（S…）を entry に付けて post_idea で市場に出してください。長い内容は file_write でファイルに書き、context_add の file で指せます。
 共有 DB は、ほかのエージェントとの調整用のデータにだけ使い、成果を置かないでください。
 進捗の報告は post_board で会社の掲示板に出してください（誰も起こしません）。send_message は特定の同僚への質問や依頼だけに使ってください（相手を起こします）。
@@ -361,11 +374,20 @@ ${companyList(e)}
             description: '根拠になる共有コンテキストのラベル（S…）',
           }),
         }),
-        (args) => {
+        async (args) => {
           const entry = text(args.entry, 'entry')
-          if (!contexts.sharedEntry(entry)) {
+          const found = contexts.sharedEntry(entry)
+          if (!found) {
             throw new Error(
               `${entry} は共有コンテキストにありません。先に context_add（scope: shared）で残してください`,
+            )
+          }
+          const raw = found.raw.startsWith('file:')
+            ? await readFile(found.raw.slice('file:'.length))
+            : found.raw
+          if (!/https?:\/\//.test(`${found.summary}\n${raw ?? ''}`)) {
+            throw new Error(
+              `${entry} に先行研究の URL がありません。Web 検索で近い研究を調べ、URL と違いを書いたエントリーを付けてください`,
             )
           }
           e.postIdea(name, {

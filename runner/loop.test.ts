@@ -30,6 +30,9 @@ test('やることがあるときだけ turn を返し、状況が変わると k
 
   expect(await turnFor('market', d)).toBeNull()
   expect(await turnFor('worker-1', d)).toBeNull()
+  const [, b] = e.companies()
+  // 設計思想は id の小さい会社から順に決める。後の会社は先に決まった思想を見て選ぶ
+  expect(await turnFor(`company-${b.id}`, d)).toBeNull()
   // 設計思想が未設定なので company は動く
   const company = await turnFor(`company-${a.id}`, d)
   await use(company?.tools ?? [], 'set_philosophy', { philosophy: '速く作る' })
@@ -37,6 +40,9 @@ test('やることがあるときだけ turn を返し、状況が変わると k
     await use(company?.tools ?? [], 'add_task', { body })
   }
   expect(await turnFor(`company-${a.id}`, d)).toBeNull()
+  expect((await turnFor(`company-${b.id}`, d))?.prompt).toContain(
+    '設計思想: 速く作る',
+  )
 
   const before = await turnFor('worker-1', d)
   expect(before?.prompt).toContain('claim_task')
@@ -77,23 +83,25 @@ test('各エージェントが自分のループで動き、精算で期が進�
           if (first) await use(tools, 'claim_task', { id: first.id })
           return '引き受けた'
         }
-        const added = String(
-          await use(tools, 'context_add', {
-            scope: 'shared',
-            gist: `${name}の要点`,
-            summary: '- 「猫の写真を整理する」',
-            raw: '猫の写真を整理する',
-          }),
+        const add = async (raw: string) =>
+          String(
+            await use(tools, 'context_add', {
+              scope: 'shared',
+              gist: `${name}の要点`,
+              summary: '- 「猫の写真を整理する」',
+              raw,
+            }),
+          ).split(' ')[0]
+        const post = (entry: string) =>
+          use(tools, 'post_idea', { title: `${name}の案`, body: '本文', entry })
+        await post(
+          await add('猫の写真を整理する。近い研究 https://example.com/a'),
         )
-        const entry = added.split(' ')[0]
-        await use(tools, 'post_idea', {
-          title: `${name}の案`,
-          body: '本文',
-          entry,
-        })
-        expect(() =>
-          use(tools, 'post_idea', { title: 'x', body: 'y', entry: 'S999' }),
-        ).toThrow()
+        // 先行研究の URL が無いエントリーや、無いエントリーは受け付けない
+        await expect(post(await add('猫の写真を整理する'))).rejects.toThrow(
+          'URL',
+        )
+        await expect(post('S999')).rejects.toThrow()
         await use(tools, 'finish_task', { result: '終えた' })
       } else if (name === 'market') {
         for (const i of e.unscoredIdeas()) {

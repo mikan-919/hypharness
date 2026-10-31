@@ -10,7 +10,7 @@ import type { createModels } from '@earendil-works/pi-ai/models'
 import type { Toolbox } from './tools'
 
 const INSTRUCTIONS =
-  'あなたは利用者と対話するエージェントです。日本語で簡潔に答えてください。必要に応じて、ツールで固有 DB・共有 DB・作業用ディレクトリのファイルを使ってください。'
+  'あなたは利用者と対話するエージェントです。日本語で簡潔に答えてください。必要に応じて、ツールで固有 DB・共有 DB・作業用ディレクトリのファイル・隔離環境でのコマンド実行を使ってください。Web の情報は web_search で検索し、ページを開いて調べられます。run_command の隔離環境からはネットワークに出られないため、Web には web_search を使ってください。'
 const MAX_STEPS = 8
 const RECENT = 10
 const RECALL = 5
@@ -131,7 +131,7 @@ export async function respond({
   }
   let text = ''
   for (let step = 0; step < MAX_STEPS; step++) {
-    const events = models.stream(model, context)
+    const events = models.stream(model, context, { onPayload: withWebSearch })
     for await (const event of events) {
       if (event.type === 'text_delta') {
         text += event.delta
@@ -172,6 +172,13 @@ export async function respond({
     }
   }
   throw new Error(`ツールの呼び出しが ${MAX_STEPS} 回を超えました`)
+}
+
+// Codex のサーバー側の Web 検索を足す。検索とページの閲覧はサーバーの中で済み、結果は本文に URL 付きで入る。
+// pi-ai のツール定義では表せないため、送る直前のリクエストに足す
+function withWebSearch(payload: unknown) {
+  const p = payload as { tools?: unknown[] }
+  return { ...p, tools: [...(p.tools ?? []), { type: 'web_search' }] }
 }
 
 // 記憶には応答の本文だけを残しているため、本文だけの応答として渡す

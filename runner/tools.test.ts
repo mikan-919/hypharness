@@ -1,7 +1,7 @@
 import { Database } from 'bun:sqlite'
 import { expect, test } from 'bun:test'
 import { mkdtemp } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createToolbox } from './tools'
 
@@ -35,4 +35,20 @@ test('共有 DB に SQL を実行し、誤りは例外になり、長い出力�
   expect(await toolbox.run('file_read', { path: 'big' })).toContain(
     '5000文字のうち先頭4000文字',
   )
+})
+
+test('コマンドは隔離環境で動き、作業用ディレクトリだけに書け、外には届かない', async () => {
+  const toolbox = await setup()
+  const run = (command: string) => toolbox.run('run_command', { command })
+  expect(await run("echo 'console.log(1 + 1)' > a.ts && bun a.ts && pwd")).toBe(
+    '終了コード 0\n2\n/work\n',
+  )
+  expect(await toolbox.run('file_read', { path: 'a.ts' })).toContain('1 + 1')
+  expect(await run(`ls ${join(homedir(), '.hyph')}`)).not.toMatch(
+    /^終了コード 0/,
+  )
+  expect(await run('touch /nix/store/x')).not.toMatch(/^終了コード 0/)
+  expect(
+    await run('bun -e \'await fetch("https://example.com")\''),
+  ).not.toMatch(/^終了コード 0/)
 })

@@ -1,10 +1,12 @@
 import type { Database } from 'bun:sqlite'
+import { existsSync } from 'node:fs'
 import { mkdir, readdir } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { type Tool, Type } from '@earendil-works/pi-ai'
 
 // ツールの出力はモデルの文脈に入るため、長い結果は切る
 const OUTPUT_LIMIT = 4000
+const COMMAND_TIMEOUT_MS = 60_000
 
 const sql = Type.Object({
   sql: Type.String({ description: '実行する SQL。1回に1文だけ' }),
@@ -46,6 +48,14 @@ export const toolDefinitions: Tool[] = [
     parameters: Type.Object({
       path: Type.String({ description: '作業用ディレクトリからの相対パス' }),
       content: Type.String(),
+    }),
+  },
+  {
+    name: 'run_command',
+    description:
+      '隔離環境でシェルのコマンドを実行する。作業用ディレクトリが /work にあり、書き込めるのはそこだけ。ネットワークは使えない（Web の情報は web_search で調べる）。bun（TypeScript をそのまま実行できる）と基本的なコマンドがある。60秒で止める。小さな実験や検証のコードを書いて動かすときに使う',
+    parameters: Type.Object({
+      command: Type.String({ description: 'sh -c で実行するコマンド' }),
     }),
   },
 ]
@@ -120,6 +130,22 @@ export function createToolbox(
         await Bun.write(full, args.content)
         return `${args.path} に書きました`
       }
+      case 'run_command': {
+        if (typeof args.command !== 'string') {
+          throw new Error('command は文字列です')
+        }
+        const child = Bun.spawn(sandbox(files, args.command), {
+          stdout: 'pipe',
+          stderr: 'pipe',
+          timeout: COMMAND_TIMEOUT_MS,
+        })
+        const [stdout, stderr, code] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ])
+        return `終了コード ${code}${child.signalCode ? `（${child.signalCode} で停止）` : ''}\n${stdout}${stderr ? `\n[stderr]\n${stderr}` : ''}`
+      }
       default:
         throw new Error(`未知のツールです: ${name}`)
     }
@@ -134,4 +160,53 @@ export function createToolbox(
         : output
     },
   }
+}
+
+// bubblewrap で、システムを読み取り専用、作業用ディレクトリだけを書き込み可にした隔離環境を作る。
+// ネットワークを含む名前空間をすべて分け、環境変数を消すため、~/.hyph の認証情報や手元のサービスには届かない
+function sandbox(work: string, command: string) {
+  const bwrap = Bun.which('bwrap')
+  if (!bwrap) throw new Error('run_command には bubblewrap（bwrap）が必要です')
+  const system = [
+    '/nix/store',
+    '/run/current-system/sw',
+    '/usr',
+    '/bin',
+    '/lib',
+    '/lib64',
+  ]
+    .filter(existsSync)
+    .flatMap((path) => ['--ro-bind', path, path])
+  return [
+    bwrap,
+    '--unshare-all',
+    '--die-with-parent',
+    '--clearenv',
+    ...system,
+    // 実行中の bun を、隔離環境の中では bun という名前で使えるようにする
+    '--ro-bind',
+    process.execPath,
+    '/opt/bin/bun',
+    '--proc',
+    '/proc',
+    '--dev',
+    '/dev',
+    '--tmpfs',
+    '/tmp',
+    '--bind',
+    work,
+    '/work',
+    '--chdir',
+    '/work',
+    '--setenv',
+    'PATH',
+    '/opt/bin:/run/current-system/sw/bin:/usr/bin:/bin',
+    '--setenv',
+    'HOME',
+    '/tmp',
+    '--',
+    'sh',
+    '-c',
+    command,
+  ]
 }
