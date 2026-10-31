@@ -106,6 +106,12 @@ async function start(url: string | undefined) {
       ? saved
       : await pair(url ?? DEFAULT_URL)
 
+  // run_command は bubblewrap がないと毎回失敗するため、起動時に知らせる
+  if (!Bun.which('bwrap')) {
+    console.warn(
+      'bubblewrap（bwrap）が見つかりません。エージェントの run_command は失敗します',
+    )
+  }
   await mkdir(AGENTS, { recursive: true, mode: 0o700 })
   await mkdir(FILES, { recursive: true, mode: 0o700 })
   const shared = new Database(join(DIR, 'state.sqlite'), { strict: true })

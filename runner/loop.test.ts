@@ -44,8 +44,27 @@ test('やることがあるときだけ turn を返し、状況が変わると k
     '設計思想: 速く作る',
   )
 
+  // 会社が仕事を足している途中は、worker は仕事を選びに起きない
+  expect(
+    await turnFor('worker-1', {
+      ...d,
+      busy: (n) => n === `company-${a.id}`,
+    }),
+  ).toBeNull()
   const before = await turnFor('worker-1', d)
   expect(before?.prompt).toContain('claim_task')
+  // send_message は1回の turn で1通まで
+  await use(before?.tools ?? [], 'send_message', {
+    to: 'worker-2',
+    content: '質問',
+  })
+  expect(() =>
+    use(before?.tools ?? [], 'send_message', {
+      to: 'worker-3',
+      content: '質問',
+    }),
+  ).toThrow('1通まで')
+  e.markRead(e.unread('worker-2').map((m) => m.id))
   e.sendMessage('worker-2', 'worker-1', '一緒にやろう')
   const after = await turnFor('worker-1', d)
   expect(after?.key).not.toBe(before?.key)

@@ -32,7 +32,10 @@ test('仕事は会社のタスクプールに置き、自社の worker だけが
   expect(() => e.claimTask('worker-4', first.id)).toThrow()
   e.claimTask('worker-1', first.id)
   expect(() => e.claimTask('worker-1', second.id)).toThrow()
-  expect(() => e.claimTask('worker-2', first.id)).toThrow()
+  // 取り合いに負けたら、誰が持っているかと残りの仕事を返す
+  expect(() => e.claimTask('worker-2', first.id)).toThrow(
+    `仕事 ${first.id} は worker-1 が引き受けました。まだ誰も引き受けていない仕事: ${second.id}`,
+  )
   expect(e.pool(a.id).map((t) => t.id)).toEqual([second.id])
   e.finishTask('worker-1', '終えた')
   expect(e.openTask('worker-1')).toBeNull()

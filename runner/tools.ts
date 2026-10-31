@@ -53,7 +53,7 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'run_command',
     description:
-      '隔離環境でシェルのコマンドを実行する。作業用ディレクトリが /work にあり、書き込めるのはそこだけ。ネットワークは使えない（Web の情報は web_search で調べる）。bun（TypeScript をそのまま実行できる）と基本的なコマンドがある。60秒で止める。小さな実験や検証のコードを書いて動かすときに使う',
+      '隔離環境でシェルのコマンドを実行する。作業用ディレクトリが /work にあり、書き込めるのはそこだけ。ネットワークは使えない（Web の情報は web_search で調べる）。Python は無いため、コードは bun（TypeScript と JavaScript をそのまま実行できる）で書く。基本的なコマンドもある。60秒で止める。小さな実験や検証のコードを書いて動かすときに使う',
     parameters: Type.Object({
       command: Type.String({ description: 'sh -c で実行するコマンド' }),
     }),

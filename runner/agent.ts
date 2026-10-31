@@ -1,16 +1,18 @@
 import { Database } from 'bun:sqlite'
 import { join } from 'node:path'
-import type {
-  AssistantMessage,
-  Context,
-  Message as PiMessage,
-  ToolCall,
+import {
+  type AssistantMessage,
+  type Context,
+  type Message as PiMessage,
+  type Tool,
+  type ToolCall,
+  Type,
 } from '@earendil-works/pi-ai'
 import type { createModels } from '@earendil-works/pi-ai/models'
 import type { Toolbox } from './tools'
 
 const INSTRUCTIONS =
-  'あなたは利用者と対話するエージェントです。日本語で簡潔に答えてください。必要に応じて、ツールで固有 DB・共有 DB・作業用ディレクトリのファイル・隔離環境でのコマンド実行を使ってください。Web の情報は web_search で検索し、ページを開いて調べられます。run_command の隔離環境からはネットワークに出られないため、Web には web_search を使ってください。'
+  'あなたは利用者と対話するエージェントです。日本語で簡潔に答えてください。必要に応じて、ツールで固有 DB・共有 DB・作業用ディレクトリのファイル・隔離環境でのコマンド実行を使ってください。Web の情報は web_search で調べられます。run_command の隔離環境からはネットワークに出られないため、Web には web_search を使ってください。'
 const MAX_STEPS = 8
 const RECENT = 10
 const RECALL = 5
@@ -130,11 +132,11 @@ export async function respond({
   const context: Context = {
     systemPrompt: instructions,
     messages: messages.map((m) => toPiMessage(m, model)),
-    tools: toolbox.definitions,
+    tools: [...toolbox.definitions, webSearchTool],
   }
   let text = ''
   for (let step = 0; step < MAX_STEPS; step++) {
-    const events = models.stream(model, context, { onPayload: withWebSearch })
+    const events = models.stream(model, context)
     for await (const event of events) {
       if (event.type === 'text_delta') {
         text += event.delta
@@ -160,7 +162,10 @@ export async function respond({
       let isError = false
       try {
         onTool?.(call.name, call.arguments)
-        output = await toolbox.run(call.name, call.arguments)
+        output =
+          call.name === webSearchTool.name
+            ? await webSearch(models, model, call.arguments.query)
+            : await toolbox.run(call.name, call.arguments)
       } catch (e) {
         output = e instanceof Error ? e.message : String(e)
         isError = true
@@ -178,11 +183,46 @@ export async function respond({
   throw new Error(`ツールの呼び出しが ${MAX_STEPS} 回を超えました`)
 }
 
-// Codex のサーバー側の Web 検索を足す。検索とページの閲覧はサーバーの中で済み、結果は本文に URL 付きで入る。
-// pi-ai のツール定義では表せないため、送る直前のリクエストに足す
-function withWebSearch(payload: unknown) {
-  const p = payload as { tools?: unknown[] }
-  return { ...p, tools: [...(p.tools ?? []), { type: 'web_search' }] }
+const webSearchTool: Tool = {
+  name: 'web_search',
+  description:
+    'Web を検索し、ページを開いて調べる。調べたい内容を文章で渡すと、出典の URL 付きで結果を返す',
+  parameters: Type.Object({
+    query: Type.String({ description: '調べたい内容' }),
+  }),
+}
+
+// Codex のサーバー側の Web 検索だけを有効にした別の呼び出しで調べ、結果をツールの結果として返す。
+// サーバー側の検索の記録は pi-ai が会話の履歴に残さないため、エージェントの呼び出しで直接使うと、
+// 次の手順で自分が調べた結果を見られなくなる
+async function webSearch(models: Models, model: Model, query: unknown) {
+  if (typeof query !== 'string' || !query.trim()) {
+    throw new Error('query に調べたい内容を指定してください')
+  }
+  const events = models.stream(
+    model,
+    {
+      systemPrompt:
+        'Web 検索で調べ、わかった事実を出典の URL 付きで日本語で簡潔に答えてください。確かめられなかったことは、そう書いてください。',
+      messages: [{ role: 'user', content: query, timestamp: Date.now() }],
+    },
+    {
+      // pi-ai のツール定義では表せないため、送る直前のリクエストに足す
+      onPayload: (payload) => {
+        const p = payload as { tools?: unknown[] }
+        return { ...p, tools: [...(p.tools ?? []), { type: 'web_search' }] }
+      },
+    },
+  )
+  for await (const event of events) {
+    if (event.type === 'error') {
+      throw new Error(event.error.errorMessage ?? event.reason)
+    }
+  }
+  const reply = await events.result()
+  return reply.content
+    .map((block) => (block.type === 'text' ? block.text : ''))
+    .join('')
 }
 
 // 記憶には応答の本文だけを残しているため、本文だけの応答として渡す

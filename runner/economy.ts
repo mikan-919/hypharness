@@ -318,8 +318,27 @@ export function openEconomy(path: string) {
           'UPDATE pool_tasks SET worker = ? WHERE id = ? AND company_id = ? AND worker IS NULL AND result IS NULL',
         )
         .run(worker, id, workerCompany(worker) ?? -1)
-      if (!changes)
-        throw new Error(`自分の会社のプールに仕事 ${id} はありません`)
+      if (changes) return
+      // 同僚と同時に取り合ったときに、別の仕事を選び直せるよう、誰が持っているかと残りを返す
+      const taken = db
+        .query<
+          { worker: string | null; result: string | null },
+          [number, number]
+        >(
+          'SELECT worker, result FROM pool_tasks WHERE id = ? AND company_id = ?',
+        )
+        .get(id, workerCompany(worker) ?? -1)
+      const rest = pool(workerCompany(worker) ?? -1).map((t) => t.id)
+      const left = rest.length
+        ? `まだ誰も引き受けていない仕事: ${rest.join(', ')}`
+        : 'まだ誰も引き受けていない仕事はありません'
+      throw new Error(
+        taken?.result
+          ? `仕事 ${id} は終わっています。${left}`
+          : taken?.worker
+            ? `仕事 ${id} は ${taken.worker} が引き受けました。${left}`
+            : `自分の会社のプールに仕事 ${id} はありません。${left}`,
+      )
     },
     finishTask(worker: string, result: string) {
       const task = openTask(worker)

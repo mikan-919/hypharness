@@ -86,7 +86,13 @@ const boardLines = (e: Economy, companyId: number) =>
     .join('\n') || '（まだありません）'
 
 // 各エージェントの「今やること」を状況から組み立てる。やることがなければ null を返し、モデルを呼ばない
-type TurnDeps = Pick<LoopDeps, 'economy' | 'agent' | 'readFile' | 'contexts'>
+type TurnDeps = Pick<
+  LoopDeps,
+  'economy' | 'agent' | 'readFile' | 'contexts'
+> & {
+  // そのエージェントが今モデルを呼んでいる途中か
+  busy?: (name: string) => boolean
+}
 
 // 役割ごとの turn に、2層のコンテキストとそのツールを足す
 export async function turnFor(name: string, d: TurnDeps): Promise<Turn | null> {
@@ -122,7 +128,7 @@ ${d.contexts.prompt(db)}
 
 async function roleTurn(
   name: string,
-  { economy: e, readFile, contexts }: TurnDeps,
+  { economy: e, readFile, contexts, busy }: TurnDeps,
 ): Promise<Turn | null> {
   const goal = e.goal()
   const cycle = e.cycle()
@@ -303,12 +309,16 @@ ${companyList(e)}
   const c = companyId === null ? null : e.company(companyId)
   if (!c) return null
   const task = e.openTask(name)
+  // 会社が仕事を足している途中に起きると、最初の1件に全員が集まるため、足し終えるまで待つ
+  if (!task && busy?.(`company-${c.id}`)) return null
   const pool = task ? [] : e.pool(c.id)
   const messages = e.unread(name)
   const gifts = contexts.pendingGifts(name)
   if (!task && !pool.length && !messages.length && !gifts.length) {
     return null
   }
+  // send_message を1回の turn で1通に限る
+  let sent = false
   return {
     key: [
       cycle,
@@ -361,7 +371,7 @@ ${companyList(e)}
 検証できる部分は、run_command（ネットワークの無い隔離環境。/work が作業用ディレクトリ）で小さな実験のコードを書いて実行し、その結果も根拠に含めてください。
 成果は context_add（scope: shared）で共有コンテキストに残し、そのラベル（S…）を entry に付けて post_idea で市場に出してください。長い内容は file_write でファイルに書き、context_add の file で指せます。
 共有 DB は、ほかのエージェントとの調整用のデータにだけ使い、成果を置かないでください。
-進捗の報告は post_board で会社の掲示板に出してください（誰も起こしません）。send_message は特定の同僚への質問や依頼だけに使ってください（相手を起こします）。
+進捗の報告、訂正、見つけた先行研究など、同僚に知らせたい内容は post_board と context_add に書いてください（誰も起こしません）。send_message は、返事が必要な質問や依頼を特定の同僚に送るときだけ使ってください（相手を起こします）。1回に送れるのは1通までです。
 ほかの会社との合併や、会社の分裂に賛成なら vote で投票できます。`,
     done: () => e.markRead(messages.map((m) => m.id)),
     tools: [
@@ -431,6 +441,13 @@ ${companyList(e)}
         '同僚1人にメッセージを送る。相手を起こすので、質問や依頼にだけ使う',
         Type.Object({ to: Type.String(), content: Type.String() }),
         (args) => {
+          // 同じ知らせを同僚全員に送って起こし合うのを防ぐ
+          if (sent) {
+            throw new Error(
+              'send_message は1回に1通までです。知らせたい内容は post_board に書いてください',
+            )
+          }
+          sent = true
           e.sendMessage(
             name,
             text(args.to, 'to'),
@@ -539,9 +556,13 @@ export function startLoops(d: LoopDeps) {
     }
   }
 
+  const busy = (name: string) => {
+    const state = activity.get(name)?.state
+    return state === '実行中' || state === '順番待ち'
+  }
   const loop = async (name: string) => {
     while (!stopped && members(d.economy).includes(name)) {
-      const turn = await turnFor(name, d)
+      const turn = await turnFor(name, { ...d, busy })
       if (!turn || turn.key === lastKey.get(name)) {
         if (!activity.has(name)) set(name, { detail: 'やることがありません' })
         await sleep(idle)
