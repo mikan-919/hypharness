@@ -65,6 +65,21 @@ function peakConcurrency(spans: { start: number; end: number }[]) {
   return peak;
 }
 
+// Who asked whom: each task from its author to the agent that took it (or was assigned it), each agent from the one
+// that created it, and each knowledge check from the checker to the author. Edges of one kind between one pair are summed.
+function graph(d: Database) {
+  const edges = all(d, `select author "from", coalesce(claimed_by, assignee) "to", kind, count(*) n, sum(status = 'failed') failed
+      from tasks where coalesce(claimed_by, assignee) is not null group by 1, 2, 3
+    union all select parent, id, 'spawn', 1, 0 from agents where parent is not null
+    union all select verified_by, author, 'knowledge_verify', count(*), sum(status = 'rejected') from knowledge
+      where verified_by in (select id from agents) and verified_by != author group by 1, 2`) as { from: string; to: string }[];
+  const agents = all(d, "select id, status from agents order by created_at") as { id: string; status: string }[];
+  const known = new Set(agents.map(a => a.id));
+  // host and user start work without being agents; they appear as nodes of their own.
+  const outside = [...new Set(edges.flatMap(e => [e.from, e.to]))].filter(id => !known.has(id)).map(id => ({ id, status: "external" }));
+  return { nodes: [...agents, ...outside], edges };
+}
+
 function overview(d: Database) {
   const config = JSON.parse(meta(d, "config") ?? "{}");
   // One span per agent and task: from the start of its first model call to the end of its last.
@@ -82,7 +97,7 @@ function overview(d: Database) {
     goals: all(d, "select * from goals order by created_at"),
     tasks: all(d, "select id, goal, kind, description, status, author, assignee, exclude, target, claimed_by, result, feedback, verified_by, created_at from tasks order by created_at desc limit 500"),
     knowledge: all(d, `select id, gist, source, status, author, verified_by, ${merges(d) ? "merged_into" : "null merged_into"}, created_at from knowledge order by created_at desc limit 500`),
-    duplicates: duplicates(d),
+    duplicates: duplicates(d), graph: graph(d),
     spans, peak: { agents: peakConcurrency(spans), work: peakConcurrency(spans.filter(s => s.kind === "work")) },
     domains: all(d, "select d.*, (select count(*) from domain_knowledge where domain = d.id) knowledge from domains d"),
     usage: all(d, "select id, agent, task, input, output, cache_read cacheRead, cache_write cacheWrite, ms, at from usage order by id desc limit 2000").reverse(),
