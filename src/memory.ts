@@ -34,8 +34,10 @@ export function rememberTurns(store: Store, domain: { id: string; name: string; 
       const around = turns.slice(Math.max(0, i - 2), i + 3).map(x => x.line).join("\n");
       splitSentences(t.text).forEach((sentence, k) => {
         const id = `K-${key(i)}-${k + 1}`;
-        store.run("insert into knowledge(id, gist, summary, raw, source, status, author, verified_by, created_at) values(?, ?, ?, ?, ?, 'verified', 'ingest', 'ingest', ?)",
-          id, `${when}${t.speaker ? `${t.speaker}: ` : ""}${sentence}`, `${when}${t.line}`, `${when}\n${around}`, `${domain.name} turn ${i + 1}`, now);
+        // The assistant's own replies are not evidence of anything; only what the other speakers said is a verified record.
+        const status = t.speaker === "Assistant" ? "hypothesis" : "verified";
+        store.run("insert into knowledge(id, gist, summary, raw, source, status, author, verified_by, created_at) values(?, ?, ?, ?, ?, ?, 'ingest', ?, ?)",
+          id, `${when}${t.speaker ? `${t.speaker}: ` : ""}${sentence}`, `${when}${t.line}`, `${when}\n${around}`, `${domain.name} turn ${i + 1}`, status, status === "verified" ? "ingest" : null, now);
         store.run("insert into domain_knowledge(domain, knowledge) values(?, ?)", domain.id, id);
         n++;
       });

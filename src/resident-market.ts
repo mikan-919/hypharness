@@ -79,7 +79,7 @@ export async function recordCompletion(store: Store, embed: Embed, llm: Llm) {
     if (orderSteward) rewardSteward(store, orderSteward.steward, 1);
     for (const row of store.all<{ strategy: string }>("select strategy from order_strategies where goal = ? union select s.strategy from discovery_strategies s join discoveries p on p.id = s.discovery where p.goal = ?", goal.id, goal.id)) rewardStrategy(store, row.strategy, 1);
   });
-  if (response && chatId !== null) await remember(store, embed, response, `chat:${chatId}`, chatId);
+  if (response && chatId !== null) await remember(store, embed, response, `chat:${chatId}`, chatId, "hypothesis");
   return true;
 }
 

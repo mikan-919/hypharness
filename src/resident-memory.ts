@@ -21,9 +21,16 @@ export function distance(a: number[], b: number[]) {
   return 1 - dot / Math.sqrt(aa * bb);
 }
 
-// Preserve all characters, including punctuation and whitespace.
+// A sentence ends at 。！？!? or at a full stop followed by a space; a line break does not end one, so Markdown headings,
+// rules and list markers stay with the text after them. A piece with no letter or digit joins its neighbour.
+// The pieces keep every character: joined, they are the text.
 export function sentences(text: string) {
-  return text.match(/[^。！？.!?\n]*[。！？.!?\n]+|[^。！？.!?\n]+$/gu) ?? [];
+  const out: string[] = [];
+  for (const piece of text.match(/.*?(?:[。！？!?]+|\.(?=\s|$))\s*|.+/gsu) ?? []) {
+    if (out.length && (!/[\p{L}\p{N}]/u.test(piece) || !/[\p{L}\p{N}]/u.test(out.at(-1)!))) out[out.length - 1] += piece;
+    else out.push(piece);
+  }
+  return out;
 }
 
 export function initMemory(store: Store) {
@@ -71,14 +78,15 @@ export function distanceThreshold(values: number[], quantile = 0.75) {
   return sorted[Math.floor((sorted.length - 1) * quantile)]!;
 }
 
-export async function remember(store: Store, embed: Embed, text: string, source: string, chatId?: number) {
+// What the user said, or an order, is a verified record; an assistant's reply is only a hypothesis until checked.
+export async function remember(store: Store, embed: Embed, text: string, source: string, chatId?: number, status: "verified" | "hypothesis" = "verified") {
   const pieces = sentences(text);
   const embeddings = await Promise.all(pieces.map(piece => embed(piece, "passage")));
   return store.tx(() => {
     const ids: string[] = [];
     for (let i = 0; i < pieces.length; i++) {
       const piece = pieces[i]!, vector = embeddings[i]!, domain = nearestDomain(store, vector), id = store.id("K");
-      store.run("insert into knowledge(id, gist, summary, raw, source, status, author, verified_by, created_at) values(?, ?, ?, ?, ?, 'verified', 'ingest', 'ingest', ?)", id, piece, piece, piece, source, Date.now());
+      store.run("insert into knowledge(id, gist, summary, raw, source, status, author, verified_by, created_at) values(?, ?, ?, ?, ?, ?, 'ingest', ?, ?)", id, piece, piece, piece, source, status, status === "verified" ? "ingest" : null, Date.now());
       store.run("insert into domain_knowledge(domain, knowledge) values(?, ?)", domain, id);
       store.run("insert into memory_vectors(knowledge, vector, chat_id) values(?, ?, ?)", id, JSON.stringify(vector), chatId ?? null);
       ids.push(id);

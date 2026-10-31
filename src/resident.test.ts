@@ -128,3 +128,15 @@ test("the resident front hands a request for work to the organization as the pur
   expect(store.purpose).toBe("RSI の論文を調べてレポートにまとめる");
   expect(store.get<{ n: number }>("select count(*) n from log where event = 'order_changed'")!.n).toBe(1);
 });
+
+test("in resident memory the user's words are a verified record and the assistant's reply is a hypothesis", async () => {
+  const store = openResident(":memory:");
+  const faux = fauxProvider(), models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses([fauxAssistantMessage("RSI は再帰的自己改善です。")]);
+  await reply({ models, model: faux.getModel() }, store, "RSI とは？", async () => [1, 0]);
+  expect(store.all("select source, status, verified_by from knowledge where source like 'chat:%' order by source")).toEqual([
+    { source: "chat:1", status: "verified", verified_by: "ingest" },
+    { source: "chat:2", status: "hypothesis", verified_by: null },
+  ]);
+});

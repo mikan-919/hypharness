@@ -44,3 +44,9 @@ test("knowledge added by tools is indexed without changing its status or duplica
   expect(vectors(store).map(v => v.knowledge)).toEqual(["K1"]);
   store.db.close();
 });
+
+test("sentences end at sentence punctuation, not at line breaks, and symbols stay with the text", () => {
+  const text = "結論です。\n\n---\n\n## 1．定義\n\nRSIは自己改善です。 arxiv.org の 3.5 版を見た. 次の文";
+  expect(sentences(text)).toEqual(["結論です。\n\n", "---\n\n## 1．定義\n\nRSIは自己改善です。 ", "arxiv.org の 3.5 版を見た. ", "次の文"]);
+  expect(sentences("- 項目A\n- 項目B\n> 注意。")).toEqual(["- 項目A\n- 項目B\n> 注意。"]);
+});
