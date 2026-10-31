@@ -1,22 +1,21 @@
 // 手元で動かすエージェントの実行環境。Worker から届いた発言を、エージェントごとの記憶と
 // Codex（ChatGPT でのサインイン）で処理する。Workers から chatgpt.com へは接続できないため、ここで動かす
+
+import { Database } from 'bun:sqlite'
 import { chmod, mkdir, rename } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type {
-  AssistantMessage,
-  Credential,
-  CredentialStore,
-  Message as PiMessage,
-} from '@earendil-works/pi-ai'
+import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { createModels } from '@earendil-works/pi-ai/models'
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
-import { type Message, openAgent } from './agent'
+import { openAgent, respond } from './agent'
+import { createToolbox, type Toolbox } from './tools'
 
 const DIR = join(homedir(), '.hyph')
 const CONFIG = join(DIR, 'config.json')
 const AUTH = join(DIR, 'auth.json')
 const AGENTS = join(DIR, 'agents')
+const FILES = join(DIR, 'files')
 const MODEL = 'gpt-6.1-sol'
 const DEFAULT_URL = 'http://localhost:5173'
 const PAIRING_POLL_MS = 3000
@@ -102,27 +101,25 @@ async function start(url: string | undefined) {
   await mkdir(AGENTS, { recursive: true, mode: 0o700 })
   const agents = new Map<string, ReturnType<typeof openAgent>>()
 
-  // 応答の差分は届いたそばから onDelta に渡し、全文がそろってから記憶に残す
-  const handle = async (request: Request, onDelta: (delta: string) => void) => {
+  await mkdir(FILES, { recursive: true, mode: 0o700 })
+  const shared = new Database(join(DIR, 'state.sqlite'), { strict: true })
+  shared.run('PRAGMA journal_mode = WAL')
+  const toolboxes = new Map<string, Toolbox>()
+
+  const handle = (request: Request, onDelta: (delta: string) => void) => {
     const agent = agents.get(request.agent) ?? openAgent(AGENTS, request.agent)
     agents.set(request.agent, agent)
-    const { instructions, messages } = agent.context(request.message)
-    let text = ''
-    const events = models.stream(model, {
-      systemPrompt: instructions,
-      messages: messages.map((m) => toPiMessage(m, model)),
+    const toolbox =
+      toolboxes.get(request.agent) ?? createToolbox(agent.db, shared, FILES)
+    toolboxes.set(request.agent, toolbox)
+    return respond({
+      models,
+      model,
+      agent,
+      toolbox,
+      message: request.message,
+      onDelta,
     })
-    for await (const event of events) {
-      if (event.type === 'text_delta') {
-        text += event.delta
-        onDelta(event.delta)
-      }
-      if (event.type === 'error') {
-        throw new Error(event.error.errorMessage ?? event.reason)
-      }
-    }
-    agent.remember('user', request.message)
-    agent.remember('assistant', text)
   }
 
   const connect = () => {
@@ -154,33 +151,6 @@ async function start(url: string | undefined) {
     }
   }
   connect()
-}
-
-// 記憶には応答の本文だけを残しているため、本文だけの応答として渡す
-function toPiMessage(
-  message: Message,
-  model: { api: AssistantMessage['api']; provider: string; id: string },
-): PiMessage {
-  if (message.role === 'user') {
-    return { role: 'user', content: message.content, timestamp: Date.now() }
-  }
-  return {
-    role: 'assistant',
-    content: [{ type: 'text', text: message.content }],
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: 'stop',
-    timestamp: Date.now(),
-  }
 }
 
 // refresh token は更新のたびに入れ替わるため、書き込みを直列にして古い値で上書きしない
