@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { openResident, setOrder } from "./resident.ts";
 import { runWorkerPool } from "./scheduler.ts";
 import type { Runtime } from "./agent.ts";
-import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { history, reply, waitForFront } from "./chat.ts";
 import { tools, type ToolContext } from "./tools.ts";
 import { remember } from "./resident-memory.ts";
@@ -54,7 +54,9 @@ test("knowledge tools assign results to the nearest domain", async () => {
 
 test("front waits on usage limits before retrying", async () => {
   let calls = 0, waited = 0;
-  const answer = await waitForFront(async () => ++calls === 1 ? fauxAssistantMessage("", { stopReason: "error", errorMessage: "usage limit" }) : fauxAssistantMessage("ok"), true, async ms => { waited = Number(ms); });
+  const waits: string[] = [];
+  const answer = await waitForFront(async () => ++calls === 1 ? fauxAssistantMessage("", { stopReason: "error", errorMessage: "usage limit" }) : fauxAssistantMessage("ok"), true, async ms => { waited = Number(ms); }, e => waits.push(e));
+  expect(waits).toEqual(["usage limit"]);
   expect(answer.stopReason).not.toBe("error");
   expect(calls).toBe(2);
   expect(waited).toBe(60_000);
@@ -111,4 +113,30 @@ test("notifications wake an idle pool and changes before waiting are not lost", 
   await Promise.race([pool, Bun.sleep(1000).then(() => { throw new Error("Pool did not wake"); })]);
   expect(completed).toBe(true);
   store.db.close();
+});
+
+test("the resident front hands a request for work to the organization as the purpose instead of doing it", async () => {
+  const store = openResident(":memory:");
+  const faux = fauxProvider(), models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall("order_set", { purpose: "RSI の論文を調べてレポートにまとめる" })], { stopReason: "toolUse" }),
+    fauxAssistantMessage("調査を始めました。"),
+  ]);
+  const r = await reply({ models, model: faux.getModel() }, store, "RSI の論文を調べてレポートにまとめて", async () => [1, 0]);
+  expect(r.reply).toBe("調査を始めました。");
+  expect(store.purpose).toBe("RSI の論文を調べてレポートにまとめる");
+  expect(store.get<{ n: number }>("select count(*) n from log where event = 'order_changed'")!.n).toBe(1);
+});
+
+test("in resident memory the user's words are a verified record and the assistant's reply is a hypothesis", async () => {
+  const store = openResident(":memory:");
+  const faux = fauxProvider(), models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses([fauxAssistantMessage("RSI は再帰的自己改善です。")]);
+  await reply({ models, model: faux.getModel() }, store, "RSI とは？", async () => [1, 0]);
+  expect(store.all("select source, status, verified_by from knowledge where source like 'chat:%' order by source")).toEqual([
+    { source: "chat:1", status: "verified", verified_by: "ingest" },
+    { source: "chat:2", status: "hypothesis", verified_by: null },
+  ]);
 });

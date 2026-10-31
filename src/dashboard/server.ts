@@ -102,6 +102,16 @@ function agent(d: Database, id: string) {
   };
 }
 
+// Every episode in progress with its context so far, one per working agent; the newest end is kept when it is long.
+const STREAM_CHARS = 20_000;
+function streams(d: Database) {
+  const rows = all(d, "select e.id, e.agent, e.task, t.kind, t.description, e.messages from episodes e left join tasks t on t.id = e.task where e.status = 'running' order by e.agent") as { messages: string }[];
+  return rows.map(({ messages, ...r }) => {
+    const parsed = JSON.parse(messages) as Message[], text = render(parsed);
+    return { ...r, steps: parsed.filter(m => m.role === "assistant").length, text: text.length > STREAM_CHARS ? `…${text.slice(-STREAM_CHARS)}` : text };
+  });
+}
+
 function episode(d: Database, id: string) {
   const row = d.query("select messages from episodes where id = ?").get(id) as { messages: string } | null;
   return row ? { text: render(JSON.parse(row.messages) as Message[]) } : undefined;
@@ -277,6 +287,7 @@ const server = Bun.serve({
       return json(stats && { ...diagnose([stats]), trace: traceMarkdown(stats) });
     }),
     "/api/agent": guard(async req => { const p = params(req), s = await session(p.get("s")); return json(s && agent(s.db, p.get("id") ?? "")); }),
+    "/api/streams": guard(async req => { const s = await session(params(req).get("s")); return json(s && streams(s.db)); }),
     "/api/episode": guard(async req => { const p = params(req), s = await session(p.get("s")); return json(s && episode(s.db, p.get("id") ?? "")); }),
     "/api/files": guard(async req => {
       const s = await session(params(req).get("s"));
@@ -296,6 +307,8 @@ const server = Bun.serve({
       POST: guard(async req => {
         const body = await req.json() as runs.RunRequest & { session?: string };
         const s = await session(body.session) ?? (() => { throw new Error("Unknown session"); })();
+        // The resident process works on its own session; a second host process on it would run the same episodes twice.
+        if (resident && s.id === chatDir) throw new Error(`${s.id} belongs to the resident process`);
         return Response.json(runs.start(s.id, { ...body, kind: "run" }, true));
       }),
     },
