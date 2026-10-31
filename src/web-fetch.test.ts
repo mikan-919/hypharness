@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { fetchPublicPage, publicAddress } from "./web-fetch.ts";
+import { fetchPublicPage, getPage, publicAddress } from "./web-fetch.ts";
 
 test("fetch validates every resolved address and every redirect before connecting", async () => {
   expect(publicAddress("127.0.0.1")).toBe(false);
@@ -21,4 +21,11 @@ test("fetch extracts text and removes scripts without making network calls", asy
   const page = await fetchPublicPage("https://public.example/", async () => [{ address: "8.8.8.8", family: 4 }], async () => ({ status: 200, contentType: "text/html", body: "<p>Hello <b>world</b></p><script>hidden()</script>" }));
   expect(page.text).toContain("Hello world");
   expect(page.text).not.toContain("hidden");
+});
+
+test("a request connects to the checked address even when the client asks for every address", async () => {
+  using server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("served", { headers: { "content-type": "text/plain" } }) });
+  // The host name does not resolve; the page can only come from the address handed to the lookup.
+  const page = await getPage(new URL(`http://checked.invalid:${server.port}/`), { address: "127.0.0.1", family: 4 });
+  expect([page.status, page.body]).toEqual([200, "served"]);
 });
