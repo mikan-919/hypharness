@@ -155,6 +155,9 @@ async function start(url: string | undefined) {
       board: economy.board(c.id),
     })),
     investors: economy.investors(),
+    stakes: economy.stakes(),
+    history: economy.history(),
+    ideaStats: economy.ideaStats(),
     ideas: economy.latestIdeas(),
     messages: economy.recentMessages(),
     sharedContext: contexts.sharedEntries().map(({ label, gist, source }) => ({

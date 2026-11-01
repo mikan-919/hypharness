@@ -66,6 +66,14 @@ test('精算で未精算の採点から価値と売上を決め、配当と人�
   e.db.query('UPDATE companies SET capital = 200 WHERE id = ?').run(a.id)
   e.settle()
   expect(e.company(a.id)?.value).toBe(4)
+  // 精算ごとに資本・価値・資金を記録する
+  expect(e.history().filter((h) => h.name === `${a.id}: ${a.name}`)).toEqual([
+    { cycle: 1, kind: 'capital', name: `${a.id}: ${a.name}`, amount: 42 },
+    { cycle: 1, kind: 'value', name: `${a.id}: ${a.name}`, amount: 8 },
+    { cycle: 2, kind: 'capital', name: `${a.id}: ${a.name}`, amount: 166 },
+    { cycle: 2, kind: 'value', name: `${a.id}: ${a.name}`, amount: 4 },
+  ])
+  expect(e.ideaStats()).toEqual([{ cycle: 1, ideas: 1, avg: 8 }])
 })
 
 test('過半数の投票と相手の同意で合併し、2人以上の投票で分裂する', () => {

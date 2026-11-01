@@ -103,6 +103,12 @@ export function openEconomy(path: string) {
       company_id INTEGER NOT NULL,
       amount REAL NOT NULL,
       cycle INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS history (
+      cycle INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      name TEXT NOT NULL,
+      amount REAL NOT NULL
     );`)
   // 古い DB には列を足す。settled は採点済みのアイデアを精算に1回だけ使うための印、
   // entry はアイデアの根拠になる共有コンテキストのラベル
@@ -240,6 +246,28 @@ export function openEconomy(path: string) {
       db
         .query<{ name: string; cash: number }, []>(
           'SELECT name, cash FROM investors ORDER BY name',
+        )
+        .all(),
+    // 画面の関係図に出す、投資家ごとの出資
+    stakes: () =>
+      db
+        .query<{ investor: string; company_id: number; amount: number }, []>(
+          'SELECT investor, company_id, amount FROM stakes ORDER BY investor, company_id',
+        )
+        .all(),
+    // 画面のグラフに出す、精算ごとの会社の資本・価値と投資家の資金
+    history: () =>
+      db
+        .query<
+          { cycle: number; kind: string; name: string; amount: number },
+          []
+        >('SELECT cycle, kind, name, amount FROM history ORDER BY cycle')
+        .all(),
+    // 期ごとのアイデアの数と平均の評価
+    ideaStats: () =>
+      db
+        .query<{ cycle: number; ideas: number; avg: number | null }, []>(
+          'SELECT cycle, COUNT(*) AS ideas, AVG(score) AS avg FROM ideas GROUP BY cycle ORDER BY cycle',
         )
         .all(),
     stakesOf: (investor: string) =>
@@ -585,6 +613,20 @@ export function openEconomy(path: string) {
           'UPDATE pool_tasks SET worker = NULL WHERE result IS NULL AND worker IS NOT NULL AND worker NOT IN (SELECT name FROM workers WHERE company_id = pool_tasks.company_id)',
         )
         db.run('DELETE FROM votes')
+        const record = db.query(
+          'INSERT INTO history (cycle, kind, name, amount) VALUES (?, ?, ?, ?)',
+        )
+        for (const c of companies()) {
+          record.run(cycle(), 'capital', `${c.id}: ${c.name}`, c.capital)
+          record.run(cycle(), 'value', `${c.id}: ${c.name}`, c.value)
+        }
+        for (const i of db
+          .query<{ name: string; cash: number }, []>(
+            'SELECT name, cash FROM investors',
+          )
+          .all()) {
+          record.run(cycle(), 'cash', i.name, i.cash)
+        }
         setMeta('cycle', String(cycle() + 1))
       })()
     },
