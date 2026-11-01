@@ -12,7 +12,7 @@ import type { createModels } from '@earendil-works/pi-ai/models'
 import type { Toolbox } from './tools'
 
 const INSTRUCTIONS =
-  'あなたは利用者と対話するエージェントです。日本語で簡潔に答えてください。必要に応じて、ツールで固有 DB・共有 DB・作業用ディレクトリのファイル・隔離環境でのコマンド実行を使ってください。Web の情報は web_search で調べられます。run_command の隔離環境からはネットワークに出られないため、Web には web_search を使ってください。'
+  'あなたは利用者と対話するエージェントです。日本語で簡潔に答えてください。必要に応じて、ツールで固有 DB・共有 DB・作業用ディレクトリのファイル・隔離環境でのコマンド実行を使ってください。Web の情報は web_search で調べられます。run_command の隔離環境からはネットワークに出られないため、Web には web_search を使ってください。ツールの結果の末尾には [step 番号｜コンテキスト約N文字] が付きます。読み終えた長い結果や行き止まりになった試行は、rewrite_context で後の判断に必要な事実と出典だけのメモに置き換え、コンテキストを短く保ってください。'
 const MAX_STEPS = 8
 const RECENT = 10
 const RECALL = 5
@@ -101,6 +101,64 @@ export function openAgent(dir: string, name: string) {
 export type Models = ReturnType<typeof createModels>
 export type Model = Parameters<Models['stream']>[0]
 
+// 1回の応答のうち、ツールを呼んだ1手（モデルの応答とツールの結果）。メモに置き換えた手は from〜to をまとめて持つ
+export type Step = { from: number; to: number; messages: PiMessage[] }
+
+// コンテキストのおおよその文字数。モデルが書き換えるかを判断する目安として見せる
+const size = (messages: PiMessage[]) =>
+  messages.reduce(
+    (n, m) =>
+      n +
+      (typeof m.content === 'string'
+        ? m.content.length
+        : JSON.stringify(m.content).length),
+    0,
+  )
+
+// CLM（Context Language Models, arXiv 2609.37725）にならい、モデルが作業中のコンテキストを書き換える。
+// step from〜to を丸ごと1つのメモに置き換える。ツールの呼び出しと結果の組を壊さないよう、手の途中では切らない
+export function rewriteSteps(
+  steps: Step[],
+  from: unknown,
+  to: unknown,
+  note: unknown,
+  chars = 0,
+): Step[] {
+  if (!Number.isInteger(from) || !Number.isInteger(to)) {
+    throw new Error('from と to に step の番号を指定してください')
+  }
+  const [a, b] = [from as number, to as number]
+  if (typeof note !== 'string' || !note.trim()) {
+    throw new Error('note に置き換え後のメモを指定してください')
+  }
+  const inside = steps.filter((s) => s.from >= a && s.to <= b)
+  if (
+    a > b ||
+    !inside.length ||
+    steps.some((s) => s.from <= b && s.to >= a && !inside.includes(s))
+  ) {
+    const ranges = steps
+      .map((s) => (s.from === s.to ? `${s.from}` : `${s.from}〜${s.to}`))
+      .join(', ')
+    throw new Error(
+      `step ${a}〜${b} は手の区切りに合いません。今ある step: ${ranges}`,
+    )
+  }
+  const merged: Step = {
+    from: inside[0].from,
+    to: inside[inside.length - 1].to,
+    messages: [
+      {
+        role: 'user',
+        content: `[step ${inside[0].from}〜${inside[inside.length - 1].to} を自分で置き換えたメモ｜置き換え前のコンテキスト約${chars}文字]\n${note}`,
+        timestamp: Date.now(),
+      },
+    ],
+  }
+  const at = steps.indexOf(inside[0])
+  return [...steps.slice(0, at), merged, ...steps.slice(at + inside.length)]
+}
+
 // ツールを呼びながら回答を作る。本文の差分は届いたそばから onDelta に渡し、回答がそろってから記憶に残す
 export async function respond({
   models,
@@ -132,10 +190,13 @@ export async function respond({
   const context: Context = {
     systemPrompt: instructions,
     messages: messages.map((m) => toPiMessage(m, model)),
-    tools: [...toolbox.definitions, webSearchTool],
+    tools: [...toolbox.definitions, webSearchTool, rewriteContextTool],
   }
+  // 依頼文と履歴は書き換えさせず、ツールを呼んだ手だけを書き換えの対象にする
+  const head = context.messages
+  let steps: Step[] = []
   let text = ''
-  for (let step = 0; step < MAX_STEPS; step++) {
+  for (let step = 1; step <= MAX_STEPS; step++) {
     const events = models.stream(model, context)
     for await (const event of events) {
       if (event.type === 'text_delta') {
@@ -147,7 +208,6 @@ export async function respond({
       }
     }
     const reply = await events.result()
-    context.messages.push(reply)
     const calls = reply.content.filter(
       (block): block is ToolCall => block.type === 'toolCall',
     )
@@ -156,21 +216,34 @@ export async function respond({
       agent.remember('assistant', text)
       return text
     }
+    const chars = size(context.messages) + size([reply])
+    // 書き換えはこの手のツールをすべて終えてから、次にモデルを呼ぶ前に反映する。
+    // 受け付けるかは、この手を足した後の区切りで先に確かめる
+    let draft: Step[] = [...steps, { from: step, to: step, messages: [] }]
+    const rewrites: Record<string, unknown>[] = []
+    const results: PiMessage[] = []
     for (const call of calls) {
       // ツールの失敗はエラーの結果としてモデルに返し、モデルに直させる
       let output: string
       let isError = false
       try {
         onTool?.(call.name, call.arguments)
-        output =
-          call.name === webSearchTool.name
-            ? await webSearch(models, model, call.arguments.query)
-            : await toolbox.run(call.name, call.arguments)
+        if (call.name === rewriteContextTool.name) {
+          const { from, to, note } = call.arguments
+          draft = rewriteSteps(draft, from, to, note, chars)
+          rewrites.push(call.arguments)
+          output = `step ${from}〜${to} をメモに置き換えます。次の手から反映します`
+        } else {
+          output =
+            call.name === webSearchTool.name
+              ? await webSearch(models, model, call.arguments.query)
+              : await toolbox.run(call.name, call.arguments)
+        }
       } catch (e) {
         output = e instanceof Error ? e.message : String(e)
         isError = true
       }
-      context.messages.push({
+      results.push({
         role: 'toolResult',
         toolCallId: call.id,
         toolName: call.name,
@@ -179,6 +252,18 @@ export async function respond({
         timestamp: Date.now(),
       })
     }
+    const last = results[results.length - 1]
+    if (last.role === 'toolResult') {
+      last.content.push({
+        type: 'text',
+        text: `[step ${step}｜コンテキスト約${chars + size(results)}文字]`,
+      })
+    }
+    steps.push({ from: step, to: step, messages: [reply, ...results] })
+    for (const { from, to, note } of rewrites) {
+      steps = rewriteSteps(steps, from, to, note, chars)
+    }
+    context.messages = [...head, ...steps.flatMap((s) => s.messages)]
   }
   throw new Error(`ツールの呼び出しが ${MAX_STEPS} 回を超えました`)
 }
@@ -189,6 +274,19 @@ const webSearchTool: Tool = {
     'Web を検索し、ページを開いて調べる。調べたい内容を文章で渡すと、出典の URL 付きで結果を返す',
   parameters: Type.Object({
     query: Type.String({ description: '調べたい内容' }),
+  }),
+}
+
+const rewriteContextTool: Tool = {
+  name: 'rewrite_context',
+  description:
+    '今の作業のコンテキストのうち、step from から to までを note のメモに置き換える。置き換えた元の内容は消え、戻せない。依頼文と、ツールを呼ぶ前の履歴は置き換えられない',
+  parameters: Type.Object({
+    from: Type.Integer(),
+    to: Type.Integer(),
+    note: Type.String({
+      description: '後の判断に必要な事実・決めたこと・出典',
+    }),
   }),
 }
 

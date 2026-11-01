@@ -10,7 +10,7 @@ import {
   fauxText,
   fauxToolCall,
 } from '@earendil-works/pi-ai'
-import { ftsQuery, openAgent, respond } from './agent'
+import { ftsQuery, openAgent, respond, rewriteSteps } from './agent'
 import { createToolbox } from './tools'
 
 test('ftsQuery は記号を除いた3文字ずつの断片を OR でつなぐ', () => {
@@ -100,4 +100,68 @@ test('ループの依頼は記憶から履歴を送らず、依頼文を記憶�
     { role: 'user', content: '前の会話' },
     { role: 'assistant', content: '採点しました' },
   ])
+})
+
+test('rewrite_context は次の手から step をメモに置き換え、依頼文は残す', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hyph-'))
+  const agent = openAgent(dir, 'pochi')
+  const faux = fauxProvider()
+  const models = createModels()
+  models.setProvider(faux.provider)
+  let seen: unknown[] = []
+  faux.setResponses([
+    fauxAssistantMessage(
+      [fauxToolCall('file_write', { path: 'a.txt', content: '長い結果' })],
+      { stopReason: 'toolUse' },
+    ),
+    fauxAssistantMessage(
+      [
+        // 手の途中で切る指定は拒否し、この手を含む範囲は受け付ける
+        fauxToolCall('rewrite_context', { from: 1, to: 3, note: 'x' }),
+        fauxToolCall('rewrite_context', {
+          from: 1,
+          to: 2,
+          note: 'a.txt に書いた',
+        }),
+      ],
+      { stopReason: 'toolUse' },
+    ),
+    (context) => {
+      seen = context.messages
+        .filter((m) => m.role !== 'system')
+        .map((m) => m.content)
+      return fauxAssistantMessage([fauxText('終えました')])
+    },
+  ])
+  await respond({
+    models,
+    model: faux.getModel(),
+    agent,
+    toolbox: createToolbox(agent.db, new Database(':memory:'), dir),
+    message: '依頼',
+    onDelta: () => {},
+    loop: true,
+  })
+  expect(seen).toHaveLength(2)
+  expect(seen[0]).toBe('依頼')
+  expect(seen[1]).toMatch(
+    /^\[step 1〜2 を自分で置き換えたメモ｜.*\]\na\.txt に書いた$/,
+  )
+})
+
+test('rewriteSteps は手の区切りに合わない範囲を拒否する', () => {
+  const steps = [1, 2, 3].map((n) => ({ from: n, to: n, messages: [] }))
+  const merged = rewriteSteps(steps, 1, 2, 'メモ')
+  expect(merged.map((s) => [s.from, s.to])).toEqual([
+    [1, 2],
+    [3, 3],
+  ])
+  expect(() => rewriteSteps(merged, 2, 3, 'メモ')).toThrow(
+    '今ある step: 1〜2, 3',
+  )
+  expect(() => rewriteSteps(merged, 4, 5, 'メモ')).toThrow()
+  expect(() => rewriteSteps(merged, 3, 3, ' ')).toThrow()
+  expect(rewriteSteps(merged, 1, 3, 'メモ').map((s) => [s.from, s.to])).toEqual(
+    [[1, 3]],
+  )
 })
