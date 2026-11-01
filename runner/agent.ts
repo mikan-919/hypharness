@@ -346,6 +346,8 @@ export async function webSearch(
     body: JSON.stringify({
       objective,
       search_queries,
+      // fast は約1秒で高い品質を狙う。既定の advanced より速い
+      mode: 'fast',
       max_chars_total: SEARCH_CHARS,
       client_model: clientModel,
     }),

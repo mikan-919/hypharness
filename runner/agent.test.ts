@@ -200,6 +200,7 @@ test('web_search は Parallel の Search API で調べ、抜粋を出典付き�
       objective: '目的',
       search_queries: ['検索語'],
       client_model: 'gpt-test',
+      mode: 'fast',
     })
     await expect(
       webSearch({ objective: '目的', search_queries: [] }, 'm'),
