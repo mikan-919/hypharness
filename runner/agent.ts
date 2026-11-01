@@ -168,6 +168,7 @@ export async function respond({
   message,
   onDelta,
   onTool,
+  onContext,
   loop = false,
 }: {
   models: Models
@@ -178,6 +179,8 @@ export async function respond({
   onDelta: (delta: string) => void
   // ツールを呼ぶ直前に呼ぶ。進み具合を外に見せるために使う
   onTool?: (name: string, args: Record<string, unknown>) => void
+  // モデルを呼ぶ直前に、渡すコンテキストのおおよその文字数を知らせる
+  onContext?: (chars: number) => void
   // ループからの依頼。依頼文に状況がすべて入っているため、記憶から履歴を足さず、依頼文も記憶に残さない
   loop?: boolean
 }) {
@@ -197,6 +200,7 @@ export async function respond({
   let steps: Step[] = []
   let text = ''
   for (let step = 1; step <= MAX_STEPS; step++) {
+    onContext?.(size(context.messages))
     const events = models.stream(model, context)
     for await (const event of events) {
       if (event.type === 'text_delta') {

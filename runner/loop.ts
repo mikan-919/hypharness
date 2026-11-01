@@ -30,6 +30,7 @@ export type LoopDeps = {
     prompt: string,
     tools: RoleTool[],
     onTool: (tool: string, args: Record<string, unknown>) => void,
+    onContext: (chars: number) => void,
   ) => Promise<string>
   agent: (name: string) => { agent: Agent }
   contexts: Contexts
@@ -490,6 +491,8 @@ export type Activity = {
   label: string
   detail: string
   tools: number
+  // 今の依頼（終えたあとは前回の依頼）で、モデルを呼ぶたびのコンテキストの文字数
+  context: number[]
 }
 
 // ツールの引数から、ログに出す要点を取り出す
@@ -529,6 +532,7 @@ export function startLoops(d: LoopDeps) {
       label: '',
       detail: '',
       tools: 0,
+      context: [],
     }
     activity.set(name, {
       ...current,
@@ -570,16 +574,33 @@ export function startLoops(d: LoopDeps) {
       }
       const started = Date.now()
       let tools = 0
-      set(name, { state: '順番待ち', label: turn.label, detail: '', tools })
+      // ponytail: 直近200回分だけ残す。長い依頼の全体を見たくなったら間引いて残す
+      const context: number[] = []
+      set(name, {
+        state: '順番待ち',
+        label: turn.label,
+        detail: '',
+        tools,
+        context,
+      })
       try {
         await slot(() => {
           set(name, { state: '実行中', detail: '考えています' })
           d.log(`${name}: 始めました（${turn.label}）`)
-          return d.ask(name, turn.prompt, turn.tools, (tool, args) => {
-            const line = `${tool} ${brief(args)}`
-            set(name, { detail: line, tools: ++tools })
-            d.log(`${name}: ${line}`)
-          })
+          return d.ask(
+            name,
+            turn.prompt,
+            turn.tools,
+            (tool, args) => {
+              const line = `${tool} ${brief(args)}`
+              set(name, { detail: line, tools: ++tools })
+              d.log(`${name}: ${line}`)
+            },
+            (chars) => {
+              context.push(chars)
+              set(name, { context: context.slice(-200) })
+            },
+          )
         })
         turn.done?.()
         lastKey.set(name, turn.key)

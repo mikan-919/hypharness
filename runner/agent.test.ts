@@ -109,6 +109,7 @@ test('rewrite_context は次の手から step をメモに置き換え、依頼�
   const models = createModels()
   models.setProvider(faux.provider)
   let seen: unknown[] = []
+  const sizes: number[] = []
   faux.setResponses([
     fauxAssistantMessage(
       [fauxToolCall('file_write', { path: 'a.txt', content: '長い結果' })],
@@ -140,8 +141,12 @@ test('rewrite_context は次の手から step をメモに置き換え、依頼�
     toolbox: createToolbox(agent.db, new Database(':memory:'), dir),
     message: '依頼',
     onDelta: () => {},
+    onContext: (chars) => sizes.push(chars),
     loop: true,
   })
+  // モデルを呼ぶたびに大きさを知らせ、置き換えた後は小さくなる
+  expect(sizes).toHaveLength(3)
+  expect(sizes[2]).toBeLessThan(sizes[1])
   expect(seen).toHaveLength(2)
   expect(seen[0]).toBe('依頼')
   expect(seen[1]).toMatch(

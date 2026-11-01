@@ -14,6 +14,8 @@ type Agent = {
   label: string
   detail: string
   tools: number
+  // 古いランナーは返さない
+  context?: number[]
 }
 // ランナーの runner/index.ts の status() が返す形
 type Status = {
@@ -364,6 +366,16 @@ function Agents({
                   ツール {a.tools}回
                 </p>
               )}
+              {a.context?.length ? (
+                <div className='flex items-end justify-between gap-2 text-xs text-muted-foreground'>
+                  <span>
+                    コンテキスト {chars(a.context[a.context.length - 1])}
+                    <br />
+                    最大 {chars(Math.max(...a.context))}
+                  </span>
+                  <Sparkline values={a.context} />
+                </div>
+              ) : null}
             </button>
           )
         })}
@@ -875,6 +887,7 @@ function Metrics({ status }: { status: Status }) {
   }
   return (
     <section className='flex flex-col gap-4'>
+      <ContextBars agents={status.agents} />
       <div className='grid gap-4 lg:grid-cols-2'>
         <LineChart title='会社の資本（精算後）' series={of('capital')} />
         <LineChart title='会社の価値（精算後）' series={of('value')} />
@@ -1030,6 +1043,110 @@ function Detail({ status }: { status: Status }) {
   )
 }
 
+// 1回の依頼の中で、モデルを呼ぶたびのコンテキストの大きさ。下がったところは rewrite_context で置き換えた手
+function Sparkline({ values }: { values: number[] }) {
+  const w = 120
+  const h = 32
+  const max = Math.max(1, ...values)
+  const x = (i: number) =>
+    values.length === 1 ? w - 3 : 3 + (i / (values.length - 1)) * (w - 6)
+  const y = (v: number) => h - 3 - (v / max) * (h - 6)
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden='true'>
+      <polyline
+        points={values.map((v, i) => `${x(i)},${y(v)}`).join(' ')}
+        fill='none'
+        stroke={SERIES[0]}
+        strokeWidth='2'
+        strokeLinejoin='round'
+      />
+      <circle
+        cx={x(values.length - 1)}
+        cy={y(values[values.length - 1])}
+        r='3'
+        fill={SERIES[0]}
+      />
+    </svg>
+  )
+}
+
+// エージェントごとの今のコンテキストの大きさ。薄い帯はその依頼の中での最大で、差が置き換えで減らした分
+function ContextBars({ agents }: { agents: Agent[] }) {
+  const rows = agents
+    .filter((a) => a.context?.length)
+    .map((a) => {
+      const values = a.context ?? []
+      return {
+        name: a.name,
+        now: values[values.length - 1],
+        peak: Math.max(...values),
+        calls: values.length,
+      }
+    })
+    .sort((a, b) => b.now - a.now)
+  const max = Math.max(1, ...rows.map((r) => r.peak))
+  return (
+    <figure className='flex flex-col gap-2 rounded-xl border p-4 text-sm'>
+      <figcaption className='font-bold'>
+        エージェントごとのコンテキストの大きさ（今の依頼、終えたあとは前回の依頼）
+      </figcaption>
+      {rows.length === 0 ? (
+        <p className='text-muted-foreground'>
+          エージェントがモデルを呼ぶと記録されます
+        </p>
+      ) : (
+        <>
+          <div className='flex gap-4 text-xs text-muted-foreground'>
+            <span className='inline-flex items-center gap-1'>
+              <span
+                className='size-3 rounded-sm'
+                style={{ background: SERIES[0] }}
+              />
+              今
+            </span>
+            <span className='inline-flex items-center gap-1'>
+              <span
+                className='size-3 rounded-sm opacity-25'
+                style={{ background: SERIES[0] }}
+              />
+              依頼の中での最大
+            </span>
+          </div>
+          {rows.map((r) => (
+            <div
+              key={r.name}
+              className='grid grid-cols-[7rem_1fr_9rem] items-center gap-2'
+              title={`${r.name}: 今 ${chars(r.now)}、最大 ${chars(r.peak)}、モデルの呼び出し ${r.calls}回`}
+            >
+              <span className='truncate'>{r.name}</span>
+              <div className='relative h-4'>
+                <div
+                  className='absolute inset-y-0 left-0 rounded-r opacity-25'
+                  style={{
+                    width: `${(r.peak / max) * 100}%`,
+                    background: SERIES[0],
+                  }}
+                />
+                <div
+                  className='absolute inset-y-0 left-0 rounded-r'
+                  style={{
+                    width: `${(r.now / max) * 100}%`,
+                    background: SERIES[0],
+                  }}
+                />
+              </div>
+              <span className='text-right text-xs tabular-nums text-muted-foreground'>
+                {chars(r.now)} / {chars(r.peak)}
+              </span>
+            </div>
+          ))}
+        </>
+      )}
+    </figure>
+  )
+}
+
+const chars = (n: number) => `${n.toLocaleString('ja-JP')}文字`
 const sum = (values: number[]) => values.reduce((a, b) => a + b, 0)
 
 // 状態が変わってからの時間。ポーリングで描き直すたびに更新される

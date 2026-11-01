@@ -185,7 +185,7 @@ async function start(url: string | undefined) {
           contexts,
           agent: agentFor,
           log,
-          ask: (name, prompt, tools, onTool) => {
+          ask: (name, prompt, tools, onTool, onContext) => {
             const { agent, toolbox } = agentFor(name)
             return respond({
               models,
@@ -195,6 +195,7 @@ async function start(url: string | undefined) {
               message: prompt,
               onDelta: () => {},
               onTool,
+              onContext,
               loop: true,
             })
           },
