@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { createModels } from '@earendil-works/pi-ai/models'
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
-import { openAgent, respond } from './agent'
+import { openAgent, REASONING, type Reasoning, respond } from './agent'
 import { openContexts } from './context'
 import { openEconomy } from './economy'
 import { startLoops } from './loop'
@@ -19,7 +19,9 @@ const CONFIG = join(DIR, 'config.json')
 const AUTH = join(DIR, 'auth.json')
 const AGENTS = join(DIR, 'agents')
 const FILES = join(DIR, 'files')
-const MODEL = 'gpt-6.1-sol'
+// モデル名と推論の深さは .env などの MODEL と REASONING で変えられる。Bun は起動したディレクトリの .env を読む
+const MODEL = process.env.MODEL || 'gpt-6.1-sol'
+const REASONING_EFFORT = process.env.REASONING || undefined
 const DEFAULT_URL = 'http://localhost:5173'
 const PAIRING_POLL_MS = 3000
 const RECONNECT_MS = 5000
@@ -96,6 +98,21 @@ async function start(url: string | undefined) {
   if (!(await models.getAuth('openai'))) await login()
   const model = models.getModel('openai', MODEL)
   if (!model) throw new Error(`未対応のモデルです: ${MODEL}`)
+  if (
+    REASONING_EFFORT &&
+    !(REASONING as readonly string[]).includes(REASONING_EFFORT)
+  ) {
+    throw new Error(
+      `REASONING は ${REASONING.join(', ')} のどれかにしてください: ${REASONING_EFFORT}`,
+    )
+  }
+  const reasoning = REASONING_EFFORT as Reasoning | undefined
+  console.log(`モデル: ${MODEL}、推論の深さ: ${reasoning ?? '既定'}`)
+  if (!process.env.PARALLEL_API_KEY) {
+    console.warn(
+      'PARALLEL_API_KEY が設定されていません。エージェントの web_search は失敗します',
+    )
+  }
 
   const saved: Config | undefined = (await Bun.file(CONFIG).exists())
     ? await Bun.file(CONFIG).json()
@@ -196,6 +213,7 @@ async function start(url: string | undefined) {
               onDelta: () => {},
               onTool,
               onContext,
+              reasoning,
               loop: true,
             })
           },
@@ -239,6 +257,7 @@ async function start(url: string | undefined) {
             agent,
             toolbox,
             message: request.message,
+            reasoning,
             onDelta: (delta) =>
               ws.send(JSON.stringify({ id: request.id, delta })),
           })

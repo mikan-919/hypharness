@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite'
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,7 +10,7 @@ import {
   fauxText,
   fauxToolCall,
 } from '@earendil-works/pi-ai'
-import { ftsQuery, openAgent, respond, rewriteSteps } from './agent'
+import { ftsQuery, openAgent, respond, rewriteSteps, webSearch } from './agent'
 import { createToolbox } from './tools'
 
 test('ftsQuery は記号を除いた3文字ずつの断片を OR でつなぐ', () => {
@@ -169,4 +169,47 @@ test('rewriteSteps は手の区切りに合わない範囲を拒否する', () =
   expect(rewriteSteps(merged, 1, 3, 'メモ').map((s) => [s.from, s.to])).toEqual(
     [[1, 3]],
   )
+})
+
+test('web_search は Parallel の Search API で調べ、抜粋を出典付きで返す', async () => {
+  const fetchSpy = spyOn(globalThis, 'fetch').mockResolvedValue(
+    Response.json({
+      search_id: 's',
+      session_id: 's',
+      results: [
+        {
+          url: 'https://example.com/a',
+          title: 'A',
+          publish_date: '2026-10-01',
+          excerpts: ['抜粋1', '抜粋2'],
+        },
+      ],
+    }),
+  )
+  process.env.PARALLEL_API_KEY = 'test-key'
+  try {
+    const text = await webSearch(
+      { objective: '目的', search_queries: ['検索語'] },
+      'gpt-test',
+    )
+    expect(text).toBe('## A\nhttps://example.com/a（2026-10-01）\n抜粋1\n抜粋2')
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://api.parallel.ai/v1/search')
+    expect(new Headers(init.headers).get('x-api-key')).toBe('test-key')
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      objective: '目的',
+      search_queries: ['検索語'],
+      client_model: 'gpt-test',
+    })
+    await expect(
+      webSearch({ objective: '目的', search_queries: [] }, 'm'),
+    ).rejects.toThrow()
+    delete process.env.PARALLEL_API_KEY
+    await expect(
+      webSearch({ objective: '目的', search_queries: ['a'] }, 'm'),
+    ).rejects.toThrow('PARALLEL_API_KEY')
+  } finally {
+    fetchSpy.mockRestore()
+    delete process.env.PARALLEL_API_KEY
+  }
 })

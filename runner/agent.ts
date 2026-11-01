@@ -100,6 +100,18 @@ export function openAgent(dir: string, name: string) {
 
 export type Models = ReturnType<typeof createModels>
 export type Model = Parameters<Models['stream']>[0]
+// openai-responses の reasoningEffort に渡せる値
+export const REASONING = [
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const
+export type Reasoning = (typeof REASONING)[number]
+// ponytail: 1回の検索で返す抜粋は合計1万文字まで。足りなければ増やす
+const SEARCH_CHARS = 10_000
 
 // 1回の応答のうち、ツールを呼んだ1手（モデルの応答とツールの結果）。メモに置き換えた手は from〜to をまとめて持つ
 export type Step = { from: number; to: number; messages: PiMessage[] }
@@ -169,6 +181,7 @@ export async function respond({
   onDelta,
   onTool,
   onContext,
+  reasoning,
   loop = false,
 }: {
   models: Models
@@ -181,6 +194,8 @@ export async function respond({
   onTool?: (name: string, args: Record<string, unknown>) => void
   // モデルを呼ぶ直前に、渡すコンテキストのおおよその文字数を知らせる
   onContext?: (chars: number) => void
+  // 未指定ならモデルの既定に任せる
+  reasoning?: Reasoning
   // ループからの依頼。依頼文に状況がすべて入っているため、記憶から履歴を足さず、依頼文も記憶に残さない
   loop?: boolean
 }) {
@@ -201,7 +216,11 @@ export async function respond({
   let text = ''
   for (let step = 1; step <= MAX_STEPS; step++) {
     onContext?.(size(context.messages))
-    const events = models.stream(model, context)
+    const events = models.stream(
+      model,
+      context,
+      reasoning ? { reasoningEffort: reasoning } : undefined,
+    )
     for await (const event of events) {
       if (event.type === 'text_delta') {
         text += event.delta
@@ -240,7 +259,7 @@ export async function respond({
         } else {
           output =
             call.name === webSearchTool.name
-              ? await webSearch(models, model, call.arguments.query)
+              ? await webSearch(call.arguments, model.id)
               : await toolbox.run(call.name, call.arguments)
         }
       } catch (e) {
@@ -275,9 +294,16 @@ export async function respond({
 const webSearchTool: Tool = {
   name: 'web_search',
   description:
-    'Web を検索し、ページを開いて調べる。調べたい内容を文章で渡すと、出典の URL 付きで結果を返す',
+    'Web を検索し、関係するページの URL・タイトル・公開日・抜粋を返す。objective に調べたい目的を文章で、search_queries に3〜6語の検索語を1〜5個渡す',
   parameters: Type.Object({
-    query: Type.String({ description: '調べたい内容' }),
+    objective: Type.String({
+      description: '調べたい目的。それだけで意味が通る文章にする',
+    }),
+    search_queries: Type.Array(Type.String(), {
+      minItems: 1,
+      maxItems: 5,
+      description: '3〜6語の検索語。2〜3個がよい',
+    }),
   }),
 }
 
@@ -294,37 +320,56 @@ const rewriteContextTool: Tool = {
   }),
 }
 
-// Codex のサーバー側の Web 検索だけを有効にした別の呼び出しで調べ、結果をツールの結果として返す。
-// サーバー側の検索の記録は pi-ai が会話の履歴に残さないため、エージェントの呼び出しで直接使うと、
-// 次の手順で自分が調べた結果を見られなくなる
-async function webSearch(models: Models, model: Model, query: unknown) {
-  if (typeof query !== 'string' || !query.trim()) {
-    throw new Error('query に調べたい内容を指定してください')
+// Parallel の Search API（https://docs.parallel.ai/api-reference/search/search）で調べ、
+// 結果をツールの結果として返す。API キーは .env などの PARALLEL_API_KEY から読む
+export async function webSearch(
+  args: Record<string, unknown>,
+  clientModel: string,
+) {
+  const key = process.env.PARALLEL_API_KEY
+  if (!key) throw new Error('PARALLEL_API_KEY が設定されていません')
+  const { objective, search_queries } = args
+  if (typeof objective !== 'string' || !objective.trim()) {
+    throw new Error('objective に調べたい目的を指定してください')
   }
-  const events = models.stream(
-    model,
-    {
-      systemPrompt:
-        'Web 検索で調べ、わかった事実を出典の URL 付きで日本語で簡潔に答えてください。確かめられなかったことは、そう書いてください。',
-      messages: [{ role: 'user', content: query, timestamp: Date.now() }],
-    },
-    {
-      // pi-ai のツール定義では表せないため、送る直前のリクエストに足す
-      onPayload: (payload) => {
-        const p = payload as { tools?: unknown[] }
-        return { ...p, tools: [...(p.tools ?? []), { type: 'web_search' }] }
-      },
-    },
-  )
-  for await (const event of events) {
-    if (event.type === 'error') {
-      throw new Error(event.error.errorMessage ?? event.reason)
-    }
+  if (
+    !Array.isArray(search_queries) ||
+    !search_queries.length ||
+    search_queries.length > 5 ||
+    !search_queries.every((q) => typeof q === 'string' && q.trim())
+  ) {
+    throw new Error('search_queries に検索語の文字列を1〜5個指定してください')
   }
-  const reply = await events.result()
-  return reply.content
-    .map((block) => (block.type === 'text' ? block.text : ''))
-    .join('')
+  const response = await fetch('https://api.parallel.ai/v1/search', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': key },
+    body: JSON.stringify({
+      objective,
+      search_queries,
+      max_chars_total: SEARCH_CHARS,
+      client_model: clientModel,
+    }),
+  })
+  if (!response.ok) {
+    throw new Error(
+      `Parallel の検索に失敗しました (${response.status}): ${await response.text()}`,
+    )
+  }
+  const { results } = (await response.json()) as {
+    results: {
+      url: string
+      title?: string | null
+      publish_date?: string | null
+      excerpts: string[]
+    }[]
+  }
+  if (!results.length) return '見つかりませんでした'
+  return results
+    .map(
+      (r) =>
+        `## ${r.title ?? r.url}\n${r.url}${r.publish_date ? `（${r.publish_date}）` : ''}\n${r.excerpts.join('\n')}`,
+    )
+    .join('\n\n')
 }
 
 // 記憶には応答の本文だけを残しているため、本文だけの応答として渡す
