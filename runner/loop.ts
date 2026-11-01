@@ -7,8 +7,8 @@ import type { RoleTool } from './tools'
 const IDLE_MS = 5_000
 const ERROR_MS = 30_000
 const SETTLE_MS = 10 * 60_000
-// ponytail: 同時に呼ぶモデルは3つまで。利用枠に余裕があれば増やす
-const CONCURRENCY = 3
+// ponytail: 同時に呼ぶモデルは20まで。利用枠の上限に当たるなら減らす
+const CONCURRENCY = 20
 
 // エージェントが今やること。key が前回動いたときと同じなら、状況が変わっていないので動かない
 export type Turn = {

@@ -13,7 +13,7 @@ import type { Toolbox } from './tools'
 
 const INSTRUCTIONS =
   'あなたは利用者と対話するエージェントです。日本語で簡潔に答えてください。必要に応じて、ツールで固有 DB・共有 DB・作業用ディレクトリのファイル・隔離環境でのコマンド実行を使ってください。Web の情報は web_search で調べられます。run_command の隔離環境からはネットワークに出られないため、Web には web_search を使ってください。ツールの結果の末尾には [step 番号｜コンテキスト約N文字] が付きます。読み終えた長い結果や行き止まりになった試行は、rewrite_context で後の判断に必要な事実と出典だけのメモに置き換え、コンテキストを短く保ってください。'
-const MAX_STEPS = 8
+const MAX_STEPS = 1000
 const RECENT = 10
 const RECALL = 5
 
