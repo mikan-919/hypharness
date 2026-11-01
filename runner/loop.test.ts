@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite'
 import { expect, test } from 'bun:test'
 import { openContexts } from './context'
 import { openEconomy } from './economy'
-import { startLoops, turnFor } from './loop'
+import { members, startLoops, turnFor } from './loop'
 import type { RoleTool } from './tools'
 
 // エージェントごとに固有 DB を1つ持たせる
@@ -200,4 +200,30 @@ test('精算の時刻は DB に残り、止めている間に過ぎていれば�
   await Bun.sleep(30)
   await loops.stop()
   expect(e.cycle()).toBe(2)
+})
+
+test('個人モードには経営者がおらず、worker は次の仕事を自分で決める', async () => {
+  const e = openEconomy(':memory:')
+  e.setGoal('目的', 'solo')
+  const d = deps(e)
+  expect(members(e)).toEqual([
+    'market',
+    'investor-1',
+    'investor-2',
+    'worker-1',
+    'worker-2',
+    'worker-3',
+    'worker-4',
+  ])
+  const first = await turnFor('worker-1', d)
+  const names = first?.tools.map((t) => t.definition.name) ?? []
+  expect(names).toContain('start_task')
+  expect(names).not.toContain('claim_task')
+  expect(names).not.toContain('post_board')
+  expect(names).not.toContain('vote')
+  await use(first?.tools ?? [], 'start_task', { body: '調べる' })
+  expect(e.openTask('worker-1')?.body).toBe('調べる')
+  await use(first?.tools ?? [], 'finish_task', { result: '終えた' })
+  // 仕事を終えると key が変わり、次の仕事を決めに起きる
+  expect((await turnFor('worker-1', d))?.key).not.toBe(first?.key)
 })

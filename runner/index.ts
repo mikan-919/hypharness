@@ -10,7 +10,7 @@ import { createModels } from '@earendil-works/pi-ai/models'
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
 import { openAgent, REASONING, type Reasoning, respond } from './agent'
 import { openContexts } from './context'
-import { openEconomy } from './economy'
+import { MODES, type Mode, openEconomy } from './economy'
 import { startLoops } from './loop'
 import { createToolbox, type Toolbox, withTools } from './tools'
 
@@ -31,7 +31,7 @@ type Config = { url: string; token: string }
 type Request = { id: string } & (
   | { method: 'chat'; agent: string; message: string }
   | { method: 'status' | 'start' | 'stop' }
-  | { method: 'setGoal'; goal: unknown }
+  | { method: 'setGoal'; goal: unknown; mode?: unknown }
 )
 
 // 使い方: bun run runner [URL] / bun run runner login
@@ -160,6 +160,7 @@ async function start(url: string | undefined) {
   }
   const status = () => ({
     goal: economy.goal(),
+    mode: economy.mode(),
     cycle: economy.cycle(),
     running: loops !== null,
     nextSettleAt: loops?.nextSettleAt() ?? null,
@@ -192,7 +193,13 @@ async function start(url: string | undefined) {
         if (typeof request.goal !== 'string' || !request.goal.trim()) {
           throw new Error('目的を入力してください')
         }
-        economy.setGoal(request.goal.trim())
+        if (
+          request.mode !== undefined &&
+          !MODES.includes(request.mode as Mode)
+        ) {
+          throw new Error(`方式は ${MODES.join(', ')} のどれかです`)
+        }
+        economy.setGoal(request.goal.trim(), request.mode as Mode | undefined)
         return status()
       case 'start':
         if (loops) throw new Error('すでにループを回しています')

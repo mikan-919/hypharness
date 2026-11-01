@@ -140,3 +140,26 @@ test('investor が1期に使えるのは期の初めの資金の30%まで', () =
   expect(() => e.invest('investor-1', a.id, 22)).toThrow()
   e.invest('investor-1', a.id, 21)
 })
+
+test('個人モードは worker 1人ずつの会社として作り、人数を増やさず、方式は後から変えられない', () => {
+  const e = openEconomy(':memory:')
+  e.setGoal('目的', 'solo')
+  expect(e.mode()).toBe('solo')
+  const solos = e.companies()
+  expect(solos.map((c) => [c.name, e.workersOf(c.id)])).toEqual([
+    ['worker-1', ['worker-1']],
+    ['worker-2', ['worker-2']],
+    ['worker-3', ['worker-3']],
+    ['worker-4', ['worker-4']],
+  ])
+  e.db.query('UPDATE companies SET capital = 100 WHERE id = ?').run(solos[0].id)
+  expect(e.staff(solos[0].id)).toEqual(['worker-1'])
+  expect(() => e.setGoal('目的', 'company')).toThrow()
+  e.setGoal('新しい目的')
+  expect(e.goal()).toBe('新しい目的')
+  // 資本が人件費に届かなくなった worker は外れる
+  e.db.query('UPDATE companies SET capital = 15 WHERE id = ?').run(solos[1].id)
+  e.settle()
+  expect(e.workerCompany('worker-2')).toBeNull()
+  expect(e.companies()).toHaveLength(3)
+})

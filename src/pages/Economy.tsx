@@ -20,6 +20,8 @@ type Agent = {
 // ランナーの runner/index.ts の status() が返す形
 type Status = {
   goal: string
+  // runner/economy.ts の Mode。古いランナーは返さない
+  mode?: 'company' | 'solo'
   cycle: number
   running: boolean
   nextSettleAt: number | null
@@ -101,6 +103,8 @@ const roleOf = (name: string): Role =>
       : name.startsWith('company-')
         ? '経営'
         : 'worker'
+// 資本を持ち投資を受ける単位。個人モードでは worker 1人だけの会社として返ってくる
+const unitOf = (status: Status) => (status.mode === 'solo' ? 'worker' : '会社')
 const companyOf = (status: Status, name: string) =>
   name.startsWith('company-')
     ? status.companies.find((c) => `company-${c.id}` === name)
@@ -121,6 +125,7 @@ const TABS: [Tab, string][] = [
 export default function Economy(props: PageProps<'Economy'>) {
   const [status, setStatus] = useState(props.status as Status | null)
   const [goal, setGoal] = useState(status?.goal ?? '')
+  const [mode, setMode] = useState(status?.mode ?? 'company')
   const [error, setError] = useState('')
   const [tab, setTab] = useState<Tab>('agents')
   const [selected, setSelected] = useState<string | null>(null)
@@ -148,7 +153,7 @@ export default function Economy(props: PageProps<'Economy'>) {
   }
   const saveGoal = (e: FormEvent) => {
     e.preventDefault()
-    run(() => post<Status>('/economy/goal', { goal }))()
+    run(() => post<Status>('/economy/goal', { goal, mode }))()
   }
 
   if (!status) {
@@ -181,6 +186,17 @@ export default function Economy(props: PageProps<'Economy'>) {
           onChange={(e) => setGoal(e.target.value)}
           required
         />
+        {/* 方式は経済を作るときだけ選べる */}
+        <select
+          aria-label='方式'
+          value={mode}
+          onChange={(e) => setMode(e.target.value as 'company' | 'solo')}
+          disabled={status.companies.length > 0}
+          className='rounded-lg border bg-background px-2 text-sm disabled:opacity-50'
+        >
+          <option value='company'>会社あり</option>
+          <option value='solo'>個人（会社なし）</option>
+        </select>
         <Button type='submit' variant='outline'>
           目的を設定
         </Button>
@@ -251,9 +267,9 @@ function Tiles({ status }: { status: Status }) {
       `${status.agents.length}`,
       `実行中 ${count('実行中')}・待ち ${count('順番待ち')}・失敗 ${count('失敗')}`,
     ],
-    ['会社', `${status.companies.length}`],
+    [unitOf(status), `${status.companies.length}`],
     [
-      '会社の資本の合計',
+      `${unitOf(status)}の資本の合計`,
       sum(status.companies.map((c) => c.capital)).toFixed(1),
     ],
     ['投資家の資金の合計', sum(status.investors.map((i) => i.cash)).toFixed(1)],
@@ -346,7 +362,7 @@ function Agents({
                   <p className='truncate font-bold'>{a.name}</p>
                   <p className='truncate text-xs text-muted-foreground'>
                     {roleOf(a.name)}
-                    {company && `・${company.name}`}
+                    {company && status.mode !== 'solo' && `・${company.name}`}
                   </p>
                 </div>
                 <span className='ml-auto'>
@@ -482,31 +498,49 @@ function layout(status: Status) {
   const nodes: Node[] = []
   const edges: Edge[] = []
   const activity = new Map(status.agents.map((a) => [a.name, a]))
-  const agentNode = (name: string, x: number, y: number) =>
+  const agentNode = (name: string, x: number, y: number, r = 14) =>
     nodes.push({
       id: name,
       label: name,
       x,
       y,
-      r: 14,
+      r,
       color: ROLE_COLOR[roleOf(name)],
       agent: activity.get(name),
     })
   const cx = W / 2
   const cy = H / 2 + 20
   agentNode('market', cx, cy)
+  // 会社の id から、出資の線をつなぐノード。個人モードでは worker 自身
+  const target = new Map<number, string>()
   status.companies.forEach((c, i) => {
     // 左端から時計回りに並べ、会社が2つのときに横長の領域を左右に使う
     const angle = (i / status.companies.length) * 2 * Math.PI + Math.PI
     const x = cx + Math.cos(angle) * 270
     const y = cy + Math.sin(angle) * 170
+    const r = 18 + Math.min(14, Math.sqrt(Math.max(0, c.capital)))
+    if (status.mode === 'solo') {
+      const [worker] = c.workers
+      if (!worker) return
+      target.set(c.id, worker)
+      agentNode(worker, x, y, r)
+      edges.push({
+        from: 'market',
+        to: worker,
+        kind: '採点',
+        width: 1,
+        note: '',
+      })
+      return
+    }
     const id = `c:${c.id}`
+    target.set(c.id, id)
     nodes.push({
       id,
       label: `${c.id}: ${c.name}`,
       x,
       y,
-      r: 18 + Math.min(14, Math.sqrt(Math.max(0, c.capital))),
+      r,
       color: '#52514e',
     })
     edges.push({ from: 'market', to: id, kind: '採点', width: 1, note: '' })
@@ -528,7 +562,7 @@ function layout(status: Status) {
   for (const s of status.stakes) {
     edges.push({
       from: s.investor,
-      to: `c:${s.company_id}`,
+      to: target.get(s.company_id) ?? '',
       kind: '出資',
       width: 1 + Math.min(6, s.amount / 10),
       note: s.amount.toFixed(1),
@@ -576,35 +610,45 @@ function Graph({
   return (
     <section className='flex flex-col gap-2'>
       <div className='flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground'>
-        {Object.entries(ROLE_COLOR).map(([role, color]) => (
-          <span key={role} className='inline-flex items-center gap-1'>
-            <span
-              className='size-3 rounded-full'
-              style={{ background: color }}
-            />
-            {role}
-          </span>
-        ))}
-        <span className='inline-flex items-center gap-1'>
-          <span className='size-3 rounded-full bg-[#52514e]' />
-          会社（大きさは資本）
-        </span>
-        {Object.entries(EDGE_STYLE).map(([kind, s]) => (
-          <span key={kind} className='inline-flex items-center gap-1'>
-            <svg width='20' height='6' aria-hidden='true'>
-              <line
-                x1='0'
-                y1='3'
-                x2='20'
-                y2='3'
-                stroke={s.stroke}
-                strokeWidth='2'
-                strokeDasharray={s.dash}
+        {Object.entries(ROLE_COLOR)
+          .filter(([role]) => !(status.mode === 'solo' && role === '経営'))
+          .map(([role, color]) => (
+            <span key={role} className='inline-flex items-center gap-1'>
+              <span
+                className='size-3 rounded-full'
+                style={{ background: color }}
               />
-            </svg>
-            {kind}
-          </span>
-        ))}
+              {role}
+            </span>
+          ))}
+        <span className='inline-flex items-center gap-1'>
+          {status.mode === 'solo' ? (
+            'worker の大きさは資本'
+          ) : (
+            <>
+              <span className='size-3 rounded-full bg-[#52514e]' />
+              会社（大きさは資本）
+            </>
+          )}
+        </span>
+        {Object.entries(EDGE_STYLE)
+          .filter(([kind]) => !(status.mode === 'solo' && kind === '所属'))
+          .map(([kind, s]) => (
+            <span key={kind} className='inline-flex items-center gap-1'>
+              <svg width='20' height='6' aria-hidden='true'>
+                <line
+                  x1='0'
+                  y1='3'
+                  x2='20'
+                  y2='3'
+                  stroke={s.stroke}
+                  strokeWidth='2'
+                  strokeDasharray={s.dash}
+                />
+              </svg>
+              {kind}
+            </span>
+          ))}
         <span>外周の色は状態（緑: 実行中、黄: 順番待ち、赤: 失敗）</span>
       </div>
       <svg
@@ -889,8 +933,14 @@ function Metrics({ status }: { status: Status }) {
     <section className='flex flex-col gap-4'>
       <ContextBars agents={status.agents} />
       <div className='grid gap-4 lg:grid-cols-2'>
-        <LineChart title='会社の資本（精算後）' series={of('capital')} />
-        <LineChart title='会社の価値（精算後）' series={of('value')} />
+        <LineChart
+          title={`${unitOf(status)}の資本（精算後）`}
+          series={of('capital')}
+        />
+        <LineChart
+          title={`${unitOf(status)}の価値（精算後）`}
+          series={of('value')}
+        />
         <LineChart title='投資家の資金（精算後）' series={of('cash')} />
         <LineChart
           title='アイデアの平均評価（期ごと）'
@@ -914,10 +964,12 @@ function Metrics({ status }: { status: Status }) {
         />
       </div>
       <table className='w-full text-left text-sm'>
-        <caption className='mb-2 text-left font-bold'>会社の現在値</caption>
+        <caption className='mb-2 text-left font-bold'>
+          {unitOf(status)}の現在値
+        </caption>
         <thead className='text-xs text-muted-foreground'>
           <tr>
-            <th className='py-1'>会社</th>
+            <th className='py-1'>{unitOf(status)}</th>
             <th>資本</th>
             <th>価値</th>
             <th>worker</th>

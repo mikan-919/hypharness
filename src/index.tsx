@@ -147,12 +147,22 @@ const routes = app
     c.json(await runner(c.env, c.var.user.id).call({ method: 'status' })),
   )
   .post('/economy/goal', auth, async (c) => {
-    const { goal } = await c.req.json<{ goal?: unknown }>()
+    const { goal, mode } = await c.req.json<{
+      goal?: unknown
+      mode?: unknown
+    }>()
     if (typeof goal !== 'string' || !goal.trim()) {
       return c.json({ error: '目的を入力してください' }, 400)
     }
+    if (mode !== undefined && mode !== 'company' && mode !== 'solo') {
+      return c.json({ error: '方式は company か solo です' }, 400)
+    }
     return c.json(
-      await runner(c.env, c.var.user.id).call({ method: 'setGoal', goal }),
+      await runner(c.env, c.var.user.id).call({
+        method: 'setGoal',
+        goal,
+        mode,
+      }),
     )
   })
   .post('/economy/:action{start|stop}', auth, async (c) =>

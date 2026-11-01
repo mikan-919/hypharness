@@ -8,8 +8,15 @@ const FOUNDING_CAPITAL = 30
 const INVESTOR_CASH = 100
 const INITIAL_COMPANIES = 2
 const INITIAL_INVESTORS = 2
+// ponytail: 個人モードで最初に用意する worker の数。会社ありの最初の人数に近づけた仮の値
+const INITIAL_SOLO = 4
 // investor が1期に使える、期の初めの資金に対する割合
 const INVEST_SHARE = 0.3
+
+// company は会社が worker を雇う方式。solo は会社を作らず、worker 1人ずつが資本を持ち、投資を受ける方式で、
+// 内部では worker 1人だけの会社として扱う
+export type Mode = 'company' | 'solo'
+export const MODES: Mode[] = ['company', 'solo']
 
 export type Company = {
   id: number
@@ -136,6 +143,8 @@ export function openEconomy(path: string) {
       )
       .run(key, value)
   const cycle = () => Number(meta('cycle') ?? 0)
+  // 方式を記録する前に作った経済は、会社ありだけだった
+  const mode = () => (meta('mode') ?? 'company') as Mode
   const companies = () =>
     db
       .query<Company, []>(
@@ -193,7 +202,7 @@ export function openEconomy(path: string) {
   // 資本で賄える数に worker を合わせる。採用は所属のない worker から優先し、記憶を引き継ぐ
   const staff = (companyId: number) => {
     const target = Math.min(
-      MAX_WORKERS,
+      mode() === 'solo' ? 1 : MAX_WORKERS,
       Math.max(0, Math.floor((company(companyId)?.capital ?? 0) / WORKER_COST)),
     )
     const current = workersOf(companyId)
@@ -219,6 +228,7 @@ export function openEconomy(path: string) {
   return {
     db,
     cycle,
+    mode,
     goal: () => meta('goal') ?? '',
     companies,
     company,
@@ -308,13 +318,30 @@ export function openEconomy(path: string) {
         )
         .all(limit),
 
-    // 目的を設定する。初回は会社と投資家を用意する
-    setGoal(goal: string) {
+    // 目的を設定する。初回は方式を決め、会社（個人モードでは worker）と投資家を用意する
+    setGoal(goal: string, next: Mode = mode()) {
       db.transaction(() => {
+        if (companies().length && next !== mode()) {
+          throw new Error(
+            '動いている経済の方式は変えられません。経済の DB を作り直してください',
+          )
+        }
         setMeta('goal', goal)
         if (companies().length) return
-        for (let i = 1; i <= INITIAL_COMPANIES; i++) {
-          staff(found(`会社${i}`, FOUNDING_CAPITAL))
+        setMeta('mode', next)
+        if (next === 'solo') {
+          for (let i = 1; i <= INITIAL_SOLO; i++) {
+            const id = found('', FOUNDING_CAPITAL)
+            const [worker] = staff(id)
+            db.query('UPDATE companies SET name = ? WHERE id = ?').run(
+              worker,
+              id,
+            )
+          }
+        } else {
+          for (let i = 1; i <= INITIAL_COMPANIES; i++) {
+            staff(found(`会社${i}`, FOUNDING_CAPITAL))
+          }
         }
         for (let i = 1; i <= INITIAL_INVESTORS; i++) {
           db.query('INSERT INTO investors (name, cash) VALUES (?, ?)').run(
@@ -334,9 +361,11 @@ export function openEconomy(path: string) {
     },
     // 会社のタスクプールに仕事を足す。誰がやるかは worker が選ぶ
     addTask(companyId: number, body: string) {
-      db.query(
-        'INSERT INTO pool_tasks (company_id, body, cycle) VALUES (?, ?, ?)',
-      ).run(companyId, body, cycle())
+      return db
+        .query<{ id: number }, [number, string, number]>(
+          'INSERT INTO pool_tasks (company_id, body, cycle) VALUES (?, ?, ?) RETURNING id',
+        )
+        .get(companyId, body, cycle())?.id as number
     },
     // 自分の会社のプールから仕事を引き受ける。抱える仕事は1件まで
     claimTask(worker: string, id: number) {

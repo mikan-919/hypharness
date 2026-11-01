@@ -1,7 +1,7 @@
 import { Type } from '@earendil-works/pi-ai'
 import type { openAgent } from './agent'
 import type { Contexts } from './context'
-import type { Economy } from './economy'
+import { type Economy, WORKER_COST } from './economy'
 import type { RoleTool } from './tools'
 
 const IDLE_MS = 5_000
@@ -59,14 +59,16 @@ const tool = (
   run: RoleTool['run'],
 ): RoleTool => ({ definition: { name, description, parameters }, run })
 
-// ループに参加するエージェント。資本が尽きた会社や解雇された worker は外れる
+// ループに参加するエージェント。資本が尽きた会社や解雇された worker は外れる。個人モードには経営者がいない
 export function members(e: Economy) {
+  const managers = e.mode() === 'company'
   return [
     'market',
     ...e.investors().map((i) => i.name),
     ...e.companies().flatMap((c) => {
       const workers = e.workersOf(c.id)
-      return workers.length ? [`company-${c.id}`, ...workers] : []
+      if (!workers.length) return []
+      return managers ? [`company-${c.id}`, ...workers] : workers
     }),
   ]
 }
@@ -74,9 +76,10 @@ export function members(e: Economy) {
 const companyList = (e: Economy) =>
   e
     .companies()
-    .map(
-      (c) =>
-        `- ${c.id}: ${c.name}（設計思想: ${c.philosophy || '未設定'}、価値 ${c.value.toFixed(1)}、資本 ${c.capital.toFixed(1)}、worker ${e.workersOf(c.id).length}人）`,
+    .map((c) =>
+      e.mode() === 'solo'
+        ? `- ${c.id}: ${c.name}（価値 ${c.value.toFixed(1)}、資本 ${c.capital.toFixed(1)}）`
+        : `- ${c.id}: ${c.name}（設計思想: ${c.philosophy || '未設定'}、価値 ${c.value.toFixed(1)}、資本 ${c.capital.toFixed(1)}、worker ${e.workersOf(c.id).length}人）`,
     )
     .join('\n')
 
@@ -133,6 +136,9 @@ async function roleTurn(
 ): Promise<Turn | null> {
   const goal = e.goal()
   const cycle = e.cycle()
+  const solo = e.mode() === 'solo'
+  // 個人モードでは、資本を持ち投資を受ける単位が worker になる
+  const unit = solo ? 'worker' : '会社'
 
   if (name === 'market') {
     const ideas = e.unscoredIdeas()
@@ -163,7 +169,7 @@ async function roleTurn(
     return {
       key: ideas.map((i) => i.id).join(','),
       label: `未採点のアイデア ${ideas.length}件を採点`,
-      prompt: `あなたは市場です。利用者の目的に照らして、アイデアの価値を見極めてください。採点は会社の売上になり、投資家の判断材料になります。差をつけないと良い会社が育ちません。
+      prompt: `あなたは市場です。利用者の目的に照らして、アイデアの価値を見極めてください。採点は${unit}の売上になり、投資家の判断材料になります。差をつけないと良い${unit}が育ちません。
 利用者の目的: ${goal}
 
 採点の基準（相対評価）:
@@ -210,25 +216,25 @@ ${listing.join('\n')}
     if (cycle <= 1 || investor.cash < 1) return null
     const stakes = e
       .stakesOf(name)
-      .map((s) => `- 会社 ${s.company_id}: ${s.amount.toFixed(1)}`)
+      .map((s) => `- ${unit} ${s.company_id}: ${s.amount.toFixed(1)}`)
       .join('\n')
     // 期ごとに1回、精算の結果を見て判断する
     return {
       key: `cycle-${cycle}`,
       label: `第${cycle}期の投資を判断`,
-      prompt: `あなたは投資家「${name}」です。会社は資本が多いほど worker を雇え、市場の評価が売上になり、売上の半分が出資額に応じて配当されます。
+      prompt: `あなたは投資家「${name}」です。${solo ? 'worker は資本が尽きると経済から外れます。' : '会社は資本が多いほど worker を雇えます。'}${unit}への市場の評価が売上になり、売上の半分が出資額に応じて配当されます。
 利用者の目的: ${goal}
 第${cycle}期です。手元の資金: ${investor.cash.toFixed(1)}
 これまでの出資:
 ${stakes || '（ありません）'}
-会社の一覧:
+${unit}の一覧（先頭の数字が id）:
 ${companyList(e) || '（ありません）'}
 
-伸びると考える会社に invest で投資してください。1期に使えるのは期の初めの資金の30%までです。価値の差を見て配分し、投資しない判断もできます。`,
+伸びると考える${unit}に invest で投資してください。1期に使えるのは期の初めの資金の30%までです。価値の差を見て配分し、投資しない判断もできます。`,
       tools: [
         tool(
           'invest',
-          '会社に投資する。手元の資金が会社の資本になる',
+          `${unit}に投資する。手元の資金が${unit}の資本になる。company_id に一覧の id を指定する`,
           Type.Object({ company_id: Type.Number(), amount: Type.Number() }),
           (args) => {
             e.invest(
@@ -312,10 +318,12 @@ ${companyList(e)}
   const task = e.openTask(name)
   // 会社が仕事を足している途中に起きると、最初の1件に全員が集まるため、足し終えるまで待つ
   if (!task && busy?.(`company-${c.id}`)) return null
-  const pool = task ? [] : e.pool(c.id)
+  const pool = task || solo ? [] : e.pool(c.id)
   const messages = e.unread(name)
   const gifts = contexts.pendingGifts(name)
-  if (!task && !pool.length && !messages.length && !gifts.length) {
+  // 個人モードの worker は次の仕事を自分で決めるため、仕事がなくても動く。
+  // 決めずに終えた場合は key が変わらないので、次の期まで待つ
+  if (!solo && !task && !pool.length && !messages.length && !gifts.length) {
     return null
   }
   // send_message を1回の turn で1通に限る
@@ -327,64 +335,89 @@ ${companyList(e)}
       pool.map((t) => t.id).join(','),
       messages.map((m) => m.id).join(','),
       gifts.map((g) => g.id).join(','),
+      solo ? e.tasks(c.id, 1)[0]?.id : '',
     ].join('|'),
     label: [
-      task ? `仕事 ${task.id}: ${task.body.slice(0, 40)}` : '仕事を選ぶ',
+      task
+        ? `仕事 ${task.id}: ${task.body.slice(0, 40)}`
+        : solo
+          ? '次の仕事を決める'
+          : '仕事を選ぶ',
       messages.length ? `メッセージ ${messages.length}件` : '',
       gifts.length ? `受け取ったエントリー ${gifts.length}件` : '',
     ]
       .filter(Boolean)
       .join('、'),
-    prompt: `あなたは worker「${name}」で、会社「${c.name}」（id ${c.id}）に所属しています。
+    prompt: `${
+      solo
+        ? `あなたは worker「${name}」（id ${c.id}）です。会社に属さず、自分の資本で動きます。
+資本: ${c.capital.toFixed(1)}、価値: ${c.value.toFixed(1)}。期末ごとに ${WORKER_COST} の費用がかかり、資本が ${WORKER_COST} 未満になると経済から外れます。市場があなたのアイデアにつけた評価が売上になり、投資家はそれを見てあなたに投資します。
+利用者の目的: ${goal}`
+        : `あなたは worker「${name}」で、会社「${c.name}」（id ${c.id}）に所属しています。
 利用者の目的: ${goal}
 会社の設計思想: ${c.philosophy || '未設定'}
 同僚: ${
-      e
-        .workersOf(c.id)
-        .filter((w) => w !== name)
-        .join(', ') || 'なし'
+            e
+              .workersOf(c.id)
+              .filter((w) => w !== name)
+              .join(', ') || 'なし'
+          }`
     }
 ${
   task
     ? `引き受けている仕事（id ${task.id}）: ${task.body}\n終えたら finish_task で結果を報告してください。`
-    : `会社のタスクプール:\n${pool.map((t) => `- id ${t.id}: ${t.body}`).join('\n') || '（ありません）'}\nやる仕事を claim_task で1つ引き受けてください。`
+    : solo
+      ? '次にやる仕事を start_task で1つ決めてください。目的に効き、ほかの worker のアイデアと重ならない仕事にしてください。'
+      : `会社のタスクプール:\n${pool.map((t) => `- id ${t.id}: ${t.body}`).join('\n') || '（ありません）'}\nやる仕事を claim_task で1つ引き受けてください。`
 }
 届いたメッセージ:
 ${messages.map((m) => `- ${m.from_agent}: ${m.content}`).join('\n') || '（ありません）'}
 受け取ったエントリー（decide_gift で自分用コンテキストに入れるか決める）:
 ${gifts.map((g) => `- id ${g.id}（${g.from_agent} から）: ${g.gist}`).join('\n') || '（ありません）'}
-会社の掲示板:
-${boardLines(e, c.id)}
-全社の最近のアイデア（重なる案は出さない）:
+${solo ? '' : `会社の掲示板:\n${boardLines(e, c.id)}\n`}全体の最近のアイデア（重なる案は出さない）:
 ${
   e
     .latestIdeas(15)
     .map(
       (i) =>
-        `- ${i.title}（会社 ${i.company_id}、評価 ${i.score ?? '未評価'}）`,
+        `- ${i.title}（${unit} ${i.company_id}、評価 ${i.score ?? '未評価'}）`,
     )
     .join('\n') || '（まだありません）'
 }
-会社の一覧:
+${unit}の一覧:
 ${companyList(e)}
 
 アイデアを出す前に、Web 検索で近い先行研究を調べてください。根拠のエントリーには、近い研究の URL と、それとの違いを書いてください（URL が無いと post_idea は受け付けません）。既にある手法なら、別の案に切り替えてください。
 検証できる部分は、run_command（ネットワークの無い隔離環境。/work が作業用ディレクトリ）で小さな実験のコードを書いて実行し、その結果も根拠に含めてください。
 成果は context_add（scope: shared）で共有コンテキストに残し、そのラベル（S…）を entry に付けて post_idea で市場に出してください。長い内容は file_write でファイルに書き、context_add の file で指せます。
 共有 DB は、ほかのエージェントとの調整用のデータにだけ使い、成果を置かないでください。
-進捗の報告、訂正、見つけた先行研究など、同僚に知らせたい内容は post_board と context_add に書いてください（誰も起こしません）。send_message は、返事が必要な質問や依頼を特定の同僚に送るときだけ使ってください（相手を起こします）。1回に送れるのは1通までです。
-ほかの会社との合併や、会社の分裂に賛成なら vote で投票できます。`,
+${
+  solo
+    ? '見つけた先行研究など、ほかの worker に知らせたい内容は context_add（scope: shared）に書いてください（誰も起こしません）。send_message は、返事が必要な質問や依頼を特定の worker に送るときだけ使ってください（相手を起こします）。1回に送れるのは1通までです。'
+    : `進捗の報告、訂正、見つけた先行研究など、同僚に知らせたい内容は post_board と context_add に書いてください（誰も起こしません）。send_message は、返事が必要な質問や依頼を特定の同僚に送るときだけ使ってください（相手を起こします）。1回に送れるのは1通までです。
+ほかの会社との合併や、会社の分裂に賛成なら vote で投票できます。`
+}`,
     done: () => e.markRead(messages.map((m) => m.id)),
     tools: [
-      tool(
-        'claim_task',
-        '自分の会社のタスクプールから仕事を引き受ける',
-        Type.Object({ id: Type.Number() }),
-        (args) => {
-          e.claimTask(name, number(args.id, 'id'))
-          return '引き受けました'
-        },
-      ),
+      solo
+        ? tool(
+            'start_task',
+            '次にやる仕事を自分で決めて引き受ける',
+            Type.Object({ body: Type.String({ description: '仕事の内容' }) }),
+            (args) => {
+              e.claimTask(name, e.addTask(c.id, text(args.body, 'body')))
+              return '引き受けました'
+            },
+          )
+        : tool(
+            'claim_task',
+            '自分の会社のタスクプールから仕事を引き受ける',
+            Type.Object({ id: Type.Number() }),
+            (args) => {
+              e.claimTask(name, number(args.id, 'id'))
+              return '引き受けました'
+            },
+          ),
       tool(
         'finish_task',
         '引き受けている仕事を終え、結果を報告する',
@@ -478,7 +511,10 @@ ${companyList(e)}
           return '投票しました'
         },
       ),
-    ],
+      // 個人モードには会社の掲示板も、合併・分裂もない
+    ].filter(
+      (t) => !solo || !['post_board', 'vote'].includes(t.definition.name),
+    ),
   }
 }
 
