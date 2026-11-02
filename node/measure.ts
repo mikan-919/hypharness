@@ -345,18 +345,20 @@ if (import.meta.main) {
       ['val', Number(val)],
       ['test', Number(test)],
     ] as const) {
-      const tasks = await generate(goal, count, complete)
-      console.log(`${split}: ${tasks.length} 個の課題が提出されました`)
-      for (const task of tasks) {
+      const r = await generate(goal, count, complete, async (task) => {
         const reason = await validate(task, (t) => relevance(goal, t, complete))
         if (reason) {
           m.reject(task, reason)
-          console.log(`  除外: ${reason}: ${task.statement.slice(0, 60)}`)
-        } else {
-          m.addTask(task, split)
-          console.log(`  採用: ${task.statement.slice(0, 60)}`)
+          console.log(
+            `  除外: ${task.statement.slice(0, 60)}\n    ${reason.split('\n')[0]}`,
+          )
+          return reason
         }
-      }
+        m.addTask(task, split)
+        console.log(`  採用: ${task.statement.slice(0, 60)}`)
+        return null
+      })
+      console.log(`${split}: 提出 ${r.submitted}、採用 ${r.accepted}`)
     }
   } else if (command === 'review') {
     // 抽出確認。課題・解答・判定を同系統のモデルが作るため、最終目的からのずれを人が見る

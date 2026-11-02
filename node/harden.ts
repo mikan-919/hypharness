@@ -3,7 +3,13 @@
 import { join } from 'node:path'
 import { attempt, checkout, DIR, type Measure } from './measure'
 import type { Complete } from './model'
-import { generate, relevance, type Split, validate } from './tasks'
+import {
+  type EvalTask,
+  generate,
+  relevance,
+  type Split,
+  validate,
+} from './tasks'
 
 // 基準版の解けた割合がこの範囲の課題だけを加える。0% の課題は差を測れず、意味のない難問へ寄る原因になる
 export const BAND = [0.2, 0.8] as const
@@ -98,22 +104,18 @@ export async function harden(
     at INTEGER NOT NULL
   )`)
   const before = baseRates(m, base, split)
-  const tasks = await generate(
-    goal,
-    count,
-    complete,
-    guidance(m, base, split, before),
-  )
   const agent = await checkout(base)
   const after = new Map(before)
   let valid = 0
-  let added = 0
-  for (const task of tasks) {
+  // 生成役には、選別の理由に加え、基準版の解けた割合も返す。易しすぎた課題を難しくする手がかりにする
+  const accept = async (task: EvalTask) => {
     const reason = await validate(task, (t) => relevance(goal, t, complete))
     if (reason) {
       m.reject(task, reason)
-      console.log(`  除外: ${reason}: ${task.statement.slice(0, 60)}`)
-      continue
+      console.log(
+        `  除外: ${task.statement.slice(0, 60)}\n    ${reason.split('\n')[0]}`,
+      )
+      return reason
     }
     valid++
     let ok = 0
@@ -130,15 +132,23 @@ export async function harden(
     }
     const rate = ok / SAMPLES
     if (!inBand(rate)) {
-      m.reject(task, `基準版の解けた割合 ${rate} が帯の外です`)
+      const reason = `評価対象のエージェントが ${SAMPLES} 回中 ${ok} 回解きました。${rate > BAND[1] ? '易しすぎます' : '難しすぎるか、課題文だけでは正解が決まりません'}`
+      m.reject(task, reason)
       console.log(`  帯の外（${rate}）: ${task.statement.slice(0, 60)}`)
-      continue
+      return reason
     }
     const id = m.addTask(task, split)
     after.set(id, { rate, n: SAMPLES })
-    added++
     console.log(`  採用（${rate}）: ${task.statement.slice(0, 60)}`)
+    return null
   }
+  const { submitted, accepted: added } = await generate(
+    goal,
+    count,
+    complete,
+    accept,
+    guidance(m, base, split, before),
+  )
   for (const id of stable(before, added)) {
     m.db.run('UPDATE tasks SET split = ? WHERE id = ?', [
       `retired-${split}`,
@@ -157,7 +167,7 @@ export async function harden(
     [
       split,
       base,
-      tasks.length,
+      submitted,
       valid,
       added,
       dist(before),
@@ -166,5 +176,5 @@ export async function harden(
       Date.now(),
     ],
   )
-  return { submitted: tasks.length, valid, added, before, after, flagged }
+  return { submitted, valid, added, before, after, flagged }
 }
