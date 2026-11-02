@@ -84,7 +84,9 @@ export async function harden(
   m: Measure,
   split: Split,
   count: number,
+  // 基準版に解かせるモデルと、課題を作り関連性を判定するモデル
   complete: Complete,
+  generator: Complete,
 ) {
   const base = m.meta('base')
   const goal = m.meta('goal')
@@ -109,7 +111,7 @@ export async function harden(
   let valid = 0
   // 生成役には、選別の理由に加え、基準版の解けた割合も返す。易しすぎた課題を難しくする手がかりにする
   const accept = async (task: EvalTask) => {
-    const reason = await validate(task, (t) => relevance(goal, t, complete))
+    const reason = await validate(task, (t) => relevance(goal, t, generator))
     if (reason) {
       m.reject(task, reason)
       console.log(
@@ -145,7 +147,7 @@ export async function harden(
   const { submitted, accepted: added } = await generate(
     goal,
     count,
-    complete,
+    generator,
     accept,
     guidance(m, base, split, before),
   )

@@ -295,6 +295,8 @@ export const summary = (rates: number[]) => {
   return { mean, std: Math.sqrt(variance) }
 }
 
+// 候補（解答役・改善役）が使うモデルは MODEL・REASONING で選ぶ。課題の生成役と関連性の判定役（固定部）は
+// GENERATOR_MODEL・GENERATOR_REASONING で別に選べる。同じモデルでは、候補がときどき解けない正しい課題を作りにくいため
 export async function models() {
   const m = createModels({ credentials: fileStore(join(DIR, 'auth.json')) })
   m.setProvider(openaiProvider())
@@ -303,18 +305,27 @@ export async function models() {
       `${DIR} で bunx @earendil-works/pi-ai login openai を実行してサインインしてください`,
     )
   }
+  const load = (role: string, name: string, reasoning?: string): Complete => {
+    const model = m.getModel('openai', name)
+    if (!model) throw new Error(`未対応のモデルです: ${name}`)
+    console.log(`${role}: ${name}、推論の深さ: ${reasoning ?? '既定'}`)
+    return (context) =>
+      m.complete(
+        model,
+        context,
+        reasoning ? ({ reasoningEffort: reasoning } as never) : undefined,
+      )
+  }
   const name = process.env.MODEL || 'gpt-6.1-sol'
-  const model = m.getModel('openai', name)
-  if (!model) throw new Error(`未対応のモデルです: ${name}`)
   const reasoning = process.env.REASONING
-  console.log(`モデル: ${name}、推論の深さ: ${reasoning ?? '既定'}`)
-  const complete: Complete = (context) =>
-    m.complete(
-      model,
-      context,
-      reasoning ? ({ reasoningEffort: reasoning } as never) : undefined,
-    )
-  return complete
+  return {
+    solver: load('候補のモデル', name, reasoning),
+    generator: load(
+      '生成役のモデル',
+      process.env.GENERATOR_MODEL || name,
+      process.env.GENERATOR_MODEL ? process.env.GENERATOR_REASONING : reasoning,
+    ),
+  }
 }
 
 if (import.meta.main) {
@@ -339,7 +350,7 @@ if (import.meta.main) {
       )
     }
     m.setMeta('goal', goal)
-    const complete = await models()
+    const { generator: complete } = await models()
     // 検証用と成績用は別の呼び出しで作り、互いの課題文を見せない
     for (const [split, count] of [
       ['val', Number(val)],
@@ -388,7 +399,8 @@ if (import.meta.main) {
       throw new Error('分割は val か test です')
     }
     const { harden, BAND } = await import('./harden')
-    const r = await harden(m, split, Number(count), await models())
+    const { solver, generator } = await models()
+    const r = await harden(m, split, Number(count), solver, generator)
     console.log(
       `提出 ${r.submitted}、選別を通過 ${r.valid}、帯（${BAND.join('〜')}）に入り追加 ${r.added}`,
     )
@@ -408,7 +420,7 @@ if (import.meta.main) {
       throw new Error('分割は val か test です')
     }
     const commit = (await Bun.$`git -C ${REPO} rev-parse ${rev}`.text()).trim()
-    const complete = await models()
+    const { solver: complete } = await models()
     const rates: number[] = []
     for (let i = 1; i <= Number(times); i++) {
       console.log(`${commit.slice(0, 7)} の計測 ${i}/${times}`)
@@ -429,7 +441,7 @@ if (import.meta.main) {
     const commit = (
       await Bun.$`git -C ${REPO} rev-parse ${start}`.text()
     ).trim()
-    const complete = await models()
+    const { solver: complete } = await models()
     for (let i = 1; i <= Number(times); i++) {
       console.log(`周回 ${i}/${times}`)
       await evolve(m, commit, complete)
