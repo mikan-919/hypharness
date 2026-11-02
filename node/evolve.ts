@@ -22,6 +22,32 @@ const GATE_TIMEOUT_MS = 5 * 60_000
 const IMPROVE_BUDGET = 10
 // 改善役に渡す1課題分の実行記録の上限
 const TRANSCRIPT_LIMIT = 20_000
+// ponytail: explore での1候補の変更行数（追加と削除の合計）の上限。RRSI の変更量の制限を固定の値で行う。徐々に絞る方式は記録が貯まってから
+const MAX_CHANGED_LINES = 120
+
+// simple は段階1の方式。explore は段階2bの方式で、弱点の抽出・改善対象の選択・変更量の上限を加える
+export type Policy = 'simple' | 'explore'
+// 改善対象。指示文は GEPA、1つの機能は ModularRSI、コード全体は SICA/DGM にあたる
+export const ARMS = {
+  prompt:
+    '変えてよいのは、モデルに渡す文章（INSTRUCTIONS やツールの説明）だけです。コードの動きは変えないでください',
+  module:
+    '変えてよいのは、ツール1つか関数1つだけです。ほかの部分は変えないでください',
+  code: '制御の流れを含め、/work/agent のどこを変えてもかまいません',
+} as const
+export type Arm = keyof typeof ARMS
+export type ArmStats = { arm: Arm; n: number; wins: number }
+
+// UCB1 で改善対象を選ぶ。試していない対象を先に選び、その後は勝率に試行回数の少なさの分を足した値が最大の対象を選ぶ
+export function ucb(stats: ArmStats[]): Arm {
+  const arms = Object.keys(ARMS) as Arm[]
+  const untried = arms.find((a) => !stats.some((s) => s.arm === a && s.n > 0))
+  if (untried) return untried
+  const total = stats.reduce((a, s) => a + s.n, 0)
+  const score = (s: ArmStats) =>
+    s.wins / s.n + Math.sqrt((2 * Math.log(total)) / s.n)
+  return stats.reduce((best, s) => (score(s) > score(best) ? s : best)).arm
+}
 
 type Status = 'base' | 'adopted' | 'measured' | 'rejected'
 export type Candidate = {
@@ -41,7 +67,30 @@ export function openLineage(m: Measure) {
     reason TEXT,
     created_at INTEGER NOT NULL
   )`)
+  // 段階2bで足した列。前のセッションの表にもなければ足す
+  const columns = new Set(
+    m.db
+      .query<{ name: string }, []>('PRAGMA table_info(candidates)')
+      .all()
+      .map((c) => c.name),
+  )
+  if (!columns.has('arm'))
+    m.db.run('ALTER TABLE candidates ADD COLUMN arm TEXT')
+  if (!columns.has('reward')) {
+    m.db.run('ALTER TABLE candidates ADD COLUMN reward INTEGER')
+  }
   return {
+    setArm: (commit: string, arm: Arm, reward: number) =>
+      m.db.run(
+        'UPDATE candidates SET arm = ?, reward = ? WHERE commit_id = ?',
+        [arm, reward, commit],
+      ),
+    armStats: () =>
+      m.db
+        .query<ArmStats, []>(
+          'SELECT arm, COUNT(*) AS n, SUM(reward) AS wins FROM candidates WHERE arm IS NOT NULL GROUP BY arm',
+        )
+        .all(),
     add: (c: Candidate) =>
       m.db.run(
         'INSERT INTO candidates (commit_id, parent, description, status, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)',
@@ -123,6 +172,7 @@ export async function gate(
   parent: string,
   commit: string,
   selfEdit: (agent: string) => Promise<boolean>,
+  maxLines = Number.POSITIVE_INFINITY,
   modules = join(REPO, 'node_modules'),
 ) {
   const changed = (
@@ -133,6 +183,18 @@ export async function gate(
   const outside = changed.filter((p) => !p.startsWith('agent/'))
   if (outside.length)
     return `進化対象の外を変更しています: ${outside.join(', ')}`
+  const lines = (
+    await Bun.$`git -C ${repo} diff --numstat ${parent} ${commit}`.text()
+  )
+    .split('\n')
+    .filter(Boolean)
+    .reduce((n, l) => {
+      const [added, removed] = l.split('\t')
+      return n + (Number(added) || 0) + (Number(removed) || 0)
+    }, 0)
+  if (lines > maxLines) {
+    return `変更が ${lines} 行で、上限の ${maxLines} 行を超えています`
+  }
 
   const dir = await mkdtemp(join(tmpdir(), 'hyph-gate-'))
   try {
@@ -200,6 +262,7 @@ async function improve(
   parent: string,
   complete: Complete,
   budget: Budget,
+  focus: string,
 ) {
   const work = await mkdtemp(join(tmpdir(), 'hyph-improve-'))
   try {
@@ -238,7 +301,7 @@ async function improve(
 /work/runs に、検証用課題での実行記録があります。記録から失敗の原因や無駄な費用を見つけ、成功率を上げるか、成功率を保ったまま費用を下げるように /work/agent を変更してください。
 - 変更は /work/agent の中だけにしてください。それ以外は採用されません
 - /task.md・/work・/model.sock を使う動き方は変えないでください
-- 最後に、変更内容を1〜3行で /work/CHANGE.md に書いてください`,
+- 最後に、変更内容を1〜3行で /work/CHANGE.md に書いてください${focus && `\n${focus}`}`,
       complete,
       budget,
       () => {},
@@ -260,6 +323,51 @@ async function improve(
   } finally {
     await rm(work, { recursive: true, force: true })
   }
+}
+
+// 弱点の抽出（Self-Harness、ModularRSI の対比分析）。親の検証用課題での成功と失敗の応答を並べ、
+// 失敗に共通する原因を生成役のモデル（固定部）にまとめさせる
+async function weakness(m: Measure, parent: string, generator: Complete) {
+  const rows = m.db
+    .query<{ ok: number; statement: string; reply: string }, [string]>(
+      `SELECT r.ok, t.statement, (SELECT reply FROM calls WHERE run_id = r.id ORDER BY id DESC LIMIT 1) AS reply
+        FROM runs r JOIN tasks t ON t.id = r.task_id
+        WHERE r.measurement_id IN (SELECT id FROM measurements WHERE commit_id = ? AND split = 'val')
+          AND t.split = 'val'`,
+    )
+    .all(parent)
+  const failed = rows.filter((r) => !r.ok)
+  if (!failed.length)
+    return '検証用課題での失敗はありません。費用を下げる変更を考えてください。'
+  const show = (r: (typeof rows)[number]) =>
+    `課題文: ${r.statement.slice(0, 500)}\n最後の応答: ${(r.reply ?? '').slice(-3000)}`
+  const reply = await generator({
+    systemPrompt:
+      'あなたは AI エージェントの実行記録を分析する役です。日本語で簡潔に答えてください。',
+    messages: [
+      {
+        role: 'user',
+        content: `エージェントが成功した例と失敗した例です。両者を比べ、失敗に共通する原因を3つまで、根拠とともに箇条書きにしてください。エージェントのコードをどう変えるべきかの案も1行ずつ付けてください。
+
+## 成功した例
+${
+  rows
+    .filter((r) => r.ok)
+    .slice(0, 3)
+    .map(show)
+    .join('\n---\n') || 'なし'
+}
+
+## 失敗した例
+${failed.slice(0, 5).map(show).join('\n---\n')}`,
+        timestamp: Date.now(),
+      },
+    ],
+  })
+  return reply.content
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n')
 }
 
 // 成功率が高い候補ほど選ばれやすくし、低い候補にも機会を残す
@@ -286,7 +394,13 @@ const ensure = async (
 }
 
 // 1周。採否は基準版と比べる。親が基準版より低い候補でも、親を上回っただけでは基準版にしない
-export async function evolve(m: Measure, start: string, complete: Complete) {
+export async function evolve(
+  m: Measure,
+  start: string,
+  complete: Complete,
+  generator: Complete,
+  policy: Policy = 'simple',
+) {
   const lineage = openLineage(m)
   let base = m.meta('base')
   if (!base) {
@@ -307,15 +421,27 @@ export async function evolve(m: Measure, start: string, complete: Complete) {
     (Number(m.meta('budget:val')) / m.tasks('val').length) * BUDGET_MARGIN
   await ensure(m, parent.commit_id, 'val', complete)
 
-  const { commit, description } = await improve(m, parent.commit_id, complete, {
-    limit: perTask * IMPROVE_BUDGET,
-    spent: 0,
-  })
+  const arm = policy === 'explore' ? ucb(lineage.armStats()) : null
+  const focus = arm
+    ? `- 改善対象: ${ARMS[arm]}
+- 変更は合計 ${MAX_CHANGED_LINES} 行以内にしてください
+- 実行記録を分析した、失敗に共通する原因:
+${await weakness(m, parent.commit_id, generator)}`
+    : ''
+  if (arm) console.log(`改善対象: ${arm}`)
+  const { commit, description } = await improve(
+    m,
+    parent.commit_id,
+    complete,
+    { limit: perTask * IMPROVE_BUDGET, spent: 0 },
+    focus,
+  )
   if (!commit) {
     console.log('改善役は agent/ を変更しませんでした')
     return null
   }
   const reject = (reason: string) => {
+    if (arm) lineage.setArm(commit, arm, 0)
     lineage.set(commit, 'rejected', reason)
     console.log(`不採用: ${reason}`)
     return { commit, status: 'rejected' as const, reason }
@@ -328,13 +454,23 @@ export async function evolve(m: Measure, start: string, complete: Complete) {
     reason: null,
   })
   console.log(`候補: ${commit.slice(0, 7)}（${description}）`)
-  const reason = await gate(REPO, parent.commit_id, commit, (agent) =>
-    selfEdit(agent, complete, { limit: perTask * IMPROVE_BUDGET, spent: 0 }),
+  const reason = await gate(
+    REPO,
+    parent.commit_id,
+    commit,
+    (agent) =>
+      selfEdit(agent, complete, { limit: perTask * IMPROVE_BUDGET, spent: 0 }),
+    arm ? MAX_CHANGED_LINES : undefined,
   )
   if (reason) return reject(reason)
 
   const childVal = (await measure(m, commit, 'val', complete)).ok
   const total = m.tasks('val').length
+  // UCB1 の報酬は、候補が親を検証用で上回ったか
+  if (arm) {
+    const parentVal = rate(m, parent.commit_id, 'val') ?? 0
+    lineage.setArm(commit, arm, childVal / total > parentVal ? 1 : 0)
+  }
   const delta = childVal / total - baseVal
   // ponytail: ばらつきの2倍を超えた差だけを本物とみなす。課題が少ないうちは検定を使わない
   if (delta <= 2 * noise(m, base)) {
