@@ -8,6 +8,10 @@ import type { Complete } from './model'
 import { sandbox } from './sandbox'
 
 const CHECK_TIMEOUT_MS = 60_000
+// 生成役に返す判定の出力の上限
+const OUTPUT_LIMIT = 1500
+// ponytail: 生成役は選別の結果を見て3回まで出し直せる。帯に入る課題が足りなければ増やす
+const ROUNDS = 3
 
 export type Split = 'val' | 'test'
 type Files = Record<string, string>
@@ -37,42 +41,50 @@ export async function writeFiles(dir: string, files: Files) {
 
 // 作業用ディレクトリの複製に判定用ファイルを足し、別の隔離環境で判定コマンドを実行する。
 // 解答役が判定用ファイルと同じ名前のファイルを置いていても、判定用ファイルで上書きする
-export async function judge(task: EvalTask, work: string) {
+async function check(task: EvalTask, work: string) {
   const dir = await mkdtemp(join(tmpdir(), 'hyph-judge-'))
   try {
     await Bun.$`cp -a ${work}/. ${dir}`.quiet()
     await writeFiles(dir, task.check_files)
-    const child = Bun.spawn(sandbox(dir, task.check), {
-      stdout: 'ignore',
+    const child = Bun.spawn(sandbox(dir, `exec 2>&1\n${task.check}`), {
+      stdout: 'pipe',
       stderr: 'ignore',
       timeout: CHECK_TIMEOUT_MS,
     })
-    return (await child.exited) === 0
+    const [output, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      child.exited,
+    ])
+    return { ok: code === 0, output }
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
 }
+
+export const judge = async (task: EvalTask, work: string) =>
+  (await check(task, work)).ok
 
 async function passes(task: EvalTask, answer: Files) {
   const dir = await mkdtemp(join(tmpdir(), 'hyph-task-'))
   try {
     await writeFiles(dir, task.files)
     await writeFiles(dir, answer)
-    return await judge(task, dir)
+    return await check(task, dir)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
 }
 
-// 表に入れてよい課題なら null、だめなら理由を返す
+// 表に入れてよい課題なら null、だめなら理由を返す。理由は生成役にも返すため、判定の出力を付ける
 export async function validate(
   task: EvalTask,
   relevant: (task: EvalTask) => Promise<boolean>,
 ): Promise<string | null> {
-  if (!(await passes(task, task.solution))) {
-    return '模範解答が判定を通りません'
+  const solved = await passes(task, task.solution)
+  if (!solved.ok) {
+    return `模範解答が判定を通りません。判定の出力（末尾）:\n${solved.output.slice(-OUTPUT_LIMIT)}`
   }
-  if (await passes(task, {})) return '空の解答が判定を通ります'
+  if ((await passes(task, {})).ok) return '空の解答が判定を通ります'
   if (!(await relevant(task))) return '最終目的に関係しません'
   return null
 }
@@ -137,11 +149,15 @@ const asTask = (args: Record<string, unknown>): EvalTask | null =>
 const toolCalls = (reply: Awaited<ReturnType<Complete>>) =>
   reply.content.filter((b): b is ToolCall => b.type === 'toolCall')
 
-// 最終目的の文章から課題を作らせる。選別は呼び出し側が validate で行う
+// 最終目的の文章から課題を作らせる。提出のたびに accept で選別し、その結果をツールの結果として返す。
+// 生成役は除外の理由（判定の出力や基準版の解けた割合）を見て出し直せる。
+// accept は採用なら null、除外なら生成役に返す理由を返す。guidance には、敵対的強化のときに基準版の成績と失敗の記録を渡す
 export async function generate(
   goal: string,
   count: number,
   complete: Complete,
+  accept: (task: EvalTask) => Promise<string | null>,
+  guidance = '',
 ) {
   const context: Context = {
     systemPrompt:
@@ -156,17 +172,50 @@ ${goal}
 - 解答役は課題文と files だけを見て、ネットワークのない Linux の隔離環境（sh、coreutils、bun がある）で解きます
 - 判定は機械で行います。check は終了コード0で成功を表すコマンドにし、テストや期待値は check_files に入れてください
 - 何もしない解答では判定を通らないようにしてください
-- solution は files に重ねると判定を通る模範解答です`,
+- solution は files に重ねると判定を通る模範解答です${guidance && `\n\n${guidance}`}`,
         timestamp: Date.now(),
       },
     ],
     tools: [submitTask],
   }
-  const reply = await complete(context)
-  return toolCalls(reply)
-    .filter((c) => c.name === submitTask.name)
-    .map((c) => asTask(c.arguments))
-    .filter((t): t is EvalTask => t !== null)
+  let submitted = 0
+  let accepted = 0
+  for (let round = 0; round < ROUNDS && accepted < count; round++) {
+    const reply = await complete(context)
+    context.messages.push(reply)
+    const calls = toolCalls(reply)
+    // 採用が足りないまま文章だけで応答したときは、除外の理由を踏まえて出し直すよう促す
+    if (!calls.length) {
+      context.messages.push({
+        role: 'user',
+        content: `採用はまだ ${accepted}/${count} 個です。除外の理由を踏まえて、submit_task で課題を出し直してください。`,
+        timestamp: Date.now(),
+      })
+      continue
+    }
+    for (const call of calls) {
+      const task = call.name === submitTask.name ? asTask(call.arguments) : null
+      const reason = task
+        ? await accept(task)
+        : 'submit_task の引数の形式が不正です'
+      submitted++
+      if (!reason) accepted++
+      context.messages.push({
+        role: 'toolResult',
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [
+          {
+            type: 'text',
+            text: `${reason ? `除外しました: ${reason}` : '採用しました'}\n採用は ${accepted}/${count} 個です`,
+          },
+        ],
+        isError: Boolean(reason),
+        timestamp: Date.now(),
+      })
+    }
+  }
+  return { submitted, accepted }
 }
 
 const verdict = {

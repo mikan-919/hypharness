@@ -5,6 +5,8 @@
 //   bun run measure <セッション> review [件数]
 //   bun run measure <セッション> run <コミット> [回数] [val|test]
 //   bun run measure <セッション> evolve [周回数] [最初の基準版のコミット]
+//   bun run measure <セッション> harden [val|test] [生成する数]
+//   bun run measure <セッション> flag <課題の番号>
 import { Database } from 'bun:sqlite'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
@@ -95,10 +97,15 @@ export function openMeasure(path: string) {
         'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
         [key, value],
       ),
-    addTask(task: EvalTask, split: Split) {
-      db.run(
-        'INSERT INTO tasks (split, statement, files, check_command, check_files, solution, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [
+    addTask: (task: EvalTask, split: Split) =>
+      db
+        .query<
+          { id: number },
+          [string, string, string, string, string, string, number]
+        >(
+          'INSERT INTO tasks (split, statement, files, check_command, check_files, solution, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id',
+        )
+        .get(
           split,
           task.statement,
           JSON.stringify(task.files),
@@ -106,9 +113,7 @@ export function openMeasure(path: string) {
           JSON.stringify(task.check_files),
           JSON.stringify(task.solution),
           Date.now(),
-        ],
-      )
-    },
+        )?.id as number,
     reject: (task: EvalTask, reason: string) =>
       db.run('INSERT INTO rejected (task, reason) VALUES (?, ?)', [
         JSON.stringify(task),
@@ -290,6 +295,8 @@ export const summary = (rates: number[]) => {
   return { mean, std: Math.sqrt(variance) }
 }
 
+// 候補（解答役・改善役）が使うモデルは MODEL・REASONING で選ぶ。課題の生成役と関連性の判定役（固定部）は
+// GENERATOR_MODEL・GENERATOR_REASONING で別に選べる。同じモデルでは、候補がときどき解けない正しい課題を作りにくいため
 export async function models() {
   const m = createModels({ credentials: fileStore(join(DIR, 'auth.json')) })
   m.setProvider(openaiProvider())
@@ -298,18 +305,27 @@ export async function models() {
       `${DIR} で bunx @earendil-works/pi-ai login openai を実行してサインインしてください`,
     )
   }
+  const load = (role: string, name: string, reasoning?: string): Complete => {
+    const model = m.getModel('openai', name)
+    if (!model) throw new Error(`未対応のモデルです: ${name}`)
+    console.log(`${role}: ${name}、推論の深さ: ${reasoning ?? '既定'}`)
+    return (context) =>
+      m.complete(
+        model,
+        context,
+        reasoning ? ({ reasoningEffort: reasoning } as never) : undefined,
+      )
+  }
   const name = process.env.MODEL || 'gpt-6.1-sol'
-  const model = m.getModel('openai', name)
-  if (!model) throw new Error(`未対応のモデルです: ${name}`)
   const reasoning = process.env.REASONING
-  console.log(`モデル: ${name}、推論の深さ: ${reasoning ?? '既定'}`)
-  const complete: Complete = (context) =>
-    m.complete(
-      model,
-      context,
-      reasoning ? ({ reasoningEffort: reasoning } as never) : undefined,
-    )
-  return complete
+  return {
+    solver: load('候補のモデル', name, reasoning),
+    generator: load(
+      '生成役のモデル',
+      process.env.GENERATOR_MODEL || name,
+      process.env.GENERATOR_MODEL ? process.env.GENERATOR_REASONING : reasoning,
+    ),
+  }
 }
 
 if (import.meta.main) {
@@ -334,32 +350,69 @@ if (import.meta.main) {
       )
     }
     m.setMeta('goal', goal)
-    const complete = await models()
+    const { generator: complete } = await models()
     // 検証用と成績用は別の呼び出しで作り、互いの課題文を見せない
     for (const [split, count] of [
       ['val', Number(val)],
       ['test', Number(test)],
     ] as const) {
-      const tasks = await generate(goal, count, complete)
-      console.log(`${split}: ${tasks.length} 個の課題が提出されました`)
-      for (const task of tasks) {
+      const r = await generate(goal, count, complete, async (task) => {
         const reason = await validate(task, (t) => relevance(goal, t, complete))
         if (reason) {
           m.reject(task, reason)
-          console.log(`  除外: ${reason}: ${task.statement.slice(0, 60)}`)
-        } else {
-          m.addTask(task, split)
-          console.log(`  採用: ${task.statement.slice(0, 60)}`)
+          console.log(
+            `  除外: ${task.statement.slice(0, 60)}\n    ${reason.split('\n')[0]}`,
+          )
+          return reason
         }
-      }
+        m.addTask(task, split)
+        console.log(`  採用: ${task.statement.slice(0, 60)}`)
+        return null
+      })
+      console.log(`${split}: 提出 ${r.submitted}、採用 ${r.accepted}`)
     }
   } else if (command === 'review') {
     // 抽出確認。課題・解答・判定を同系統のモデルが作るため、最終目的からのずれを人が見る
-    const all = m.tasks()
+    // 最終目的に関係しない課題は flag で外す。外した割合を強化の記録に残す
+    const all = [...m.tasks('val'), ...m.tasks('test')]
     const n = Math.min(Number(args[0] ?? 3), all.length)
     for (const t of all.sort(() => Math.random() - 0.5).slice(0, n)) {
       console.log(JSON.stringify(t, null, 2))
     }
+    m.setMeta('reviewed', String(Number(m.meta('reviewed') ?? 0) + n))
+    console.log(
+      `関係しない課題は bun run measure ${session} flag <番号> で外してください`,
+    )
+  } else if (command === 'flag') {
+    const id = Number(args[0])
+    const changed = m.db.run(
+      "UPDATE tasks SET split = 'flagged' WHERE id = ? AND split IN ('val', 'test')",
+      [id],
+    ).changes
+    if (!changed)
+      throw new Error(`検証用・成績用に課題 ${args[0]} がありません`)
+    m.setMeta('flagged', String(Number(m.meta('flagged') ?? 0) + 1))
+    console.log(`課題 ${id} を外しました`)
+  } else if (command === 'harden') {
+    const [split = 'val', count = '6'] = args
+    if (split !== 'val' && split !== 'test') {
+      throw new Error('分割は val か test です')
+    }
+    const { harden, BAND } = await import('./harden')
+    const { solver, generator } = await models()
+    const r = await harden(m, split, Number(count), solver, generator)
+    console.log(
+      `提出 ${r.submitted}、選別を通過 ${r.valid}、帯（${BAND.join('〜')}）に入り追加 ${r.added}`,
+    )
+    console.log(
+      '強化前の解けた割合:',
+      Object.fromEntries([...r.before].map(([id, x]) => [id, x.rate])),
+    )
+    console.log(
+      '強化後の解けた割合:',
+      Object.fromEntries([...r.after].map(([id, x]) => [id, x.rate])),
+    )
+    console.log(`抽出確認で関係なしとされた割合: ${r.flagged ?? '未確認'}`)
   } else if (command === 'run') {
     const [rev, times = '1', split = 'val'] = args
     if (!rev) throw new Error('コミットを指定してください')
@@ -367,7 +420,7 @@ if (import.meta.main) {
       throw new Error('分割は val か test です')
     }
     const commit = (await Bun.$`git -C ${REPO} rev-parse ${rev}`.text()).trim()
-    const complete = await models()
+    const { solver: complete } = await models()
     const rates: number[] = []
     for (let i = 1; i <= Number(times); i++) {
       console.log(`${commit.slice(0, 7)} の計測 ${i}/${times}`)
@@ -388,7 +441,7 @@ if (import.meta.main) {
     const commit = (
       await Bun.$`git -C ${REPO} rev-parse ${start}`.text()
     ).trim()
-    const complete = await models()
+    const { solver: complete } = await models()
     for (let i = 1; i <= Number(times); i++) {
       console.log(`周回 ${i}/${times}`)
       await evolve(m, commit, complete)
@@ -396,7 +449,7 @@ if (import.meta.main) {
     console.log(`基準版: ${m.meta('base')}`)
   } else {
     console.log(
-      '使い方: bun run measure <セッション> generate|review|run|evolve',
+      '使い方: bun run measure <セッション> generate|review|run|evolve|harden|flag',
     )
   }
 }

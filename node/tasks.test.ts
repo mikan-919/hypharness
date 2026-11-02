@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai'
 import { attempt } from './measure'
 import { type Budget, type Complete, serveModel } from './model'
-import { type EvalTask, validate } from './tasks'
+import { type EvalTask, generate, validate } from './tasks'
 
 const task = (t: Partial<EvalTask>): EvalTask => ({
   statement: 'answer.txt に 42 と書いてください',
@@ -21,7 +21,7 @@ test('模範解答が通らない課題・空の解答で通る課題・目的�
   expect(await validate(task({}), always)).toBeNull()
   expect(
     await validate(task({ solution: { 'answer.txt': '41' } }), always),
-  ).toBe('模範解答が判定を通りません')
+  ).toStartWith('模範解答が判定を通りません')
   expect(await validate(task({ check: 'true' }), always)).toBe(
     '空の解答が判定を通ります',
   )
@@ -108,3 +108,49 @@ test('判定用ファイルは解答役から読めず、上書きしても判�
   expect(outputs).not.toContain('SECRET-MARKER')
   expect(outputs).not.toContain('agent-writable')
 }, 120_000)
+
+test('生成役は除外の理由を受け取り、出し直した課題で採用数を満たせる', async () => {
+  const submit = (statement: string) =>
+    reply([
+      {
+        type: 'toolCall',
+        id: statement,
+        name: 'submit_task',
+        arguments: { ...task({ statement }) },
+      },
+    ])
+  const contexts: Context[] = []
+  const complete: Complete = async (context) => {
+    contexts.push(structuredClone(context))
+    return submit(contexts.length === 1 ? '最初の課題' : '直した課題')
+  }
+  const result = await generate('目的', 1, complete, async (t) =>
+    t.statement === '最初の課題' ? '判定の出力: No tests found!' : null,
+  )
+  expect(result).toEqual({ submitted: 2, accepted: 1 })
+  // 2回目の呼び出しで、生成役は1回目の除外の理由を見ている
+  expect(JSON.stringify(contexts[1].messages.at(-1))).toContain(
+    'No tests found!',
+  )
+})
+
+test('採用が足りないまま文章だけで応答した生成役に、出し直しを促す', async () => {
+  let calls = 0
+  const complete: Complete = async () => {
+    calls++
+    return calls === 1
+      ? reply([{ type: 'text', text: 'これ以上は難しくできません' }])
+      : reply([
+          {
+            type: 'toolCall',
+            id: 'x',
+            name: 'submit_task',
+            arguments: { ...task({}) },
+          },
+        ])
+  }
+  expect(await generate('目的', 1, complete, async () => null)).toEqual({
+    submitted: 1,
+    accepted: 1,
+  })
+})
