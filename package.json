@@ -6,6 +6,7 @@
     "format": "biome check --write",
     "typecheck": "cf workers types && tsrs && tsrs -p node",
     "node": "bun run node/index.ts",
+    "measure": "bun run node/measure.ts",
     "test": "bun test",
     "dev": "vite",
     "build": "vite build",
