@@ -184,7 +184,15 @@ ${goal}
     const reply = await complete(context)
     context.messages.push(reply)
     const calls = toolCalls(reply)
-    if (!calls.length) break
+    // 採用が足りないまま文章だけで応答したときは、除外の理由を踏まえて出し直すよう促す
+    if (!calls.length) {
+      context.messages.push({
+        role: 'user',
+        content: `採用はまだ ${accepted}/${count} 個です。除外の理由を踏まえて、submit_task で課題を出し直してください。`,
+        timestamp: Date.now(),
+      })
+      continue
+    }
     for (const call of calls) {
       const task = call.name === submitTask.name ? asTask(call.arguments) : null
       const reason = task

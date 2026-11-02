@@ -133,3 +133,24 @@ test('生成役は除外の理由を受け取り、出し直した課題で採�
     'No tests found!',
   )
 })
+
+test('採用が足りないまま文章だけで応答した生成役に、出し直しを促す', async () => {
+  let calls = 0
+  const complete: Complete = async () => {
+    calls++
+    return calls === 1
+      ? reply([{ type: 'text', text: 'これ以上は難しくできません' }])
+      : reply([
+          {
+            type: 'toolCall',
+            id: 'x',
+            name: 'submit_task',
+            arguments: { ...task({}) },
+          },
+        ])
+  }
+  expect(await generate('目的', 1, complete, async () => null)).toEqual({
+    submitted: 1,
+    accepted: 1,
+  })
+})
