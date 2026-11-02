@@ -137,11 +137,13 @@ const asTask = (args: Record<string, unknown>): EvalTask | null =>
 const toolCalls = (reply: Awaited<ReturnType<Complete>>) =>
   reply.content.filter((b): b is ToolCall => b.type === 'toolCall')
 
-// 最終目的の文章から課題を作らせる。選別は呼び出し側が validate で行う
+// 最終目的の文章から課題を作らせる。選別は呼び出し側が validate で行う。
+// guidance には、敵対的強化のときに基準版の成績と失敗の記録を渡す
 export async function generate(
   goal: string,
   count: number,
   complete: Complete,
+  guidance = '',
 ) {
   const context: Context = {
     systemPrompt:
@@ -156,7 +158,7 @@ ${goal}
 - 解答役は課題文と files だけを見て、ネットワークのない Linux の隔離環境（sh、coreutils、bun がある）で解きます
 - 判定は機械で行います。check は終了コード0で成功を表すコマンドにし、テストや期待値は check_files に入れてください
 - 何もしない解答では判定を通らないようにしてください
-- solution は files に重ねると判定を通る模範解答です`,
+- solution は files に重ねると判定を通る模範解答です${guidance && `\n\n${guidance}`}`,
         timestamp: Date.now(),
       },
     ],

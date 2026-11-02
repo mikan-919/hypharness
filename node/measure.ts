@@ -5,6 +5,8 @@
 //   bun run measure <セッション> review [件数]
 //   bun run measure <セッション> run <コミット> [回数] [val|test]
 //   bun run measure <セッション> evolve [周回数] [最初の基準版のコミット]
+//   bun run measure <セッション> harden [val|test] [生成する数]
+//   bun run measure <セッション> flag <課題の番号>
 import { Database } from 'bun:sqlite'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
@@ -95,10 +97,15 @@ export function openMeasure(path: string) {
         'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
         [key, value],
       ),
-    addTask(task: EvalTask, split: Split) {
-      db.run(
-        'INSERT INTO tasks (split, statement, files, check_command, check_files, solution, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [
+    addTask: (task: EvalTask, split: Split) =>
+      db
+        .query<
+          { id: number },
+          [string, string, string, string, string, string, number]
+        >(
+          'INSERT INTO tasks (split, statement, files, check_command, check_files, solution, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id',
+        )
+        .get(
           split,
           task.statement,
           JSON.stringify(task.files),
@@ -106,9 +113,7 @@ export function openMeasure(path: string) {
           JSON.stringify(task.check_files),
           JSON.stringify(task.solution),
           Date.now(),
-        ],
-      )
-    },
+        )?.id as number,
     reject: (task: EvalTask, reason: string) =>
       db.run('INSERT INTO rejected (task, reason) VALUES (?, ?)', [
         JSON.stringify(task),
@@ -355,11 +360,45 @@ if (import.meta.main) {
     }
   } else if (command === 'review') {
     // 抽出確認。課題・解答・判定を同系統のモデルが作るため、最終目的からのずれを人が見る
-    const all = m.tasks()
+    // 最終目的に関係しない課題は flag で外す。外した割合を強化の記録に残す
+    const all = [...m.tasks('val'), ...m.tasks('test')]
     const n = Math.min(Number(args[0] ?? 3), all.length)
     for (const t of all.sort(() => Math.random() - 0.5).slice(0, n)) {
       console.log(JSON.stringify(t, null, 2))
     }
+    m.setMeta('reviewed', String(Number(m.meta('reviewed') ?? 0) + n))
+    console.log(
+      `関係しない課題は bun run measure ${session} flag <番号> で外してください`,
+    )
+  } else if (command === 'flag') {
+    const id = Number(args[0])
+    const changed = m.db.run(
+      "UPDATE tasks SET split = 'flagged' WHERE id = ? AND split IN ('val', 'test')",
+      [id],
+    ).changes
+    if (!changed)
+      throw new Error(`検証用・成績用に課題 ${args[0]} がありません`)
+    m.setMeta('flagged', String(Number(m.meta('flagged') ?? 0) + 1))
+    console.log(`課題 ${id} を外しました`)
+  } else if (command === 'harden') {
+    const [split = 'val', count = '6'] = args
+    if (split !== 'val' && split !== 'test') {
+      throw new Error('分割は val か test です')
+    }
+    const { harden, BAND } = await import('./harden')
+    const r = await harden(m, split, Number(count), await models())
+    console.log(
+      `提出 ${r.submitted}、選別を通過 ${r.valid}、帯（${BAND.join('〜')}）に入り追加 ${r.added}`,
+    )
+    console.log(
+      '強化前の解けた割合:',
+      Object.fromEntries([...r.before].map(([id, x]) => [id, x.rate])),
+    )
+    console.log(
+      '強化後の解けた割合:',
+      Object.fromEntries([...r.after].map(([id, x]) => [id, x.rate])),
+    )
+    console.log(`抽出確認で関係なしとされた割合: ${r.flagged ?? '未確認'}`)
   } else if (command === 'run') {
     const [rev, times = '1', split = 'val'] = args
     if (!rev) throw new Error('コミットを指定してください')
@@ -396,7 +435,7 @@ if (import.meta.main) {
     console.log(`基準版: ${m.meta('base')}`)
   } else {
     console.log(
-      '使い方: bun run measure <セッション> generate|review|run|evolve',
+      '使い方: bun run measure <セッション> generate|review|run|evolve|harden|flag',
     )
   }
 }
