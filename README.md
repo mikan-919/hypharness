@@ -22,7 +22,7 @@ bun run node       # ノードを起動する。別の URL に接続するとき
 
 ## 候補を測る
 
-最終目的はセッションごとに変わるため、課題と予算の基準はセッション名ごとに `~/.hyph/sessions/<セッション>.sqlite` に分けて保存する。モデルは `MODEL`・`REASONING` の環境変数で選び、サインインは `~/.hyph` で `bunx @earendil-works/pi-ai login openai` を実行して行う。
+最終目的はセッションごとに変わるため、課題と予算の基準はセッション名ごとに `~/.hyph/sessions/<セッション>.sqlite` に分けて保存する。候補（解答役・改善役）のモデルは `MODEL`・`REASONING` の環境変数で選ぶ。課題の生成役と関連性の判定役は `GENERATOR_MODEL`・`GENERATOR_REASONING` で別に選べ、未設定なら候補と同じモデルを使う。候補と同じモデルでは、候補がときどき解けない正しい課題を作りにくい。サインインは `~/.hyph` で `bunx @earendil-works/pi-ai login openai` を実行して行う。
 
 ```sh
 bun run measure <セッション> generate <最終目的のファイル> [検証用の数] [成績用の数]  # 課題を生成して選別する

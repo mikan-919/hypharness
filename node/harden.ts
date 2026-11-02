@@ -120,18 +120,20 @@ export async function harden(
       return reason
     }
     valid++
-    let ok = 0
+    const probes: { ok: boolean; code: number | null; cost: number }[] = []
     for (let i = 0; i < SAMPLES; i++) {
+      const budget = { limit: null, spent: 0 }
       const r = await attempt(
         task,
         agent,
         complete,
-        { limit: null, spent: 0 },
+        budget,
         () => {},
         join(DIR, 'logs', `harden-${Date.now()}.log`),
       )
-      if (r.ok) ok++
+      probes.push({ ...r, cost: budget.spent })
     }
+    const ok = probes.filter((p) => p.ok).length
     const rate = ok / SAMPLES
     if (!inBand(rate)) {
       const reason = `評価対象のエージェントが ${SAMPLES} 回中 ${ok} 回解きました。${rate > BAND[1] ? '易しすぎます' : '難しすぎるか、課題文だけでは正解が決まりません'}`
@@ -140,6 +142,11 @@ export async function harden(
       return reason
     }
     const id = m.addTask(task, split)
+    // 基準版に解かせた結果を計測として残し、次の強化で強化前の解けた割合に含める。
+    // 課題1件だけの計測は課題数と合わないため、採否の成功率とばらつきには使われない
+    const measurement = m.startMeasurement(base, split, null)
+    for (const p of probes) m.addRun(measurement, id, p.ok, p.cost, p.code)
+    m.finishMeasurement(measurement)
     after.set(id, { rate, n: SAMPLES })
     console.log(`  採用（${rate}）: ${task.statement.slice(0, 60)}`)
     return null
