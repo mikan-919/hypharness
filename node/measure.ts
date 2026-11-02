@@ -4,6 +4,7 @@
 //   bun run measure <セッション> generate <最終目的のファイル> [検証用の数] [成績用の数]
 //   bun run measure <セッション> review [件数]
 //   bun run measure <セッション> run <コミット> [回数] [val|test]
+//   bun run measure <セッション> evolve [周回数] [最初の基準版のコミット]
 import { Database } from 'bun:sqlite'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
@@ -24,14 +25,14 @@ import {
   writeFiles,
 } from './tasks'
 
-const DIR = join(homedir(), '.hyph')
-const REPO = join(import.meta.dir, '..')
+export const DIR = join(homedir(), '.hyph')
+export const REPO = join(import.meta.dir, '..')
 // ponytail: 解答役を同時に4つまで動かす。ノードの CPU とモデルの流量制限を見て変える
 const CONCURRENCY = 4
 const AGENT_TIMEOUT_MS = 10 * 60_000
 // ponytail: 1課題の予算は、基準の計測での1課題あたりの費用の2倍。同じ費用で上限を切ると、
 // ばらつきで基準版自身が予算切れになり成功率が下がるため、余裕を持たせる。採否の記録が貯まったら見直す
-const BUDGET_MARGIN = 2
+export const BUDGET_MARGIN = 2
 
 type Row = EvalTask & { id: number; split: Split }
 type Measurement = { id: number; ok: number; total: number; cost: number }
@@ -166,7 +167,7 @@ export function openMeasure(path: string) {
 export type Measure = ReturnType<typeof openMeasure>
 
 // 候補の agent/ をコミットから取り出す。作業ツリーの未コミットの変更は含まない
-async function checkout(commit: string) {
+export async function checkout(commit: string) {
   const dir = join(DIR, 'candidates', commit)
   if (!existsSync(join(dir, 'agent'))) {
     const temporary = `${dir}.tmp`
@@ -178,21 +179,20 @@ async function checkout(commit: string) {
   return join(dir, 'agent')
 }
 
-// 1課題を候補に解かせる。隔離環境に見せるのは、作業用ディレクトリ・課題文・候補のコード・モデル中継のソケットだけ
-export async function attempt(
-  task: EvalTask,
+// 候補のエージェントを、作業用ディレクトリ work で動かす。隔離環境に見せるのは、作業用ディレクトリ・課題文・
+// 候補のコード・モデル中継のソケットだけ。終了コードを返す
+export async function runAgent(
   agent: string,
+  work: string,
+  statement: string,
   complete: Complete,
   budget: Budget,
   onCall: Parameters<typeof serveModel>[3],
   log: string,
 ) {
-  const root = await mkdtemp(join(tmpdir(), 'hyph-attempt-'))
-  const work = join(root, 'work')
+  const root = await mkdtemp(join(tmpdir(), 'hyph-agent-'))
   const socket = join(root, 'model.sock')
-  await mkdir(work)
-  await writeFiles(work, task.files)
-  await Bun.write(join(root, 'task.md'), task.statement)
+  await Bun.write(join(root, 'task.md'), statement)
   const server = serveModel(socket, complete, budget, onCall)
   try {
     const child = Bun.spawn(
@@ -203,11 +203,37 @@ export async function attempt(
       ]),
       { stdout: Bun.file(log), stderr: 'inherit', timeout: AGENT_TIMEOUT_MS },
     )
-    const code = await child.exited
-    return { ok: await judge(task, work), code }
+    return await child.exited
   } finally {
     server.stop(true)
     await rm(root, { recursive: true, force: true })
+  }
+}
+
+// 1課題を候補に解かせ、判定コマンドで成否を決める
+export async function attempt(
+  task: EvalTask,
+  agent: string,
+  complete: Complete,
+  budget: Budget,
+  onCall: Parameters<typeof serveModel>[3],
+  log: string,
+) {
+  const work = await mkdtemp(join(tmpdir(), 'hyph-work-'))
+  try {
+    await writeFiles(work, task.files)
+    const code = await runAgent(
+      agent,
+      work,
+      task.statement,
+      complete,
+      budget,
+      onCall,
+      log,
+    )
+    return { ok: await judge(task, work), code }
+  } finally {
+    await rm(work, { recursive: true, force: true })
   }
 }
 
@@ -264,7 +290,7 @@ export const summary = (rates: number[]) => {
   return { mean, std: Math.sqrt(variance) }
 }
 
-async function models() {
+export async function models() {
   const m = createModels({ credentials: fileStore(join(DIR, 'auth.json')) })
   m.setProvider(openaiProvider())
   if (!(await m.getAuth('openai'))) {
@@ -356,8 +382,22 @@ if (import.meta.main) {
     console.log(
       `予算の基準（${split} 1回分）: $${Number(m.meta(`budget:${split}`)).toFixed(4)}`,
     )
+  } else if (command === 'evolve') {
+    const [times = '1', start = 'HEAD'] = args
+    const { evolve } = await import('./evolve')
+    const commit = (
+      await Bun.$`git -C ${REPO} rev-parse ${start}`.text()
+    ).trim()
+    const complete = await models()
+    for (let i = 1; i <= Number(times); i++) {
+      console.log(`周回 ${i}/${times}`)
+      await evolve(m, commit, complete)
+    }
+    console.log(`基準版: ${m.meta('base')}`)
   } else {
-    console.log('使い方: bun run measure <セッション> generate|review|run')
+    console.log(
+      '使い方: bun run measure <セッション> generate|review|run|evolve',
+    )
   }
 }
 
