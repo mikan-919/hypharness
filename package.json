@@ -4,8 +4,8 @@
   "scripts": {
     "lint": "biome check",
     "format": "biome check --write",
-    "typecheck": "cf workers types && tsrs && tsrs -p runner",
-    "runner": "bun run runner/index.ts",
+    "typecheck": "cf workers types && tsrs && tsrs -p node",
+    "node": "bun run node/index.ts",
     "test": "bun test",
     "dev": "vite",
     "build": "vite build",

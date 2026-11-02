@@ -5,8 +5,8 @@ import { csrf } from 'hono/csrf'
 import { createMiddleware } from 'hono/factory'
 import { HTTPException } from 'hono/http-exception'
 import type { Accounts, RelyingParty, User } from './accounts'
+import type { Relay } from './relay'
 import { rootView } from './renderer'
-import type { Runner } from './runner'
 
 type AppEnv = { Bindings: Env; Variables: { user: User } }
 
@@ -14,8 +14,8 @@ type AppEnv = { Bindings: Env; Variables: { user: User } }
 const accounts = (env: Env) =>
   (env.ACCOUNTS as DurableObjectNamespace<Accounts>).getByName('default')
 
-const runner = (env: Env, userId: string) =>
-  (env.RUNNER as DurableObjectNamespace<Runner>).getByName(userId)
+const relay = (env: Env, userId: string) =>
+  (env.RELAY as DurableObjectNamespace<Relay>).getByName(userId)
 
 const relyingParty = (c: Context): RelyingParty => {
   const url = new URL(c.req.url)
@@ -64,9 +64,26 @@ const routes = app
   .get('/', auth, async (c) =>
     c.render('Home', {
       user: c.var.user,
-      runnerConnected: await runner(c.env, c.var.user.id).connected(),
+      status: await relay(c.env, c.var.user.id).status(),
     }),
   )
+  .get('/status', auth, async (c) =>
+    c.json(await relay(c.env, c.var.user.id).status()),
+  )
+  .post('/tasks', auth, async (c) => {
+    const { command } = await c.req.json<{ command?: unknown }>()
+    if (typeof command !== 'string' || !command.trim()) {
+      return c.json({ error: 'command に文字列を指定してください' }, 400)
+    }
+    return c.json({ id: await relay(c.env, c.var.user.id).add(command) })
+  })
+  .get('/tasks/:id/history', auth, async (c) => {
+    const id = Number(c.req.param('id'))
+    if (!Number.isSafeInteger(id)) {
+      return c.json({ error: 'タスクの番号が不正です' }, 400)
+    }
+    return c.json(await relay(c.env, c.var.user.id).history(id))
+  })
   .get('/login', (c) => c.render('Login'))
   .post('/auth/register/options', async (c) => {
     const { name } = await c.req.json<{ name?: unknown }>()
@@ -106,11 +123,18 @@ const routes = app
     deleteCookie(c, 'session', { path: '/' })
     return c.json({ ok: true })
   })
-  // ランナーのペアリング。申し込みと受け取りはログインしていないランナーから届く
-  .post('/runner/pairings', async (c) =>
-    c.json(await accounts(c.env).startPairing()),
-  )
-  .post('/runner/pairings/claim', async (c) => {
+  // ノードのペアリング。申し込みと受け取りはログインしていないノードから届く
+  .post('/node/pairings', async (c) => {
+    const { name } = await c.req.json<{ name?: unknown }>()
+    if (typeof name !== 'string' || !/^[\w.-]{1,64}$/.test(name)) {
+      return c.json(
+        { error: 'name は英数字と _ . - の64文字以内にしてください' },
+        400,
+      )
+    }
+    return c.json(await accounts(c.env).startPairing(name))
+  })
+  .post('/node/pairings/claim', async (c) => {
     const { id } = await c.req.json<{ id?: unknown }>()
     if (typeof id !== 'string') {
       return c.json({ error: 'id に文字列を指定してください' }, 400)
@@ -118,7 +142,7 @@ const routes = app
     const result = await accounts(c.env).claimPairing(id)
     return c.json(result, 'error' in result ? 410 : 200)
   })
-  .post('/runner/pairings/approve', auth, async (c) => {
+  .post('/node/pairings/approve', auth, async (c) => {
     const { code } = await c.req.json<{ code?: unknown }>()
     if (typeof code !== 'string') {
       return c.json({ error: 'code に文字列を指定してください' }, 400)
@@ -127,73 +151,18 @@ const routes = app
       ? c.json({ ok: true })
       : c.json({ error: 'コードが見つからないか、有効期限が切れています' }, 400)
   })
-  // 手元のランナーが WebSocket で接続する。Cookie ではなくランナー用トークンで認証する
-  .get('/runner/socket', async (c) => {
+  // ノードが WebSocket で接続する。Cookie ではなくノード用トークンで認証し、
+  // ノードの ID と名前は中継へのヘッダーで渡す。ノードが送ったヘッダーは上書きする
+  .get('/node/socket', async (c) => {
     const token = c.req.header('Authorization')?.replace(/^Bearer /, '')
-    const user = token ? await accounts(c.env).runnerUser(token) : null
-    if (!user) return c.json({ error: 'ランナー用トークンが不正です' }, 401)
-    return runner(c.env, user.id).fetch(c.req.raw)
-  })
-  // 経済のループ。状態と操作はランナーにあり、Worker は中継する
-  .get('/economy', auth, async (c) => {
-    const stub = runner(c.env, c.var.user.id)
-    return c.render('Economy', {
-      status: (await stub.connected())
-        ? await stub.call({ method: 'status' })
-        : null,
-    })
-  })
-  .get('/economy/status', auth, async (c) =>
-    c.json(await runner(c.env, c.var.user.id).call({ method: 'status' })),
-  )
-  .post('/economy/goal', auth, async (c) => {
-    const { goal, mode } = await c.req.json<{
-      goal?: unknown
-      mode?: unknown
-    }>()
-    if (typeof goal !== 'string' || !goal.trim()) {
-      return c.json({ error: '目的を入力してください' }, 400)
-    }
-    if (mode !== undefined && mode !== 'company' && mode !== 'solo') {
-      return c.json({ error: '方式は company か solo です' }, 400)
-    }
-    return c.json(
-      await runner(c.env, c.var.user.id).call({
-        method: 'setGoal',
-        goal,
-        mode,
-      }),
-    )
-  })
-  .post('/economy/:action{start|stop}', auth, async (c) =>
-    c.json(
-      await runner(c.env, c.var.user.id).call({
-        method: c.req.param('action'),
-      }),
-    ),
-  )
-  .post('/agents/:name/chat', auth, async (c) => {
-    const name = c.req.param('name')
-    const { message } = await c.req.json<{ message?: unknown }>()
-    if (!/^[\w-]{1,32}$/.test(name)) {
-      return c.json(
-        { error: 'エージェント名は英数字と _ - の32文字以内です' },
-        400,
-      )
-    }
-    if (typeof message !== 'string' || !message.trim()) {
-      return c.json({ error: 'message に文字列を指定してください' }, 400)
-    }
-    // エージェントの記憶と処理はランナーにあるため、ランナーが止まっていると応答できない
-    const stub = runner(c.env, c.var.user.id)
-    if (!(await stub.connected())) {
-      return c.json({ error: 'ランナーが接続されていません' }, 503)
-    }
-    return c.body(await stub.chat(name, message), 200, {
-      'content-type': 'application/x-ndjson',
-    })
+    const owner = token ? await accounts(c.env).nodeOwner(token) : null
+    if (!owner) return c.json({ error: 'ノード用トークンが不正です' }, 401)
+    const headers = new Headers(c.req.raw.headers)
+    headers.set('x-node-id', owner.node.id)
+    headers.set('x-node-name', owner.node.name)
+    return relay(c.env, owner.userId).fetch(new Request(c.req.raw, { headers }))
   })
 
 export default routes
 export { Accounts } from './accounts'
-export { Runner } from './runner'
+export { Relay } from './relay'

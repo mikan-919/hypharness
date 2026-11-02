@@ -7,6 +7,7 @@ import {
   verifyAuthenticationResponse,
   verifyRegistrationResponse,
 } from '@simplewebauthn/server'
+import type { NodeInfo } from './queue'
 
 const CHALLENGE_TTL = 5 * 60_000
 const PAIRING_TTL = 10 * 60_000
@@ -49,13 +50,18 @@ export class Accounts extends DurableObject<Env> {
         user_id TEXT NOT NULL REFERENCES users(id),
         expires INTEGER NOT NULL
       );
-      CREATE TABLE IF NOT EXISTS runner_tokens (
+      DROP TABLE IF EXISTS runner_tokens;
+      DROP TABLE IF EXISTS runner_pairings;
+      CREATE TABLE IF NOT EXISTS node_tokens (
         id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL UNIQUE REFERENCES users(id)
+        user_id TEXT NOT NULL REFERENCES users(id),
+        node_id TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL
       );
-      CREATE TABLE IF NOT EXISTS runner_pairings (
+      CREATE TABLE IF NOT EXISTS node_pairings (
         id TEXT PRIMARY KEY,
         code TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
         user_id TEXT REFERENCES users(id),
         expires INTEGER NOT NULL
       );
@@ -183,11 +189,11 @@ export class Accounts extends DurableObject<Env> {
     return row ?? null
   }
 
-  // ランナーのペアリング: ランナーが申し込んでコードを表示し、利用者がログインした画面でコードを承認する。
-  // id はランナーだけが知る値で、承認後にこれと引き換えにトークンを受け取る
-  async startPairing() {
+  // ノードのペアリング: ノードが申し込んでコードを表示し、利用者がログインした画面でコードを承認する。
+  // id はノードだけが知る値で、承認後にこれと引き換えにトークンを受け取る
+  async startPairing(name: string) {
     this.ctx.storage.sql.exec(
-      'DELETE FROM runner_pairings WHERE expires <= ?',
+      'DELETE FROM node_pairings WHERE expires <= ?',
       Date.now(),
     )
     const id = crypto.randomUUID()
@@ -195,9 +201,10 @@ export class Accounts extends DurableObject<Env> {
       .map((b) => CODE_CHARS[b % CODE_CHARS.length])
       .join('')
     this.ctx.storage.sql.exec(
-      'INSERT INTO runner_pairings (id, code, expires) VALUES (?, ?, ?)',
+      'INSERT INTO node_pairings (id, code, name, expires) VALUES (?, ?, ?, ?)',
       await hash(id),
       code,
+      name,
       Date.now() + PAIRING_TTL,
     )
     return { id, code }
@@ -205,7 +212,7 @@ export class Accounts extends DurableObject<Env> {
 
   approvePairing(code: string, userId: string) {
     const { rowsWritten } = this.ctx.storage.sql.exec(
-      'UPDATE runner_pairings SET user_id = ? WHERE code = ? AND user_id IS NULL AND expires > ?',
+      'UPDATE node_pairings SET user_id = ? WHERE code = ? AND user_id IS NULL AND expires > ?',
       userId,
       code.toUpperCase(),
       Date.now(),
@@ -219,8 +226,8 @@ export class Accounts extends DurableObject<Env> {
     { status: 'pending' } | { token: string; name: string } | { error: string }
   > {
     const pairing = this.ctx.storage.sql
-      .exec<{ user_id: string | null; expires: number }>(
-        'SELECT user_id, expires FROM runner_pairings WHERE id = ?',
+      .exec<{ user_id: string | null; name: string; expires: number }>(
+        'SELECT user_id, name, expires FROM node_pairings WHERE id = ?',
         await hash(id),
       )
       .toArray()[0]
@@ -229,34 +236,36 @@ export class Accounts extends DurableObject<Env> {
     }
     if (!pairing.user_id) return { status: 'pending' }
     this.ctx.storage.sql.exec(
-      'DELETE FROM runner_pairings WHERE id = ?',
+      'DELETE FROM node_pairings WHERE id = ?',
       await hash(id),
     )
     const user = this.ctx.storage.sql
       .exec<User>('SELECT id, name FROM users WHERE id = ?', pairing.user_id)
       .one()
-    return { token: await this.issueRunnerToken(user.id), name: user.name }
-  }
-
-  // ランナー用のトークンはアカウントごとに1つ。発行し直すと古いトークンは使えなくなる
-  private async issueRunnerToken(userId: string) {
+    // トークンはノードごとに発行する。1つのアカウントに複数のノードを接続できる
     const token = crypto.randomUUID()
     this.ctx.storage.sql.exec(
-      'INSERT INTO runner_tokens (id, user_id) VALUES (?, ?) ON CONFLICT (user_id) DO UPDATE SET id = excluded.id',
+      'INSERT INTO node_tokens (id, user_id, node_id, name) VALUES (?, ?, ?, ?)',
       await hash(token),
-      userId,
+      user.id,
+      crypto.randomUUID(),
+      pairing.name,
     )
-    return token
+    return { token, name: user.name }
   }
 
-  async runnerUser(token: string): Promise<User | null> {
+  async nodeOwner(
+    token: string,
+  ): Promise<{ userId: string; node: NodeInfo } | null> {
     const row = this.ctx.storage.sql
-      .exec<User>(
-        'SELECT u.id, u.name FROM runner_tokens r JOIN users u ON u.id = r.user_id WHERE r.id = ?',
+      .exec<{ user_id: string; node_id: string; name: string }>(
+        'SELECT user_id, node_id, name FROM node_tokens WHERE id = ?',
         await hash(token),
       )
       .toArray()[0]
-    return row ?? null
+    return row
+      ? { userId: row.user_id, node: { id: row.node_id, name: row.name } }
+      : null
   }
 
   async logout(token: string) {

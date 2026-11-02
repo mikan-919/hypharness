@@ -11,14 +11,14 @@ export default defineConfig({
         worker: 'hypharness',
         exportName: 'Accounts',
       }),
-      RUNNER: bindings.durableObject({
+      RELAY: bindings.durableObject({
         worker: 'hypharness',
-        exportName: 'Runner',
+        exportName: 'Relay',
       }),
     },
     exports: {
       Accounts: exports.durableObject({ storage: 'sqlite' }),
-      Runner: exports.durableObject({ storage: 'sqlite' }),
+      Relay: exports.durableObject({ storage: 'sqlite' }),
     },
   },
 })

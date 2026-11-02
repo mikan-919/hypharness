@@ -1,61 +1,110 @@
-import { Link, router } from '@inertiajs/react'
-import { type FormEvent, useState } from 'react'
+import { router } from '@inertiajs/react'
+import { type FormEvent, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { post } from '@/lib/api'
 import type { PageProps } from '../pages.gen'
+import type { HistoryEvent } from '../queue'
 
-export default function Home({ user, runnerConnected }: PageProps<'Home'>) {
+// ponytail: 状態は3秒ごとに取り直す。ノードやタスクが増えて重くなったら、中継から変更を送る
+const POLL_MS = 3000
+
+export default function Home({ user, status }: PageProps<'Home'>) {
+  useEffect(() => {
+    const timer = setInterval(
+      () => router.reload({ only: ['status'] }),
+      POLL_MS,
+    )
+    return () => clearInterval(timer)
+  }, [])
+
   const logout = async () => {
     await post('/auth/logout')
     router.visit('/login')
   }
+  const names = new Map(status.nodes.map((n) => [n.id, n.name]))
 
   return (
-    <main className='mx-auto flex max-w-2xl flex-col gap-6 p-8'>
+    <main className='mx-auto flex max-w-3xl flex-col gap-8 p-4 sm:p-8'>
       <header className='flex items-center justify-between'>
         <h1 className='text-2xl font-bold'>{user.name}</h1>
-        <div className='flex items-center gap-3'>
-          <Link href='/economy' className='text-sm underline'>
-            経済
-          </Link>
-          <Button variant='outline' onClick={logout}>
-            ログアウト
-          </Button>
-        </div>
+        <Button variant='outline' onClick={logout}>
+          ログアウト
+        </Button>
       </header>
-      <RunnerSetup connected={runnerConnected} />
-      <Chat />
+      <section className='flex flex-col gap-2 text-sm'>
+        <h2 className='text-lg font-bold'>ノード</h2>
+        {status.nodes.length ? (
+          <ul className='list-disc pl-5'>
+            {status.nodes.map((n) => (
+              <li key={n.id}>{n.name}</li>
+            ))}
+          </ul>
+        ) : (
+          <p>
+            接続中のノードはありません。手元で bun run node
+            を実行し、表示されたコードを入力してください。
+          </p>
+        )}
+        <Pairing />
+      </section>
+      <section className='flex flex-col gap-2 text-sm'>
+        <h2 className='text-lg font-bold'>タスク</h2>
+        <NewTask />
+        <div className='overflow-x-auto'>
+          <table className='w-full text-left'>
+            <thead>
+              <tr>
+                <th>番号</th>
+                <th>コマンド</th>
+                <th>状態</th>
+                <th>ノード</th>
+                <th>世代</th>
+                <th>終了コード</th>
+              </tr>
+            </thead>
+            <tbody>
+              {status.tasks.map((t) => (
+                <tr key={t.id} className='align-top'>
+                  <td>
+                    <History id={t.id} />
+                  </td>
+                  <td className='font-mono break-all'>{t.command}</td>
+                  <td>{t.state}</td>
+                  <td>{t.node ? (names.get(t.node) ?? '切断中') : ''}</td>
+                  <td>{t.generation}</td>
+                  <td>{t.code ?? ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </main>
   )
 }
 
-function RunnerSetup({ connected }: { connected: boolean }) {
+function Pairing() {
   const [code, setCode] = useState('')
   const [notice, setNotice] = useState('')
 
   const approve = async (e: FormEvent) => {
     e.preventDefault()
     try {
-      await post('/runner/pairings/approve', { code })
+      await post('/node/pairings/approve', { code })
       setCode('')
-      setNotice('承認しました。ランナーが接続するまで数秒かかります。')
+      setNotice('承認しました。ノードが接続するまで数秒かかります。')
     } catch (e) {
       setNotice(e instanceof Error ? e.message : String(e))
     }
   }
 
   return (
-    <section className='flex flex-col gap-2 text-sm'>
-      <p>
-        {connected
-          ? 'ランナーが接続中です。'
-          : 'ランナーが未接続のため、エージェントは応答できません。手元で bun run runner を実行し、表示されたコードを入力してください。'}
-      </p>
+    <>
       <form className='flex gap-2' onSubmit={approve}>
         <Input
-          aria-label='ランナーのコード'
-          placeholder='ランナーのコード'
+          aria-label='ノードのコード'
+          placeholder='ノードのコード'
           value={code}
           onChange={(e) => setCode(e.target.value)}
           required
@@ -65,108 +114,76 @@ function RunnerSetup({ connected }: { connected: boolean }) {
         </Button>
       </form>
       {notice && <p>{notice}</p>}
-    </section>
+    </>
   )
 }
 
-type Line = { role: 'user' | 'assistant'; content: string }
-
-function Chat() {
-  const [agent, setAgent] = useState('default')
-  const [message, setMessage] = useState('')
-  const [lines, setLines] = useState<Line[]>([])
-  const [sending, setSending] = useState(false)
+function NewTask() {
+  const [command, setCommand] = useState('')
   const [error, setError] = useState('')
 
-  const send = async (e: FormEvent) => {
+  const add = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
-    setSending(true)
-    setLines((prev) => [
-      ...prev,
-      { role: 'user', content: message },
-      { role: 'assistant', content: '' },
-    ])
-    // 届いた差分を最後の応答に追記する
-    const append = (delta: string) =>
-      setLines((prev) => [
-        ...prev.slice(0, -1),
-        { role: 'assistant', content: prev[prev.length - 1].content + delta },
-      ])
     try {
-      const response = await fetch(
-        `/agents/${encodeURIComponent(agent)}/chat`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ message }),
-        },
-      )
-      if (!response.ok || !response.body) {
-        const json = (await response.json()) as { error?: string }
-        throw new Error(json.error ?? `${response.status}`)
-      }
-      setMessage('')
-      // 応答は1行に1つの JSON で届く。行の途中で区切られた分は次の読み込みとつなげる
-      const reader = response.body
-        .pipeThrough(new TextDecoderStream())
-        .getReader()
-      let buffer = ''
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += value
-        const parts = buffer.split('\n')
-        buffer = parts.pop() ?? ''
-        for (const part of parts) {
-          const event = JSON.parse(part) as { delta?: string; error?: string }
-          if (event.error) throw new Error(event.error)
-          if (event.delta) append(event.delta)
-        }
-      }
+      await post('/tasks', { command })
+      setCommand('')
+      router.reload({ only: ['status'] })
     } catch (e) {
-      // 本文が届く前に失敗した場合は、空の応答を残さない
-      setLines((prev) =>
-        prev.at(-1)?.content === '' ? prev.slice(0, -1) : prev,
-      )
       setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setSending(false)
     }
   }
 
   return (
-    <section className='flex flex-col gap-3'>
-      <Input
-        aria-label='エージェント名'
-        value={agent}
-        onChange={(e) => {
-          setAgent(e.target.value)
-          setLines([])
-        }}
-      />
-      <ul className='flex flex-col gap-2'>
-        {lines.map((line, i) => (
-          // 表示用の一時的な履歴で、並べ替えや削除はしない
-          // biome-ignore lint/suspicious/noArrayIndexKey: 追記のみの一覧
-          <li key={i} className={line.role === 'user' ? 'text-right' : ''}>
-            <span className='inline-block whitespace-pre-wrap rounded-lg bg-muted px-3 py-2'>
-              {line.content}
-            </span>
+    <>
+      <form className='flex gap-2' onSubmit={add}>
+        <Input
+          aria-label='コマンド'
+          placeholder='隔離環境で実行するコマンド'
+          className='font-mono'
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          required
+        />
+        <Button type='submit'>追加</Button>
+      </form>
+      {error && <p className='text-destructive'>{error}</p>}
+    </>
+  )
+}
+
+// 番号を押すと、そのタスクの実行履歴（割り当て・期限切れ・報告）を開く
+function History({ id }: { id: number }) {
+  const [events, setEvents] = useState<HistoryEvent[] | null>(null)
+  const [error, setError] = useState('')
+
+  const load = async () => {
+    setError('')
+    try {
+      const response = await fetch(`/tasks/${id}/history`)
+      const json = (await response.json()) as HistoryEvent[] & {
+        error?: string
+      }
+      if (!response.ok) throw new Error(json.error ?? `${response.status}`)
+      setEvents(json)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  return (
+    <details onToggle={(e) => e.currentTarget.open && load()}>
+      <summary className='cursor-pointer'>{id}</summary>
+      {error && <p className='text-destructive'>{error}</p>}
+      <ul>
+        {events?.map((e) => (
+          <li key={`${e.at}-${e.kind}`}>
+            {new Date(e.at).toLocaleTimeString('ja-JP')} {e.kind} 世代
+            {e.generation}
+            {e.code !== null && ` 終了コード ${e.code}`}
           </li>
         ))}
       </ul>
-      <form className='flex gap-2' onSubmit={send}>
-        <Input
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          required
-        />
-        <Button type='submit' disabled={sending}>
-          送信
-        </Button>
-      </form>
-      {error && <p className='text-destructive text-sm'>{error}</p>}
-    </section>
+    </details>
   )
 }
