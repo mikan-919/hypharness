@@ -358,10 +358,18 @@ async function rounds(
         await Bun.$`git -C ${work} reset -q --hard && git -C ${work} clean -fdq`.quiet()
       }
       const task = call.name === submit.name ? asTask(args, workspace) : null
+      // 不正なファイル名は、生成全体を止めずに除外の理由として返す
+      const bad = task
+        ? [task.files, task.check_files, task.solution]
+            .flatMap(Object.keys)
+            .find((p) => !safePath(p))
+        : undefined
       pending.push(
-        (task
-          ? accept(task)
-          : Promise.resolve('submit_task の引数の形式が不正です')
+        (!task
+          ? Promise.resolve('submit_task の引数の形式が不正です')
+          : bad !== undefined
+            ? Promise.resolve(`ファイル名が不正です: ${bad}`)
+            : accept(task)
         ).then((reason) => {
           if (!reason) accepted++
           return {

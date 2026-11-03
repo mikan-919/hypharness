@@ -375,3 +375,25 @@ test('作業領域の課題では、生成役が /work でシェルを使い、�
   expect(JSON.stringify(contexts[3].messages.at(-1))).toContain('old')
   expect(JSON.stringify(contexts[3].messages.at(-1))).not.toContain('hidden')
 })
+
+test('不正なファイル名の課題は、生成を止めずに除外の理由として返す', async () => {
+  const contexts: Context[] = []
+  const complete: Complete = async (context) => {
+    contexts.push(structuredClone(context))
+    return reply([
+      {
+        type: 'toolCall',
+        id: String(contexts.length),
+        name: 'submit_task',
+        arguments: { ...task({ check_files: { '.': 'x' } }) },
+      },
+    ])
+  }
+  expect(await generate('目的', 1, complete, async () => null)).toEqual({
+    submitted: 3,
+    accepted: 0,
+  })
+  expect(JSON.stringify(contexts[1].messages.at(-1))).toContain(
+    'ファイル名が不正です: .',
+  )
+})
