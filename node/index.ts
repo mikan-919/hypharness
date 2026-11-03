@@ -3,6 +3,7 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { type Grant, LEASE_MS, type RelayMessage } from '../src/queue'
 import { openDeploy } from './deploy'
+import { openIdeas } from './ideas'
 import {
   attempt,
   BUDGET_MARGIN,
@@ -10,6 +11,7 @@ import {
   DIR,
   models,
   openMeasure,
+  withMemory,
 } from './measure'
 import type { Budget } from './model'
 
@@ -135,7 +137,8 @@ async function run(task: Grant) {
   try {
     const result = await attempt(
       {
-        statement: task.statement,
+        // 経済のループで採用された方針（記憶）を課題文の前に置く
+        statement: withMemory(openIdeas(m).memory(), task.statement),
         files: {},
         check: task.check ?? 'true',
         check_files: {},

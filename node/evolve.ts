@@ -120,7 +120,7 @@ export function rate(m: Measure, commit: string, split: Split) {
   // 繰り返し測った版は平均で比べる。ばらつき（noise）と同じ計測群を使うため
   const row = m.db
     .query<{ r: number | null }, [string, string, number]>(
-      'SELECT AVG(CAST(ok AS REAL) / total) AS r FROM measurements WHERE commit_id = ? AND split = ? AND total = ?',
+      "SELECT AVG(CAST(ok AS REAL) / total) AS r FROM measurements WHERE commit_id = ? AND split = ? AND total = ? AND memory = ''",
     )
     .get(commit, split, m.tasks(split).length)
   return row?.r ?? null
@@ -130,7 +130,7 @@ export function rate(m: Measure, commit: string, split: Split) {
 const rates = (m: Measure, commit: string, split: Split) =>
   m.db
     .query<{ r: number }, [string, string, number]>(
-      'SELECT CAST(ok AS REAL) / total AS r FROM measurements WHERE commit_id = ? AND split = ? AND total = ? ORDER BY id',
+      "SELECT CAST(ok AS REAL) / total AS r FROM measurements WHERE commit_id = ? AND split = ? AND total = ? AND memory = '' ORDER BY id",
     )
     .all(commit, split, m.tasks(split).length)
     .map((x) => x.r)
@@ -284,7 +284,7 @@ async function improve(
         [string]
       >(
         `SELECT r.task_id, r.ok, r.cost, r.id AS run FROM runs r
-          WHERE r.measurement_id = (SELECT MAX(id) FROM measurements WHERE commit_id = ? AND split = 'val')`,
+          WHERE r.measurement_id = (SELECT MAX(id) FROM measurements WHERE commit_id = ? AND split = 'val' AND memory = '')`,
       )
       .all(parent)
     const statements = new Map(
@@ -342,7 +342,7 @@ async function weakness(m: Measure, parent: string, generator: Complete) {
     .query<{ ok: number; statement: string; reply: string }, [string]>(
       `SELECT r.ok, t.statement, (SELECT reply FROM calls WHERE run_id = r.id ORDER BY id DESC LIMIT 1) AS reply
         FROM runs r JOIN tasks t ON t.id = r.task_id
-        WHERE r.measurement_id IN (SELECT id FROM measurements WHERE commit_id = ? AND split = 'val')
+        WHERE r.measurement_id IN (SELECT id FROM measurements WHERE commit_id = ? AND split = 'val' AND memory = '')
           AND t.split = 'val'`,
     )
     .all(parent)
