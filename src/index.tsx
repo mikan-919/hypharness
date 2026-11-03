@@ -60,6 +60,37 @@ app.onError((err, c) => {
   return c.json({ error: err.message }, 500)
 })
 
+// 暗号化した作業領域の大きさの上限
+const CHECKPOINT_LIMIT = 10 * 1024 * 1024
+
+const toHex = (buffer: ArrayBuffer) =>
+  [...new Uint8Array(buffer)]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+
+// チェックポイントの読み書きの対象。ノードのトークンと、そのノードが今の実行権を持つことを確かめる
+async function checkpointTarget(c: Context<AppEnv>) {
+  const token = c.req.header('Authorization')?.replace(/^Bearer /, '')
+  const owner = token ? await accounts(c.env).nodeOwner(token) : null
+  if (!owner) return c.json({ error: 'ノード用トークンが不正です' }, 401)
+  const id = Number(c.req.param('id'))
+  const generation = Number(c.req.param('generation'))
+  if (!Number.isSafeInteger(id) || !Number.isSafeInteger(generation)) {
+    return c.json({ error: 'タスクの番号か世代が不正です' }, 400)
+  }
+  const stub = relay(c.env, owner.userId)
+  if (!(await stub.holds(id, generation, owner.node.id))) {
+    return c.json({ error: '実行権を持っていません' }, 409)
+  }
+  return {
+    relay: stub,
+    id,
+    generation,
+    node: owner.node.id,
+    key: `${owner.userId}/${id}`,
+  }
+}
+
 // 中継に置くタスクの大きさの上限
 const STATEMENT_LIMIT = 20_000
 const CHECK_LIMIT = 2_000
@@ -181,6 +212,42 @@ const routes = app
   })
   // ノードが WebSocket で接続する。Cookie ではなくノード用トークンで認証し、
   // ノードの ID と名前は中継へのヘッダーで渡す。ノードが送ったヘッダーは上書きする
+  // チェックポイントは、そのタスクの今の実行権を持つノードだけが読み書きできる。中身はノードが暗号化しており、中継は復号できない
+  .put('/node/checkpoints/:id/:generation', async (c) => {
+    const target = await checkpointTarget(c)
+    if (target instanceof Response) return target
+    const declared = Number(c.req.header('content-length'))
+    if (!(declared > 0 && declared <= CHECKPOINT_LIMIT)) {
+      return c.json(
+        { error: `チェックポイントは ${CHECKPOINT_LIMIT} バイトまでです` },
+        413,
+      )
+    }
+    const body = await c.req.arrayBuffer()
+    if (body.byteLength > CHECKPOINT_LIMIT) {
+      return c.json(
+        { error: `チェックポイントは ${CHECKPOINT_LIMIT} バイトまでです` },
+        413,
+      )
+    }
+    const hash = toHex(await crypto.subtle.digest('SHA-256', body))
+    await c.env.CHECKPOINTS.put(target.key, body)
+    const ok = await target.relay.checkpoint(
+      target.id,
+      target.generation,
+      target.node,
+      hash,
+    )
+    if (!ok) return c.json({ error: '実行権を持っていません' }, 409)
+    return c.json({ hash })
+  })
+  .get('/node/checkpoints/:id/:generation', async (c) => {
+    const target = await checkpointTarget(c)
+    if (target instanceof Response) return target
+    const object = await c.env.CHECKPOINTS.get(target.key)
+    if (!object) return c.json({ error: 'チェックポイントがありません' }, 404)
+    return new Response(object.body)
+  })
   .get('/node/socket', async (c) => {
     const token = c.req.header('Authorization')?.replace(/^Bearer /, '')
     const owner = token ? await accounts(c.env).nodeOwner(token) : null

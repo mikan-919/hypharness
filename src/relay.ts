@@ -86,6 +86,14 @@ export class Relay extends DurableObject<Env> {
     return id
   }
 
+  holds(id: number, generation: number, node: string) {
+    return this.queue.holds(id, generation, node, Date.now())
+  }
+
+  checkpoint(id: number, generation: number, node: string, hash: string) {
+    return this.queue.checkpoint(id, generation, node, hash, Date.now())
+  }
+
   status() {
     return {
       nodes: this.ctx.getWebSockets().map((ws) => this.nodeOf(ws)),
