@@ -7,6 +7,8 @@
 //   bun run measure <セッション> evolve [周回数] [最初の基準版のコミット] [simple|explore]
 //   bun run measure <セッション> promote [候補の数] [測り直す回数]
 //   bun run measure <セッション> deploy <コミット>
+//   bun run measure <セッション> ideas [期数]
+//   bun run measure <セッション> ideas-check [回数]
 //   bun run measure <セッション> harden [val|test] [生成する数]
 //   bun run measure <セッション> flag <課題の番号>
 import { Database } from 'bun:sqlite'
@@ -68,7 +70,8 @@ export function openMeasure(path: string) {
       ok INTEGER,
       total INTEGER,
       cost REAL,
-      started_at INTEGER NOT NULL
+      started_at INTEGER NOT NULL,
+      memory TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS runs (
       id INTEGER PRIMARY KEY,
@@ -85,6 +88,18 @@ export function openMeasure(path: string) {
       reply TEXT NOT NULL,
       cost REAL NOT NULL
     );`)
+  // 段階4bで足した列。前のセッションの表にもなければ足す。記憶（方針の文章）を付けて測った計測を、付けない計測と分ける
+  const columns = new Set(
+    db
+      .query<{ name: string }, []>('PRAGMA table_info(measurements)')
+      .all()
+      .map((c) => c.name),
+  )
+  if (!columns.has('memory')) {
+    db.run(
+      "ALTER TABLE measurements ADD COLUMN memory TEXT NOT NULL DEFAULT ''",
+    )
+  }
   const meta = (key: string) =>
     db
       .query<{ value: string }, [string]>(
@@ -136,12 +151,17 @@ export function openMeasure(path: string) {
           check_files: JSON.parse(r.check_files as string),
           solution: JSON.parse(r.solution as string),
         })),
-    startMeasurement: (commit: string, split: Split, budget: number | null) =>
+    startMeasurement: (
+      commit: string,
+      split: Split,
+      budget: number | null,
+      memory = '',
+    ) =>
       db
-        .query<{ id: number }, [string, string, number | null, number]>(
-          'INSERT INTO measurements (commit_id, split, budget, started_at) VALUES (?, ?, ?, ?) RETURNING id',
+        .query<{ id: number }, [string, string, number | null, number, string]>(
+          'INSERT INTO measurements (commit_id, split, budget, started_at, memory) VALUES (?, ?, ?, ?, ?) RETURNING id',
         )
-        .get(commit, split, budget, Date.now())?.id as number,
+        .get(commit, split, budget, Date.now(), memory)?.id as number,
     finishMeasurement: (id: number) =>
       db
         .query<Measurement, [number]>(
@@ -257,11 +277,18 @@ export async function attempt(
 }
 
 // 1回の計測。課題ごとに予算を分け、課題の順番や並列の具合で予算の切れ方が変わらないようにする
+// 記憶（方針の文章）を課題文の前に置く。記憶がなければ課題文だけ
+export const withMemory = (memory: string, statement: string) =>
+  memory
+    ? `## これまでの経験から得た方針\n${memory}\n\n## 課題\n${statement}`
+    : statement
+
 export async function measure(
   m: Measure,
   commit: string,
   split: Split,
   complete: Complete,
+  memory = '',
 ) {
   const tasks = m.tasks(split)
   if (!tasks.length) throw new Error(`${split} の課題がありません`)
@@ -269,7 +296,7 @@ export async function measure(
   const limit =
     base === null ? null : (Number(base) / tasks.length) * BUDGET_MARGIN
   const agent = await checkout(commit)
-  const id = m.startMeasurement(commit, split, limit)
+  const id = m.startMeasurement(commit, split, limit, memory)
   await mkdir(join(DIR, 'logs'), { recursive: true })
   let next = 0
   const worker = async () => {
@@ -278,7 +305,7 @@ export async function measure(
       const budget: Budget = { limit, spent: 0 }
       const calls: Parameters<Parameters<typeof serveModel>[3]>[0][] = []
       const { ok, code } = await attempt(
-        task,
+        { ...task, statement: withMemory(memory, task.statement) },
         agent,
         complete,
         budget,
@@ -296,7 +323,8 @@ export async function measure(
   await Promise.all(Array.from({ length: CONCURRENCY }, worker))
   const result = m.finishMeasurement(id)
   // 最初の計測の費用を、その分割の予算の基準にする
-  if (base === null) m.setMeta(`budget:${split}`, String(result.cost))
+  if (base === null && !memory)
+    m.setMeta(`budget:${split}`, String(result.cost))
   return result
 }
 
@@ -462,6 +490,17 @@ if (import.meta.main) {
       console.log(`周回 ${i}/${times}（${policy}）`)
       await evolve(m, commit, solver, generator, policy)
     }
+  } else if (command === 'ideas' || command === 'ideas-check') {
+    const [n = command === 'ideas' ? '1' : '3'] = args
+    if (!/^[1-9]\d*$/.test(n)) throw new Error('回数は正の整数です')
+    const { round, check, openIdeas } = await import('./ideas')
+    const { solver, generator } = await models()
+    if (command === 'ideas-check') await check(m, solver, Number(n))
+    for (let i = 1; command === 'ideas' && i <= Number(n); i++) {
+      console.log(`期 ${i}/${n}`)
+      await round(m, solver, generator)
+    }
+    console.log('資本:', openIdeas(m).workers())
   } else if (command === 'deploy') {
     const [rev] = args
     if (!rev) throw new Error('試験版にするコミットを指定してください')
@@ -482,7 +521,7 @@ if (import.meta.main) {
     await promote(m, solver, Number(top), Number(repeats))
   } else {
     console.log(
-      '使い方: bun run measure <セッション> generate|review|run|evolve|promote|deploy|harden|flag',
+      '使い方: bun run measure <セッション> generate|review|run|evolve|promote|deploy|ideas|ideas-check|harden|flag',
     )
   }
 }

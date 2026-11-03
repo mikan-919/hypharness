@@ -38,7 +38,7 @@ function baseRates(m: Measure, base: string, split: Split) {
     .query<{ task_id: number; rate: number; n: number }, [string, string]>(
       `SELECT r.task_id, AVG(r.ok) AS rate, COUNT(*) AS n FROM runs r
         JOIN measurements x ON x.id = r.measurement_id
-        WHERE x.commit_id = ? AND x.split = ? GROUP BY r.task_id`,
+        WHERE x.commit_id = ? AND x.split = ? AND x.memory = '' GROUP BY r.task_id`,
     )
     .all(base, split)
   const ids = new Set(m.tasks(split).map((t) => t.id))
