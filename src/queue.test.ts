@@ -21,6 +21,7 @@ test('入れたタスクを1つのノードに割り当て、完了の報告を�
     statement: '課題',
     check: 'true',
     generation: 1,
+    checkpoint: null,
   })
   // 実行中のノードと、待ち行列が空のときは割り当てない
   expect(q.claim('a', 2)).toBeNull()
@@ -90,4 +91,23 @@ test('段階3より前の表（command の列）を、課題文と判定コマ�
     check_command: null,
     ok: null,
   })
+})
+
+test('チェックポイントは今の実行権の保持者だけが記録でき、別のノードへの割り当てに含まれる', () => {
+  const q = setup()
+  const id = q.add('課題', null, 0)
+  q.claim('a', 0)
+  expect(q.holds(id, 1, 'a', 1)).toBe(true)
+  expect(q.holds(id, 1, 'b', 1)).toBe(false)
+  expect(q.checkpoint(id, 1, 'b', 'x', 1)).toBe(false)
+  expect(q.checkpoint(id, 1, 'a', 'h1', 1)).toBe(true)
+  // a が落ちて期限が切れると、b は新しい世代でチェックポイントとともに受け取る
+  expect(q.claim('b', LEASE_MS + 1)).toMatchObject({
+    id,
+    generation: 2,
+    checkpoint: 'h1',
+  })
+  // 古い世代の保持者は、もう記録できない
+  expect(q.checkpoint(id, 1, 'a', 'h0', LEASE_MS + 2)).toBe(false)
+  expect(q.tasks()[0].checkpoint).toBe('h1')
 })

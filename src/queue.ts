@@ -22,6 +22,8 @@ export type Task = {
   // 成否（判定コマンドがなければ null）と、解いたエージェントの版（コミット）
   ok: number | null
   version: string | null
+  // 確定チェックポイント（暗号化した作業領域の SHA-256）。別のノードはここから再開する
+  checkpoint: string | null
   created_at: number
 }
 export type Grant = {
@@ -29,6 +31,7 @@ export type Grant = {
   statement: string
   check: string | null
   generation: number
+  checkpoint: string | null
 }
 // ノードが報告する結果。中継に置くのは数値とハッシュだけで、出力はノードの外に出さない
 export type Outcome = { code: number; ok: boolean | null; version: string }
@@ -65,6 +68,7 @@ export function openQueue(sql: Sql) {
     code INTEGER,
     ok INTEGER,
     version TEXT,
+    checkpoint TEXT,
     created_at INTEGER NOT NULL
   )`)
   // 段階3より前の表（command だけを持つ）を移す
@@ -76,6 +80,10 @@ export function openQueue(sql: Sql) {
     sql('ALTER TABLE tasks ADD COLUMN check_command TEXT')
     sql('ALTER TABLE tasks ADD COLUMN ok INTEGER')
     sql('ALTER TABLE tasks ADD COLUMN version TEXT')
+  }
+  // 段階6より前の表には checkpoint の列がない
+  if (!columns.has('checkpoint')) {
+    sql('ALTER TABLE tasks ADD COLUMN checkpoint TEXT')
   }
   sql(`CREATE TABLE IF NOT EXISTS history (
     id INTEGER PRIMARY KEY,
@@ -189,7 +197,24 @@ export function openQueue(sql: Sql) {
         statement: t.statement,
         check: t.check_command,
         generation,
+        checkpoint: t.checkpoint,
       }
+    },
+
+    // その実行権を今持っているか。チェックポイントの読み書きはその保持者だけに許す
+    holds: (id: number, generation: number, node: string, now: number) =>
+      Boolean(current(id, generation, node, now)),
+
+    checkpoint(
+      id: number,
+      generation: number,
+      node: string,
+      hash: string,
+      now: number,
+    ) {
+      if (!current(id, generation, node, now)) return false
+      sql('UPDATE tasks SET checkpoint = ? WHERE id = ?', hash, id)
+      return true
     },
 
     renew(id: number, generation: number, node: string, now: number) {

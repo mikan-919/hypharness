@@ -14,6 +14,7 @@ import {
   withMemory,
 } from './measure'
 import type { Budget } from './model'
+import { loadKey, pack, seal, sha256, unseal } from './vault'
 
 // 旧ランナーの config.json はアカウント単位のトークンで使えないため、別の名前にする
 const CONFIG = join(DIR, 'node.json')
@@ -23,6 +24,8 @@ const PAIRING_POLL_MS = 3000
 const RECONNECT_MS = 5000
 // 期限の3分の1ごとに更新し、1回の更新が失敗しても期限に間に合わせる
 const RENEW_MS = LEASE_MS / 3
+// ponytail: チェックポイントは20秒ごとに、作業領域が変わっていたら取る。エージェントの区切りに合わせるなら、エージェントから合図を受ける
+const CHECKPOINT_MS = 20_000
 
 type Config = { url: string; token: string }
 type Running = { id: number; generation: number; abort: AbortController }
@@ -44,6 +47,7 @@ if (!deploy.stable() || !m.meta('budget:val')) {
   )
 }
 const { solver } = await models()
+const key = await loadKey(join(DIR, 'vault.key'))
 await mkdir(LOGS, { recursive: true, mode: 0o700 })
 const saved: Config | undefined = (await Bun.file(CONFIG).exists())
   ? await Bun.file(CONFIG).json()
@@ -134,7 +138,41 @@ async function run(task: Grant) {
   console.log(
     `タスク ${task.id}（世代 ${task.generation}）を${role === 'canary' ? '試験版' : '稼働版'} ${version.slice(0, 7)} で解きます`,
   )
+  // 作業領域が変わっていたら、暗号化して中継に送る。送れなかったら次の間隔で送り直す
+  let work: string | null = null
+  let last = ''
+  let saving = Promise.resolve()
+  const save = async () => {
+    if (!work) return
+    const data = await pack(work)
+    const hash = await sha256(data)
+    if (hash === last) return
+    const response = await fetch(checkpointUrl(task), {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${config.token}`,
+        'content-type': 'application/octet-stream',
+      },
+      body: await seal(key, String(task.id), data),
+    })
+    if (!response.ok) {
+      throw new Error(`${response.status} ${await response.text()}`)
+    }
+    last = hash
+    console.log(
+      `タスク ${task.id}: チェックポイントを保存しました（${data.length} バイト）`,
+    )
+  }
+  const timer = setInterval(() => {
+    saving = saving
+      .then(save)
+      .catch((e) =>
+        console.error(`チェックポイントを保存できません: ${e.message}`),
+      )
+  }, CHECKPOINT_MS)
   try {
+    // ponytail: 再開したタスクも、版はその時点で選び直す。試験版の比較で版をまたぐタスクが問題になったら、版もチェックポイントに残す
+    const restore = task.checkpoint ? await restoreFrom(task) : undefined
     const result = await attempt(
       {
         // 経済のループで採用された方針（記憶）を課題文の前に置く
@@ -149,7 +187,13 @@ async function run(task: Grant) {
       budget,
       () => {},
       join(LOGS, `${task.id}-${task.generation}.log`),
-      abort.signal,
+      {
+        signal: abort.signal,
+        restore,
+        onWork: (dir) => {
+          work = dir
+        },
+      },
     )
     const ok = task.check === null ? null : result.ok
     console.log(
@@ -167,8 +211,35 @@ async function run(task: Grant) {
     // モデルの障害では報告しない。実行権の期限が切れると待ち行列に戻り、解き直される。
     // 隔離環境を作れないなどのときは、終了コード 127 で報告して待ち行列を止めない
     if (!budget.outage && !abort.signal.aborted) done(127, null)
+  } finally {
+    clearInterval(timer)
+    await saving
   }
   send({ type: 'ready' })
+}
+
+const checkpointUrl = (task: Grant) =>
+  `${config.url}/node/checkpoints/${task.id}/${task.generation}`
+
+// 確定チェックポイントを取得し、割り当てに含まれるハッシュと照合してから復号する
+async function restoreFrom(task: Grant) {
+  const response = await fetch(checkpointUrl(task), {
+    headers: { Authorization: `Bearer ${config.token}` },
+  })
+  if (!response.ok) {
+    throw new Error(
+      `チェックポイントを取得できません (${response.status}): ${await response.text()}`,
+    )
+  }
+  const blob = new Uint8Array(await response.arrayBuffer())
+  if ((await sha256(blob)) !== task.checkpoint) {
+    throw new Error('チェックポイントのハッシュが記録と合いません')
+  }
+  const data = await unseal(key, String(task.id), blob)
+  console.log(
+    `タスク ${task.id}: チェックポイント ${task.checkpoint?.slice(0, 12)} から再開します`,
+  )
+  return data
 }
 
 // 中継にペアリングを申し込み、利用者がホーム画面でコードを承認したらトークンを受け取って保存する

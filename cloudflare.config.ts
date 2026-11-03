@@ -15,6 +15,8 @@ export default defineConfig({
         worker: 'hypharness',
         exportName: 'Relay',
       }),
+      // 暗号化した作業領域のチェックポイント。中継は鍵を持たず、復号できない
+      CHECKPOINTS: bindings.r2({ name: 'hypharness-checkpoints' }),
     },
     exports: {
       Accounts: exports.durableObject({ storage: 'sqlite' }),

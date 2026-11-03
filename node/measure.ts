@@ -30,6 +30,7 @@ import {
   validate,
   writeFiles,
 } from './tasks'
+import { unpack } from './vault'
 
 export const DIR = join(homedir(), '.hyph')
 export const REPO = join(import.meta.dir, '..')
@@ -251,11 +252,19 @@ export async function attempt(
   budget: Budget,
   onCall: Parameters<typeof serveModel>[3],
   log: string,
-  signal?: AbortSignal,
+  // signal は実行を止める合図、restore は再開するときに作業領域へ戻す tar、onWork は作業用ディレクトリの通知（チェックポイント用）
+  options: {
+    signal?: AbortSignal
+    restore?: Uint8Array
+    onWork?: (work: string) => void
+  } = {},
 ) {
+  const { signal, restore, onWork } = options
   const work = await mkdtemp(join(tmpdir(), 'hyph-work-'))
   try {
     await writeFiles(work, task.files)
+    if (restore) await unpack(work, restore)
+    onWork?.(work)
     const code = await runAgent(
       agent,
       work,
