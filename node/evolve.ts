@@ -115,7 +115,7 @@ export function openLineage(m: Measure) {
   }
 }
 
-// 現在の課題の数で測った、そのコミットの最新の成功率。課題が増えた後の古い計測は使わない
+// 現在の課題の数で測った、そのコミットの成功率の平均。課題が増えた後の古い計測は使わない
 export function rate(m: Measure, commit: string, split: Split) {
   // 繰り返し測った版は平均で比べる。ばらつき（noise）と同じ計測群を使うため
   const row = m.db
@@ -365,6 +365,7 @@ ${failed.slice(0, 5).map(show).join('\n---\n')}`,
       },
     ],
   })
+  console.log(`弱点の抽出の費用: $${reply.usage.cost.total.toFixed(4)}`)
   return reply.content
     .filter((b) => b.type === 'text')
     .map((b) => b.text)
@@ -430,13 +431,16 @@ export async function evolve(
 ${await weakness(m, parent.commit_id, generator)}`
     : ''
   if (arm) console.log(`改善対象: ${arm}`)
+  const improveBudget = { limit: perTask * IMPROVE_BUDGET, spent: 0 }
+  const editBudget = { limit: perTask * IMPROVE_BUDGET, spent: 0 }
   const { commit, description } = await improve(
     m,
     parent.commit_id,
     complete,
-    { limit: perTask * IMPROVE_BUDGET, spent: 0 },
+    improveBudget,
     focus,
   )
+  console.log(`改善の費用: $${improveBudget.spent.toFixed(4)}`)
   if (!commit) {
     console.log('改善役は agent/ を変更しませんでした')
     return null
@@ -459,10 +463,10 @@ ${await weakness(m, parent.commit_id, generator)}`
     REPO,
     parent.commit_id,
     commit,
-    (agent) =>
-      selfEdit(agent, complete, { limit: perTask * IMPROVE_BUDGET, spent: 0 }),
+    (agent) => selfEdit(agent, complete, editBudget),
     arm ? MAX_CHANGED_LINES : undefined,
   )
+  console.log(`自己編集の確認の費用: $${editBudget.spent.toFixed(4)}`)
   if (reason) return reject(reason)
 
   const childVal = (await measure(m, commit, 'val', complete)).ok
