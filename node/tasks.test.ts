@@ -239,3 +239,32 @@ test('モデルの一時的な障害は再試行し、回復しなければ障�
   expect(invalid.count()).toBe(1)
   invalid.server.stop(true)
 })
+
+test('モデル中継は、1回の試行の呼び出しに同じキャッシュの鍵を付け、試行ごとに別の鍵にする', async () => {
+  const keys: (string | undefined)[] = []
+  const complete: Complete = async (_, options) => {
+    keys.push(options?.sessionId)
+    return reply([])
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const socket = join(await mkdtemp(join(tmpdir(), 'hyph-test-')), 'm.sock')
+    const server = serveModel(
+      socket,
+      complete,
+      { limit: null, spent: 0 },
+      () => {},
+    )
+    for (let i = 0; i < 2; i++) {
+      await fetch('http://model/', {
+        method: 'POST',
+        unix: socket,
+        body: JSON.stringify({ messages: [] }),
+      })
+    }
+    server.stop(true)
+  }
+  expect(keys[0]).toBeString()
+  expect(keys[1]).toBe(keys[0])
+  expect(keys[2]).toBe(keys[3])
+  expect(keys[2]).not.toBe(keys[0])
+})

@@ -323,12 +323,11 @@ export async function models() {
     const model = m.getModel('openai', name)
     if (!model) throw new Error(`未対応のモデルです: ${name}`)
     console.log(`${role}: ${name}、推論の深さ: ${reasoning ?? '既定'}`)
-    return (context) =>
-      m.complete(
-        model,
-        context,
-        reasoning ? ({ reasoningEffort: reasoning } as never) : undefined,
-      )
+    return (context, options) =>
+      m.complete(model, context, {
+        ...(reasoning && { reasoningEffort: reasoning }),
+        ...options,
+      } as never)
   }
   const name = process.env.MODEL || 'gpt-6.1-sol'
   const reasoning = process.env.REASONING
