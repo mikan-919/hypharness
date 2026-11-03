@@ -86,6 +86,21 @@ export async function pr(m: Measure, run: number, complete: Complete) {
     await Bun.$`git -C ${w.repo} remote get-url origin`.text()
   ).trim()
   const name = repoName(remote)
+  // 課題のコミットがリモートの既定のブランチになければ、PR に手元だけのコミットが混ざり、それらも push してしまう。
+  // 既定のブランチに限るのは、前に作った PR のブランチにも手元のコミットが含まれうるため
+  const base = (
+    await Bun.$`gh repo view ${name} --json defaultBranchRef -q .defaultBranchRef.name`.text()
+  ).trim()
+  await Bun.$`git -C ${w.repo} fetch -q origin ${base}`.quiet()
+  const pushed =
+    await Bun.$`git -C ${w.repo} merge-base --is-ancestor ${w.commit} FETCH_HEAD`
+      .quiet()
+      .nothrow()
+  if (pushed.exitCode !== 0) {
+    throw new Error(
+      `課題のコミット ${w.commit.slice(0, 7)} がリモートの ${base} にありません。先に ${w.repo} で push してください`,
+    )
+  }
   const branch = `hyph/run-${run}`
   const dir = await mkdtemp(join(tmpdir(), 'hyph-pr-'))
   try {
@@ -98,7 +113,7 @@ export async function pr(m: Measure, run: number, complete: Complete) {
     await Bun.$`git -C ${dir} commit -q -m ${title}`.quiet()
     await Bun.$`git -C ${dir} push -q ${remote} ${branch}`.quiet()
     const url = (
-      await Bun.$`gh pr create -R ${name} --head ${branch} --title ${title} --body ${`${body}\n\n---\nhypharness の試行 ${run}（課題 ${row.task}）で、隠しテストと判定を通った変更です。`}`
+      await Bun.$`gh pr create -R ${name} --base ${base} --head ${branch} --title ${title} --body ${`${body}\n\n---\nhypharness の試行 ${run}（課題 ${row.task}）で、隠しテストと判定を通った変更です。`}`
         .cwd(dir)
         .text()
     ).trim()
