@@ -7,6 +7,8 @@
 //   bun run measure <セッション> evolve [周回数] [最初の基準版のコミット] [simple|explore]
 //   bun run measure <セッション> promote [候補の数] [測り直す回数]
 //   bun run measure <セッション> deploy <コミット>
+//   bun run measure <セッション> budget <1期の総予算（ドル）>
+//   bun run measure <セッション> ledger
 //   bun run measure <セッション> ideas [期数]
 //   bun run measure <セッション> ideas-check [回数]
 //   bun run measure <セッション> harden [val|test] [生成する数]
@@ -19,6 +21,7 @@ import { join } from 'node:path'
 import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { createModels } from '@earendil-works/pi-ai/models'
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
+import { KINDS, type Kind, metered, openLedger } from './ledger'
 import { type Budget, type Complete, serveModel } from './model'
 import { sandbox } from './sandbox'
 import {
@@ -348,7 +351,8 @@ export const summary = (rates: number[]) => {
 
 // 候補（解答役・改善役）が使うモデルは MODEL・REASONING で選ぶ。課題の生成役と関連性の判定役（固定部）は
 // GENERATOR_MODEL・GENERATOR_REASONING で別に選べる。同じモデルでは、候補がときどき解けない正しい課題を作りにくいため
-export async function models() {
+// onCost を渡すと、呼び出しのたびに費用を知らせる（段階5の資源配分の記録）
+export async function models(onCost?: (cost: number) => void) {
   const m = createModels({ credentials: fileStore(join(DIR, 'auth.json')) })
   m.setProvider(openaiProvider())
   if (!(await m.getAuth('openai'))) {
@@ -360,11 +364,12 @@ export async function models() {
     const model = m.getModel('openai', name)
     if (!model) throw new Error(`未対応のモデルです: ${name}`)
     console.log(`${role}: ${name}、推論の深さ: ${reasoning ?? '既定'}`)
-    return (context, options) =>
+    const complete: Complete = (context, options) =>
       m.complete(model, context, {
         ...(reasoning && { reasoningEffort: reasoning }),
         ...options,
       } as never)
+    return onCost ? metered(complete, onCost) : complete
   }
   const name = process.env.MODEL || 'gpt-6.1-sol'
   const reasoning = process.env.REASONING
@@ -388,6 +393,20 @@ if (import.meta.main) {
   }
   await mkdir(join(DIR, 'sessions'), { recursive: true, mode: 0o700 })
   const m = openMeasure(join(DIR, 'sessions', `${session}.sqlite`))
+  // 費用は命令ごとの区分で記録する。オフライン RSI は自己改善、経済のループは局所改善、それ以外は検証
+  const ledger = openLedger(m)
+  const kind: Kind =
+    command === 'evolve' || command === 'promote'
+      ? 'self'
+      : command === 'ideas'
+        ? 'local'
+        : 'verify'
+  const charge = (cost: number) => ledger.record(kind, cost)
+  const exhausted = () => {
+    if (ledger.remaining(kind) > 0) return false
+    console.log(`今期の${KINDS[kind]}の予算を使い切りました`)
+    return true
+  }
   if (command === 'generate') {
     const [file, val = '8', test = '4'] = args
     if (!file) throw new Error('最終目的のファイルを指定してください')
@@ -400,7 +419,7 @@ if (import.meta.main) {
       )
     }
     m.setMeta('goal', goal)
-    const { generator: complete } = await models()
+    const { generator: complete } = await models(charge)
     // 検証用と成績用は別の呼び出しで作り、互いの課題文を見せない
     for (const [split, count] of [
       ['val', Number(val)],
@@ -449,7 +468,7 @@ if (import.meta.main) {
       throw new Error('分割は val か test です')
     }
     const { harden, BAND } = await import('./harden')
-    const { solver, generator } = await models()
+    const { solver, generator } = await models(charge)
     const r = await harden(m, split, Number(count), solver, generator)
     console.log(
       `提出 ${r.submitted}、選別を通過 ${r.valid}、帯（${BAND.join('〜')}）に入り追加 ${r.added}`,
@@ -470,7 +489,7 @@ if (import.meta.main) {
       throw new Error('分割は val か test です')
     }
     const commit = (await Bun.$`git -C ${REPO} rev-parse ${rev}`.text()).trim()
-    const { solver: complete } = await models()
+    const { solver: complete } = await models(charge)
     const rates: number[] = []
     for (let i = 1; i <= Number(times); i++) {
       console.log(`${commit.slice(0, 7)} の計測 ${i}/${times}`)
@@ -494,8 +513,9 @@ if (import.meta.main) {
     const commit = (
       await Bun.$`git -C ${REPO} rev-parse ${start}`.text()
     ).trim()
-    const { solver, generator } = await models()
+    const { solver, generator } = await models(charge)
     for (let i = 1; i <= Number(times); i++) {
+      if (exhausted()) break
       console.log(`周回 ${i}/${times}（${policy}）`)
       await evolve(m, commit, solver, generator, policy)
     }
@@ -503,13 +523,24 @@ if (import.meta.main) {
     const [n = command === 'ideas' ? '1' : '3'] = args
     if (!/^[1-9]\d*$/.test(n)) throw new Error('回数は正の整数です')
     const { round, check, openIdeas } = await import('./ideas')
-    const { solver, generator } = await models()
+    const { solver, generator } = await models(charge)
     if (command === 'ideas-check') await check(m, solver, Number(n))
     for (let i = 1; command === 'ideas' && i <= Number(n); i++) {
+      if (exhausted()) break
       console.log(`期 ${i}/${n}`)
-      await round(m, solver, generator)
+      const r = await round(m, solver, generator)
+      if (r.adopted) ledger.improved('local', r.delta, r.text)
     }
     console.log('資本:', openIdeas(m).workers())
+  } else if (command === 'budget') {
+    const [amount] = args
+    if (!amount || !(Number(amount) > 0)) {
+      throw new Error('1期（1日）の総予算をドルの正の数で指定してください')
+    }
+    m.setMeta('budget:period', String(Number(amount)))
+    console.log(ledger.rows().slice(0, 4))
+  } else if (command === 'ledger') {
+    console.table(ledger.rows())
   } else if (command === 'deploy') {
     const [rev] = args
     if (!rev) throw new Error('試験版にするコミットを指定してください')
@@ -526,11 +557,13 @@ if (import.meta.main) {
       throw new Error('候補の数と測り直す回数は正の整数です')
     }
     const { promote } = await import('./evolve')
-    const { solver } = await models()
-    await promote(m, solver, Number(top), Number(repeats))
+    const { solver } = await models(charge)
+    if (exhausted()) process.exit(0)
+    const adopted = await promote(m, solver, Number(top), Number(repeats))
+    if (adopted) ledger.improved('self', adopted.delta, adopted.commit)
   } else {
     console.log(
-      '使い方: bun run measure <セッション> generate|review|run|evolve|promote|deploy|ideas|ideas-check|harden|flag',
+      '使い方: bun run measure <セッション> generate|review|run|evolve|promote|deploy|ideas|ideas-check|budget|ledger|harden|flag',
     )
   }
 }

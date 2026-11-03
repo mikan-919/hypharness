@@ -565,5 +565,5 @@ export async function promote(
   console.log(
     `採用: ${best.commit.slice(0, 7)} を基準版にし、試験版として配りました`,
   )
-  return best.commit
+  return best
 }

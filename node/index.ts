@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { type Grant, LEASE_MS, type RelayMessage } from '../src/queue'
 import { openDeploy } from './deploy'
 import { openIdeas } from './ideas'
+import { openLedger } from './ledger'
 import {
   attempt,
   BUDGET_MARGIN,
@@ -26,6 +27,7 @@ const RECONNECT_MS = 5000
 const RENEW_MS = LEASE_MS / 3
 // ponytail: チェックポイントは20秒ごとに、作業領域が変わっていたら取る。エージェントの区切りに合わせるなら、エージェントから合図を受ける
 const CHECKPOINT_MS = 20_000
+const LEDGER_MS = 60_000
 
 type Config = { url: string; token: string }
 type Running = { id: number; generation: number; abort: AbortController }
@@ -46,7 +48,9 @@ if (!deploy.stable() || !m.meta('budget:val')) {
     `セッション ${session} に基準版と予算の基準がありません。先に evolve を回してください`,
   )
 }
-const { solver } = await models()
+const ledger = openLedger(m)
+// 実際のタスクの費用は目的遂行の区分に記録する
+const { solver } = await models((cost) => ledger.record('task', cost))
 const key = await loadKey(join(DIR, 'vault.key'))
 await mkdir(LOGS, { recursive: true, mode: 0o700 })
 const saved: Config | undefined = (await Bun.file(CONFIG).exists())
@@ -76,6 +80,9 @@ setInterval(() => {
   }
 }, RENEW_MS)
 
+// 資源配分の内訳を、接続時と1分ごとに中継へ送る。計測の命令が別のプロセスで書いた分も含まれる
+setInterval(() => send({ type: 'ledger', rows: ledger.rows() }), LEDGER_MS)
+
 connect()
 
 function connect() {
@@ -87,6 +94,7 @@ function connect() {
     ws = socket
     console.log(`${config.url} に接続しました`)
     for (const data of unsent.splice(0)) socket.send(data)
+    socket.send(JSON.stringify({ type: 'ledger', rows: ledger.rows() }))
     if (!running) socket.send(JSON.stringify({ type: 'ready' }))
   }
   socket.onmessage = (event) => {
