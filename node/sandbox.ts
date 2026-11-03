@@ -5,7 +5,14 @@ import { existsSync } from 'node:fs'
 // binds で、ホストのパスを隔離環境の中に見せる。既定は読み取り専用で、Unix ソケットのように書き込みが要るものだけ rw にする
 export type Bind = [host: string, inside: string, mode?: 'ro' | 'rw']
 
-export function sandbox(work: string, command: string, binds: Bind[] = []) {
+// prelude は、コマンドの前に読み込むシェルの設定（nix print-dev-env の出力など）。読み込んだあとも、一時ディレクトリと
+// bun の場所は隔離環境のものに戻す
+export function sandbox(
+  work: string,
+  command: string,
+  binds: Bind[] = [],
+  prelude?: string,
+) {
   const bwrap = Bun.which('bwrap')
   if (!bwrap) throw new Error('タスクの実行には bubblewrap（bwrap）が必要です')
   const system = [
@@ -37,6 +44,7 @@ export function sandbox(work: string, command: string, binds: Bind[] = []) {
     '--bind',
     work,
     '/work',
+    ...(prelude ? ['--ro-bind', prelude, '/prelude.sh'] : []),
     ...binds.flatMap(([host, inside, mode]) => [
       mode === 'rw' ? '--bind' : '--ro-bind',
       host,
@@ -53,6 +61,8 @@ export function sandbox(work: string, command: string, binds: Bind[] = []) {
     '--',
     'sh',
     '-c',
-    command,
+    prelude
+      ? `. /prelude.sh\nexport HOME=/tmp TMPDIR=/tmp TMP=/tmp TEMP=/tmp PATH="/opt/bin:$PATH"\n${command}`
+      : command,
   ]
 }

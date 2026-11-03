@@ -38,6 +38,7 @@ async function withRetry(
       reason = e instanceof Error ? `${e.name}: ${e.message}` : String(e)
     }
     if (i >= delays.length) return { reason }
+    console.error(`モデルの呼び出しを再試行します（${i + 1}回目）: ${reason}`)
     await Bun.sleep(delays[i])
   }
 }

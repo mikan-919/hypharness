@@ -13,7 +13,10 @@ const INSTRUCTIONS =
 // ponytail: 1課題でモデルを呼ぶのは30回まで。足りない課題が多ければ増やす
 const MAX_STEPS = 30
 const OUTPUT_LIMIT = 4000
-const COMMAND_TIMEOUT_MS = 60_000
+// コマンドは180秒まで。timeout で包み、時間切れのときは子のプロセスごと止める。
+// 出力は管ではなくファイルで受け取り、コマンドが終わった時点で読む。管にすると、コマンドが起動したサーバーのように
+// 別のプロセスグループで残るプロセスが管を開いたままにし、出力を待ち続ける
+const COMMAND_TIMEOUT_SECONDS = 180
 
 const tools = [
   {
@@ -33,22 +36,34 @@ const tools = [
   },
 ] as unknown as Tool[]
 
+let commands = 0
+
 async function sh(command: unknown) {
   if (typeof command !== 'string') throw new Error('command は文字列です')
-  const child = Bun.spawn(['sh', '-c', `exec 2>&1\n${command}`], {
-    cwd: '/work',
-    stdout: 'pipe',
-    timeout: COMMAND_TIMEOUT_MS,
-  })
-  const [output, code] = await Promise.all([
-    new Response(child.stdout).text(),
-    child.exited,
-  ])
+  const file = Bun.file(`/tmp/sh-${++commands}.out`)
+  const child = Bun.spawn(
+    [
+      'timeout',
+      '-k',
+      '5',
+      String(COMMAND_TIMEOUT_SECONDS),
+      'sh',
+      '-c',
+      `exec 2>&1\n${command}`,
+    ],
+    { cwd: '/work', stdout: file },
+  )
+  const code = await child.exited
+  const output = await file.text()
+  await file.delete()
   const shown =
     output.length > OUTPUT_LIMIT
       ? `${output.slice(0, OUTPUT_LIMIT)}\n（${output.length}文字のうち先頭${OUTPUT_LIMIT}文字）`
       : output
-  return `終了コード ${code}\n${shown}`
+  // timeout は時間切れのとき終了コード124を返す
+  const note =
+    code === 124 ? `（${COMMAND_TIMEOUT_SECONDS}秒の時間切れで止めました）` : ''
+  return `終了コード ${code}${note}\n${shown}`
 }
 
 const context: Context = {
@@ -68,6 +83,8 @@ for (let step = 1; step <= MAX_STEPS; step++) {
     method: 'POST',
     unix: '/model.sock',
     body: JSON.stringify(context),
+    // 中継は一時的な障害のとき待って呼び直すため、5分を超えて応答しないことがある。Bun の既定の無通信の上限（5分）を外す
+    timeout: false,
   })
   if (!response.ok) {
     console.error(
