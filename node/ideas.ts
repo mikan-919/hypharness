@@ -237,10 +237,11 @@ export async function round(m: Measure, solver: Complete, generator: Complete) {
     adopted,
     Math.round(delta * tasks),
   )
+  const result = { adopted, delta, text }
   console.log(
     `${adopted ? '採用' : '不採用'}: 成功率 ${rate(base.rates).toFixed(3)} → ${rate(candidate.rates).toFixed(3)}（基準 ${margin.toFixed(3)}）、平均費用 $${base.cost.toFixed(4)} → $${candidate.cost.toFixed(4)}`,
   )
-  return adopted
+  return result
 }
 
 // 採用されたアイデアを持つ記憶と持たない記憶を、成績用課題で比べる（段階4bの完了条件）

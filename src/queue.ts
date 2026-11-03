@@ -38,9 +38,18 @@ export type Outcome = { code: number; ok: boolean | null; version: string }
 
 // 中継とノードの間の通知。ノードと Worker の両方から読むため、ここに置く
 export type NodeInfo = { id: string; name: string }
-// ノードから届く通知。ready は割り当てを待っていること、renew は実行権の更新、done は終了の報告
+// 期ごとの資源配分の内訳。中継に置くのは数値だけ
+export type LedgerRow = {
+  period: string
+  kind: 'task' | 'local' | 'self' | 'verify'
+  budget: number | null
+  spent: number
+  improvement: number
+}
+// ノードから届く通知。ready は割り当てを待っていること、renew は実行権の更新、done は終了の報告、ledger は資源配分の内訳
 export type NodeMessage =
   | { type: 'ready' }
+  | { type: 'ledger'; rows: LedgerRow[] }
   | { type: 'renew'; id: number; generation: number }
   | ({ type: 'done'; id: number; generation: number } & Outcome)
 // 中継からノードへ送る指示。revoked は実行権を失ったので実行を止めること

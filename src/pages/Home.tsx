@@ -48,6 +48,7 @@ export default function Home({ user, status }: PageProps<'Home'>) {
         )}
         <Pairing />
       </section>
+      <Ledger rows={status.ledger} />
       <section className='flex flex-col gap-2 text-sm'>
         <h2 className='text-lg font-bold'>タスク</h2>
         <NewTask />
@@ -210,5 +211,51 @@ function History({ id }: { id: number }) {
         ))}
       </ul>
     </details>
+  )
+}
+
+const KIND_NAMES = {
+  task: '目的遂行',
+  local: '局所改善',
+  self: '自己改善',
+  verify: '検証',
+} as const
+const dollars = (x: number | null) =>
+  x === null ? '上限なし' : `$${x.toFixed(4)}`
+
+// 期（日）ごとの予算・使用額・改善量。ノードが1分ごとに送る
+function Ledger({ rows }: { rows: PageProps<'Home'>['status']['ledger'] }) {
+  return (
+    <section className='flex flex-col gap-2 text-sm'>
+      <h2 className='text-lg font-bold'>資源配分</h2>
+      {rows.length ? (
+        <div className='overflow-x-auto'>
+          <table className='w-full text-left'>
+            <thead>
+              <tr>
+                <th>期</th>
+                <th>区分</th>
+                <th>予算</th>
+                <th>使用額</th>
+                <th>改善量（成功率）</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={`${r.period}-${r.kind}`}>
+                  <td>{r.period}</td>
+                  <td>{KIND_NAMES[r.kind]}</td>
+                  <td>{dollars(r.budget)}</td>
+                  <td>{dollars(r.spent)}</td>
+                  <td>{r.improvement ? `+${r.improvement.toFixed(3)}` : ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p>ノードからの内訳はまだありません。</p>
+      )}
+    </section>
   )
 }

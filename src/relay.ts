@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
 import {
+  type LedgerRow,
   type NodeInfo,
   type NodeMessage,
   openQueue,
@@ -7,9 +8,28 @@ import {
   type RelayMessage,
 } from './queue'
 
+// 資源配分の内訳の行。期は日付、区分は4つ、金額は有限の数
+const ledgerRow = (r: Record<string, unknown>) =>
+  typeof r?.period === 'string' &&
+  /^\d{4}-\d{2}-\d{2}$/.test(r.period) &&
+  ['task', 'local', 'self', 'verify'].includes(r.kind as string) &&
+  (r.budget === null || Number.isFinite(r.budget)) &&
+  Number.isFinite(r.spent) &&
+  Number.isFinite(r.improvement)
+// 1回に受け取る内訳の行の上限（14期 × 4区分を収める）
+const LEDGER_ROWS = 100
+
 const parse = (data: string | ArrayBuffer): NodeMessage => {
   const m = JSON.parse(String(data))
   if (m?.type === 'ready') return m
+  if (
+    m?.type === 'ledger' &&
+    Array.isArray(m.rows) &&
+    m.rows.length <= LEDGER_ROWS &&
+    m.rows.every(ledgerRow)
+  ) {
+    return m
+  }
   const ints = (...keys: string[]) =>
     keys.every((k) => Number.isSafeInteger(m[k]))
   if (m?.type === 'renew' && ints('id', 'generation')) return m
@@ -36,6 +56,14 @@ export class Relay extends DurableObject<Env> {
       (query, ...params) =>
         ctx.storage.sql.exec(query, ...params).toArray() as never[],
     )
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS ledger (
+      period TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      budget REAL,
+      spent REAL NOT NULL,
+      improvement REAL NOT NULL,
+      PRIMARY KEY (period, kind)
+    )`)
   }
 
   // Worker がノード用トークンを確かめ、ノードの ID と名前をヘッダーに入れて渡す
@@ -66,6 +94,19 @@ export class Relay extends DurableObject<Env> {
       !this.queue.renew(m.id, m.generation, node.id, now)
     ) {
       this.send(ws, { type: 'revoked', id: m.id, generation: m.generation })
+    }
+    if (m.type === 'ledger') {
+      for (const r of m.rows) {
+        this.ctx.storage.sql.exec(
+          'INSERT OR REPLACE INTO ledger (period, kind, budget, spent, improvement) VALUES (?, ?, ?, ?, ?)',
+          r.period,
+          r.kind,
+          r.budget,
+          r.spent,
+          r.improvement,
+        )
+      }
+      return
     }
     if (m.type === 'done') {
       const { code, ok, version } = m
@@ -98,6 +139,12 @@ export class Relay extends DurableObject<Env> {
     return {
       nodes: this.ctx.getWebSockets().map((ws) => this.nodeOf(ws)),
       tasks: this.queue.tasks(),
+      ledger: this.ctx.storage.sql
+        .exec(
+          'SELECT * FROM ledger ORDER BY period DESC, kind LIMIT ?',
+          LEDGER_ROWS,
+        )
+        .toArray() as LedgerRow[],
     }
   }
 
