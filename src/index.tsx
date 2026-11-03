@@ -60,6 +60,10 @@ app.onError((err, c) => {
   return c.json({ error: err.message }, 500)
 })
 
+// 中継に置くタスクの大きさの上限
+const STATEMENT_LIMIT = 20_000
+const CHECK_LIMIT = 2_000
+
 const routes = app
   .get('/', auth, async (c) =>
     c.render('Home', {
@@ -71,11 +75,35 @@ const routes = app
     c.json(await relay(c.env, c.var.user.id).status()),
   )
   .post('/tasks', auth, async (c) => {
-    const { command } = await c.req.json<{ command?: unknown }>()
-    if (typeof command !== 'string' || !command.trim()) {
-      return c.json({ error: 'command に文字列を指定してください' }, 400)
+    const { statement, check } = await c.req.json<{
+      statement?: unknown
+      check?: unknown
+    }>()
+    if (
+      typeof statement !== 'string' ||
+      !statement.trim() ||
+      statement.length > STATEMENT_LIMIT
+    ) {
+      return c.json(
+        { error: `課題文を${STATEMENT_LIMIT}文字以内で指定してください` },
+        400,
+      )
     }
-    return c.json({ id: await relay(c.env, c.var.user.id).add(command) })
+    if (
+      check !== undefined &&
+      (typeof check !== 'string' || check.length > CHECK_LIMIT)
+    ) {
+      return c.json(
+        { error: `判定コマンドは${CHECK_LIMIT}文字以内の文字列です` },
+        400,
+      )
+    }
+    return c.json({
+      id: await relay(c.env, c.var.user.id).add(
+        statement,
+        check?.trim() || null,
+      ),
+    })
   })
   .get('/tasks/:id/history', auth, async (c) => {
     const id = Number(c.req.param('id'))

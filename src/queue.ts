@@ -10,16 +10,28 @@ const HISTORY_MS = 90 * 24 * 60 * 60_000
 
 export type Task = {
   id: number
-  command: string
+  // 課題文と、任意の判定コマンド。判定コマンドの終了コードが 0 なら成功とする
+  statement: string
+  check_command: string | null
   state: 'queued' | 'leased' | 'done'
   node: string | null
   // 実行権を発行するたびに1つ増やす。古い世代の更新や報告は受け付けない
   generation: number
   expires: number | null
   code: number | null
+  // 成否（判定コマンドがなければ null）と、解いたエージェントの版（コミット）
+  ok: number | null
+  version: string | null
   created_at: number
 }
-export type Grant = { id: number; command: string; generation: number }
+export type Grant = {
+  id: number
+  statement: string
+  check: string | null
+  generation: number
+}
+// ノードが報告する結果。中継に置くのは数値とハッシュだけで、出力はノードの外に出さない
+export type Outcome = { code: number; ok: boolean | null; version: string }
 
 // 中継とノードの間の通知。ノードと Worker の両方から読むため、ここに置く
 export type NodeInfo = { id: string; name: string }
@@ -27,7 +39,7 @@ export type NodeInfo = { id: string; name: string }
 export type NodeMessage =
   | { type: 'ready' }
   | { type: 'renew'; id: number; generation: number }
-  | { type: 'done'; id: number; generation: number; code: number }
+  | ({ type: 'done'; id: number; generation: number } & Outcome)
 // 中継からノードへ送る指示。revoked は実行権を失ったので実行を止めること
 export type RelayMessage =
   | ({ type: 'task' } & Grant)
@@ -44,14 +56,27 @@ export type HistoryEvent = {
 export function openQueue(sql: Sql) {
   sql(`CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY,
-    command TEXT NOT NULL,
+    statement TEXT NOT NULL,
+    check_command TEXT,
     state TEXT NOT NULL DEFAULT 'queued',
     node TEXT,
     generation INTEGER NOT NULL DEFAULT 0,
     expires INTEGER,
     code INTEGER,
+    ok INTEGER,
+    version TEXT,
     created_at INTEGER NOT NULL
   )`)
+  // 段階3より前の表（command だけを持つ）を移す
+  const columns = new Set(
+    sql<{ name: string }>('PRAGMA table_info(tasks)').map((c) => c.name),
+  )
+  if (columns.has('command')) {
+    sql('ALTER TABLE tasks RENAME COLUMN command TO statement')
+    sql('ALTER TABLE tasks ADD COLUMN check_command TEXT')
+    sql('ALTER TABLE tasks ADD COLUMN ok INTEGER')
+    sql('ALTER TABLE tasks ADD COLUMN version TEXT')
+  }
   sql(`CREATE TABLE IF NOT EXISTS history (
     id INTEGER PRIMARY KEY,
     task_id INTEGER NOT NULL,
@@ -113,10 +138,11 @@ export function openQueue(sql: Sql) {
   return {
     reclaim,
 
-    add(command: string, now: number) {
+    add(statement: string, check: string | null, now: number) {
       const [{ id }] = sql<{ id: number }>(
-        'INSERT INTO tasks (command, created_at) VALUES (?, ?) RETURNING id',
-        command,
+        'INSERT INTO tasks (statement, check_command, created_at) VALUES (?, ?, ?) RETURNING id',
+        statement,
+        check,
         now,
       )
       record({
@@ -158,7 +184,12 @@ export function openQueue(sql: Sql) {
         code: null,
         at: now,
       })
-      return { id: t.id, command: t.command, generation }
+      return {
+        id: t.id,
+        statement: t.statement,
+        check: t.check_command,
+        generation,
+      }
     },
 
     renew(id: number, generation: number, node: string, now: number) {
@@ -171,14 +202,16 @@ export function openQueue(sql: Sql) {
       id: number,
       generation: number,
       node: string,
-      code: number,
+      outcome: Outcome,
       now: number,
     ) {
-      const ok = Boolean(current(id, generation, node, now))
-      if (ok) {
+      const accepted = Boolean(current(id, generation, node, now))
+      if (accepted) {
         sql(
-          "UPDATE tasks SET state = 'done', code = ?, expires = NULL WHERE id = ?",
-          code,
+          "UPDATE tasks SET state = 'done', code = ?, ok = ?, version = ?, expires = NULL WHERE id = ?",
+          outcome.code,
+          outcome.ok === null ? null : Number(outcome.ok),
+          outcome.version,
           id,
         )
       }
@@ -186,11 +219,11 @@ export function openQueue(sql: Sql) {
         task_id: id,
         generation,
         node,
-        kind: ok ? 'done' : 'rejected',
-        code,
+        kind: accepted ? 'done' : 'rejected',
+        code: outcome.code,
         at: now,
       })
-      return ok
+      return accepted
     },
 
     nextExpiry() {

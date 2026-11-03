@@ -13,7 +13,15 @@ const parse = (data: string | ArrayBuffer): NodeMessage => {
   const ints = (...keys: string[]) =>
     keys.every((k) => Number.isSafeInteger(m[k]))
   if (m?.type === 'renew' && ints('id', 'generation')) return m
-  if (m?.type === 'done' && ints('id', 'generation', 'code')) return m
+  if (
+    m?.type === 'done' &&
+    ints('id', 'generation', 'code') &&
+    (m.ok === null || typeof m.ok === 'boolean') &&
+    typeof m.version === 'string' &&
+    /^[0-9a-f]{40}$/.test(m.version)
+  ) {
+    return m
+  }
   throw new Error('ノードからの通知の形式が不正です')
 }
 
@@ -60,7 +68,8 @@ export class Relay extends DurableObject<Env> {
       this.send(ws, { type: 'revoked', id: m.id, generation: m.generation })
     }
     if (m.type === 'done') {
-      this.queue.finish(m.id, m.generation, node.id, m.code, now)
+      const { code, ok, version } = m
+      this.queue.finish(m.id, m.generation, node.id, { code, ok, version }, now)
     }
     await this.dispatch()
   }
@@ -71,8 +80,8 @@ export class Relay extends DurableObject<Env> {
     await this.dispatch()
   }
 
-  async add(command: string) {
-    const id = this.queue.add(command, Date.now())
+  async add(statement: string, check: string | null) {
+    const id = this.queue.add(statement, check, Date.now())
     await this.dispatch()
     return id
   }
