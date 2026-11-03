@@ -120,19 +120,21 @@ export async function harden(
       return reason
     }
     valid++
-    const probes: { ok: boolean; code: number | null; cost: number }[] = []
-    for (let i = 0; i < SAMPLES; i++) {
-      const budget = { limit: null, spent: 0 }
-      const r = await attempt(
-        task,
-        agent,
-        complete,
-        budget,
-        () => {},
-        join(DIR, 'logs', `harden-${Date.now()}.log`),
-      )
-      probes.push({ ...r, cost: budget.spent })
-    }
+    // 試行ごとに作業ディレクトリとソケットが別なので、並列に解かせる
+    const probes = await Promise.all(
+      Array.from({ length: SAMPLES }, async () => {
+        const budget = { limit: null, spent: 0 }
+        const r = await attempt(
+          task,
+          agent,
+          complete,
+          budget,
+          () => {},
+          join(DIR, 'logs', `harden-${crypto.randomUUID()}.log`),
+        )
+        return { ...r, cost: budget.spent }
+      }),
+    )
     const ok = probes.filter((p) => p.ok).length
     const rate = ok / SAMPLES
     if (!inBand(rate)) {

@@ -154,3 +154,34 @@ test('採用が足りないまま文章だけで応答した生成役に、出�
     accepted: 1,
   })
 })
+
+test('1回の応答の課題は並列に選別し、結果は提出の順に返す', async () => {
+  const contexts: Context[] = []
+  const complete: Complete = async (context) => {
+    contexts.push(structuredClone(context))
+    return reply(
+      ['遅い', '速い'].map((statement) => ({
+        type: 'toolCall' as const,
+        id: statement,
+        name: 'submit_task',
+        arguments: { ...task({ statement }) },
+      })),
+    )
+  }
+  let running = 0
+  let peak = 0
+  const accept = async (t: { statement: string }) => {
+    peak = Math.max(peak, ++running)
+    await Bun.sleep(t.statement === '遅い' ? 50 : 0)
+    running--
+    return t.statement === '遅い' ? '遅い課題は除外' : null
+  }
+  expect(await generate('目的', 2, complete, accept)).toEqual({
+    submitted: 4,
+    accepted: 2,
+  })
+  expect(peak).toBe(2)
+  // 2回目の呼び出しで、生成役は1回目の結果を提出の順に受け取っている
+  const results = contexts[1].messages.filter((m) => m.role === 'toolResult')
+  expect(results.map((m) => m.toolCallId)).toEqual(['遅い', '速い'])
+})
