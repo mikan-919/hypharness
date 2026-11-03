@@ -126,16 +126,25 @@ export function rate(m: Measure, commit: string, split: Split) {
   return row?.r ?? null
 }
 
-// 基準版を繰り返し測ったときの成功率のばらつき。2回以上測っていなければ 0
-const noise = (m: Measure, commit: string) =>
-  summary(
-    m.db
-      .query<{ r: number }, [string, number]>(
-        "SELECT CAST(ok AS REAL) / total AS r FROM measurements WHERE commit_id = ? AND split = 'val' AND total = ?",
-      )
-      .all(commit, m.tasks('val').length)
-      .map((x) => x.r),
-  ).std
+// 現在の課題の数で測った、そのコミットの計測ごとの成功率
+const rates = (m: Measure, commit: string, split: Split) =>
+  m.db
+    .query<{ r: number }, [string, string, number]>(
+      'SELECT CAST(ok AS REAL) / total AS r FROM measurements WHERE commit_id = ? AND split = ? AND total = ? ORDER BY id',
+    )
+    .all(commit, split, m.tasks(split).length)
+    .map((x) => x.r)
+
+// 2つの成功率の差の検定。各計測を課題数 tasks 回の試行とみなし、二項分布のばらつきから差のばらつきを求める。
+// 返す margin は差のばらつきの2倍で、delta がこれを超えれば偶然ではないとみなす
+export function compare(base: number[], candidate: number[], tasks: number) {
+  const b = summary(base).mean
+  const c = summary(candidate).mean
+  const variance =
+    (b * (1 - b)) / (tasks * base.length) +
+    (c * (1 - c)) / (tasks * candidate.length)
+  return { delta: c - b, margin: 2 * Math.sqrt(variance) }
+}
 
 // 改善後の agent/ を親のツリーに重ねてコミットする。一時的なインデックスを使い、利用者の作業ツリーとブランチには触れない。
 // agent/ の複製だけを重ねるため、作業用ディレクトリの agent/ の外に置かれたファイルはコミットに入らない
@@ -395,7 +404,7 @@ const ensure = async (
   return r.ok / r.total
 }
 
-// 1周。採否は基準版と比べる。親が基準版より低い候補でも、親を上回っただけでは基準版にしない
+// 1周。門番を通った候補を測って系統の記録に残す。1回の計測はぶれが大きいため、ここでは基準版を変えない（DGM と同じく記録から親を選ぶ）
 export async function evolve(
   m: Measure,
   start: string,
@@ -416,7 +425,8 @@ export async function evolve(
       reason: null,
     })
   }
-  const baseVal = await ensure(m, base, 'val', complete)
+  // 予算の基準は基準版の最初の計測で決まる
+  await ensure(m, base, 'val', complete)
   const parent = choose(m, lineage.pool())
   console.log(`親: ${parent.commit_id.slice(0, 7)}（${parent.description}）`)
   const perTask =
@@ -476,30 +486,80 @@ ${await weakness(m, parent.commit_id, generator)}`
     const parentVal = rate(m, parent.commit_id, 'val') ?? 0
     lineage.setArm(commit, arm, childVal / total > parentVal ? 1 : 0)
   }
-  const delta = childVal / total - baseVal
-  // ponytail: ばらつきの2倍を超えた差だけを本物とみなす。課題が少ないうちは検定を使わない
-  if (delta <= 2 * noise(m, base)) {
-    lineage.set(commit, 'measured', `検証用で基準版との差 ${delta.toFixed(3)}`)
-    console.log(`保留: 検証用で基準版との差 ${delta.toFixed(3)}`)
-    return { commit, status: 'measured' as const, reason: null }
+  lineage.set(commit, 'measured', `検証用 ${childVal}/${total}`)
+  console.log(`記録: 検証用 ${childVal}/${total}`)
+  return { commit, status: 'measured' as const, reason: null }
+}
+
+// 配る版を決める。進化の周回での検証用の成功率で上位 top 件の候補を選び、検証用・成績用を repeats 回ずつ測り直す。
+// 候補は進化の周回で測った最初の1回で選び、上振れしているその1回は判定に使わない。2回目以降は前に中断した分も含めて使い、
+// 足りない分だけ測る。基準版と、候補の成績用は全計測を使う。
+// 検証用で基準版を確かに上回り、成績用で確かに下回らない候補のうち、検証用の差が最大のものを基準版にする
+export async function promote(
+  m: Measure,
+  complete: Complete,
+  top = 3,
+  repeats = 5,
+) {
+  const lineage = openLineage(m)
+  const base = m.meta('base')
+  if (!base) throw new Error('基準版がありません。先に evolve を回してください')
+  const candidates = lineage
+    .pool()
+    .filter((c) => c.status === 'measured')
+    .map((c) => ({ c, r: rates(m, c.commit_id, 'val')[0] ?? null }))
+    .filter((x): x is { c: Candidate; r: number } => x.r !== null)
+    .sort((a, b) => b.r - a.r)
+    .slice(0, top)
+  const again = async (commit: string, split: Split, n: number) => {
+    const out: number[] = []
+    for (let i = 0; i < n; i++) {
+      const r = await measure(m, commit, split, complete)
+      out.push(r.ok / r.total)
+    }
+    return out
   }
-  const baseTest = await ensure(m, base, 'test', complete)
-  const childTest = await ensure(m, commit, 'test', complete)
-  if (childTest < baseTest) {
-    lineage.set(
-      commit,
-      'measured',
-      `成績用で基準版を下回る（${childTest.toFixed(3)} < ${baseTest.toFixed(3)}）`,
+  const pad = async (commit: string, split: Split, skip = 0) => {
+    const known = rates(m, commit, split).slice(skip)
+    return [...known, ...(await again(commit, split, repeats - known.length))]
+  }
+  const baseVal = await pad(base, 'val')
+  const baseTest = await pad(base, 'test')
+  let best: { commit: string; delta: number } | null = null
+  for (const { c } of candidates) {
+    const id = c.commit_id.slice(0, 7)
+    const val = compare(
+      baseVal,
+      await pad(c.commit_id, 'val', 1),
+      m.tasks('val').length,
     )
-    console.log('保留: 成績用で基準版を下回りました')
-    return { commit, status: 'measured' as const, reason: null }
+    const line = `検証用 差 ${val.delta.toFixed(3)}（基準 ${val.margin.toFixed(3)}）`
+    if (val.delta <= val.margin) {
+      console.log(`${id}: 見送り、${line}`)
+      continue
+    }
+    const test = compare(
+      baseTest,
+      await pad(c.commit_id, 'test'),
+      m.tasks('test').length,
+    )
+    if (-test.delta > test.margin) {
+      console.log(
+        `${id}: 見送り、${line}、成績用で下回る（差 ${test.delta.toFixed(3)}）`,
+      )
+      continue
+    }
+    console.log(`${id}: 合格、${line}、成績用 差 ${test.delta.toFixed(3)}`)
+    if (!best || val.delta > best.delta) {
+      best = { commit: c.commit_id, delta: val.delta }
+    }
   }
-  lineage.set(
-    commit,
-    'adopted',
-    `検証用 +${delta.toFixed(3)}、成績用 ${childTest.toFixed(3)}`,
-  )
-  m.setMeta('base', commit)
-  console.log(`採用: ${commit.slice(0, 7)} を基準版にしました`)
-  return { commit, status: 'adopted' as const, reason: null }
+  if (!best) {
+    console.log('基準版は変えません')
+    return null
+  }
+  lineage.set(best.commit, 'adopted', `検証用 +${best.delta.toFixed(3)}`)
+  m.setMeta('base', best.commit)
+  console.log(`採用: ${best.commit.slice(0, 7)} を基準版にしました`)
+  return best.commit
 }
