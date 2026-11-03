@@ -45,6 +45,8 @@ const AGENT_TIMEOUT_MS = 10 * 60_000
 // ponytail: 1課題の予算は、基準の計測での1課題あたりの費用の2倍。同じ費用で上限を切ると、
 // ばらつきで基準版自身が予算切れになり成功率が下がるため、余裕を持たせる。採否の記録が貯まったら見直す
 export const BUDGET_MARGIN = 2
+// ponytail: 解答役の1回の呼び出しは120秒まで（時間切れは再試行する）。生成役は推論が深く長くかかるため、SDK の既定（10分）のまま
+const SOLVER_TIMEOUT_MS = 120_000
 
 type Row = EvalTask & { id: number; split: Split }
 type Measurement = { id: number; ok: number; total: number; cost: number }
@@ -409,13 +411,20 @@ export async function models(onCost?: (cost: number) => void) {
       `${DIR} で bunx @earendil-works/pi-ai login openai を実行してサインインしてください`,
     )
   }
-  const load = (role: string, name: string, reasoning?: string): Complete => {
+  // timeoutMs は1回の呼び出しの上限。SDK の既定は10分で、候補の制限時間（10分）と同じため、止まった呼び出しが1回あると試行全体が時間切れになる
+  const load = (
+    role: string,
+    name: string,
+    reasoning?: string,
+    timeoutMs?: number,
+  ): Complete => {
     const model = m.getModel('openai', name)
     if (!model) throw new Error(`未対応のモデルです: ${name}`)
     console.log(`${role}: ${name}、推論の深さ: ${reasoning ?? '既定'}`)
     const complete: Complete = (context, options) =>
       m.complete(model, context, {
         ...(reasoning && { reasoningEffort: reasoning }),
+        ...(timeoutMs && { timeoutMs }),
         ...options,
       } as never)
     return onCost ? metered(complete, onCost) : complete
@@ -423,7 +432,7 @@ export async function models(onCost?: (cost: number) => void) {
   const name = process.env.MODEL || 'gpt-6.1-sol'
   const reasoning = process.env.REASONING
   return {
-    solver: load('候補のモデル', name, reasoning),
+    solver: load('候補のモデル', name, reasoning, SOLVER_TIMEOUT_MS),
     generator: load(
       '生成役のモデル',
       process.env.GENERATOR_MODEL || name,
