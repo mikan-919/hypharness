@@ -135,7 +135,7 @@ oriel との違い: oriel のデーモンは Rust で、Codex を実行する。
 作るもの（`bun run measure <セッション> evolve [周回数] [基準版] explore`。段階1の方式は `simple`）:
 
 - 弱点の抽出。親の検証用課題での成功と失敗の応答を並べ、失敗に共通する原因を生成役のモデル（固定部）にまとめさせる（Self-Harness、ModularRSI の対比分析）。改善役への入力に加える。
-- 改善対象の選択。指示文（GEPA）、1つの機能（ModularRSI）、コード全体（SICA/DGM）のどれを変えるかを UCB1（試行回数と過去の成績から、次に試す選択肢を決める方式。AIDE² が使う）で選び、改善役に範囲を指定する。報酬は、候補が親を検証用で上回ったか（1か0）とし、門番で不採用になった候補は0とする。SpecForge は文献を特定できていないため、対象に入れていない。
+- 改善対象の選択。指示文（GEPA）、1つの機能（ModularRSI）、コード全体（SICA/DGM）のどれを変えるかを UCB1（試行回数と過去の成績から、次に試す選択肢を決める方式。AIDE² が使う）で選び、改善役に範囲を指定する。報酬は、候補が親を検証用で上回ったか（1か0）とし、門番で不採用になった候補は0とする。SpecForge（テストの失敗から仕様を直し、呼ばれる側を先に直す）は、コードの部品どうしの依存で一方の修正が他方を壊す問題を扱う。今の `agent/` は1ファイルで部品の依存が小さいため、対象に入れていない。
 - 変更量の上限（RRSI）。門番で、1候補の変更行数（追加と削除の合計）が120行を超えたら不採用にする。RRSI の、上限を徐々に絞る方式と、未探索の箇所を優先する重みは、比較の記録が貯まってから入れる。
 
 完了条件:
@@ -286,21 +286,21 @@ DeLM 型の分担（目的の分解とタスクの取り合い）に、資本と
 
 ## 6. 参考文献
 
-| 名前         | 文献                                                                                                | この設計で使う箇所                                  |
-| ------------ | --------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| DeLM         | Mao, Mirhoseini. Decentralized Multi-Agent Systems with Shared Context. arXiv:2606.10662            | 中央の調整役なしのタスク分担、3段の検証済み共有記憶 |
-| LCM          | Ehrlich, Blackman. LCM: Lossless Context Management. arXiv:2605.04050                               | 追記専用の原文保存と要約からの展開                  |
-| CLM          | Context Language Models. arXiv:2609.37725                                                           | モデルによる作業文脈の編集                          |
-| TokenPilot   | TokenPilot: Cache-Efficient Context Management for LLM Agents. arXiv:2606.17016                     | 接頭辞の固定と、編集の一括反映                      |
-| VISTA        | Xu, Li, Zhang. LLM Agents Are Latent Context Managers. arXiv:2606.30005                             | ブロック単位の作業記憶と、その状態の表示            |
-| Meta-Harness | Lee ほか. arXiv:2603.28052                                                                          | 候補のコード・実行記録・評価値を読む外側のループ    |
-| Self-Harness | Self-Harness: Harnesses That Improve Themselves. arXiv:2606.09498                                   | 失敗の証拠からの弱点抽出                            |
-| ModularRSI   | Wu ほか. ModularRSI: Modular and Generalizable Recursive Harness Self-Improvement. arXiv:2609.14857 | 成功・失敗の対比分析、機能単位の修正と統合          |
-| RRSI         | RRSI: Regularized Recursive Self-Improvement of Agent Harnesses. arXiv:2609.24972                   | 変更量の制限、批評と不要変更の除去                  |
-| AIDE²        | Recursive self-improvement of AI research agents. arXiv:2609.26457                                  | UCB1 による探索方針の選択、非公開課題での評価       |
-| DGM          | Darwin Gödel Machine                                                                                | 候補の系統樹と親の選択                              |
-| SICA         | Self-Improving Coding Agent                                                                         | ハーネスの実装コードの自己修正                      |
-| GEPA         | GEPA                                                                                                | 実行履歴からの指示文の改善                          |
-| SpecForge    | 未確認                                                                                              | 仕様・依存順・失敗分散の改善                        |
-| Innovators   | 未確認                                                                                              | 独立した改善仮説の生成                              |
-| RECAP        | 未確認                                                                                              | 文脈選択                                            |
+| 名前         | 文献                                                                                                                             | この設計で使う箇所                                                                                                                                                 |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| DeLM         | Mao, Mirhoseini. Decentralized Multi-Agent Systems with Shared Context. arXiv:2606.10662                                         | 中央の調整役なしのタスク分担、3段の検証済み共有記憶                                                                                                                |
+| LCM          | Ehrlich, Blackman. LCM: Lossless Context Management. arXiv:2605.04050                                                            | 追記専用の原文保存と要約からの展開                                                                                                                                 |
+| CLM          | Context Language Models. arXiv:2609.37725                                                                                        | モデルによる作業文脈の編集                                                                                                                                         |
+| TokenPilot   | TokenPilot: Cache-Efficient Context Management for LLM Agents. arXiv:2606.17016                                                  | 接頭辞の固定と、編集の一括反映                                                                                                                                     |
+| VISTA        | Xu, Li, Zhang. LLM Agents Are Latent Context Managers. arXiv:2606.30005                                                          | ブロック単位の作業記憶と、その状態の表示                                                                                                                           |
+| Meta-Harness | Lee ほか. arXiv:2603.28052                                                                                                       | 候補のコード・実行記録・評価値を読む外側のループ                                                                                                                   |
+| Self-Harness | Self-Harness: Harnesses That Improve Themselves. arXiv:2606.09498                                                                | 失敗の証拠からの弱点抽出                                                                                                                                           |
+| ModularRSI   | Wu ほか. ModularRSI: Modular and Generalizable Recursive Harness Self-Improvement. arXiv:2609.14857                              | 成功・失敗の対比分析、機能単位の修正と統合                                                                                                                         |
+| RRSI         | RRSI: Regularized Recursive Self-Improvement of Agent Harnesses. arXiv:2609.24972                                                | 変更量の制限、批評と不要変更の除去                                                                                                                                 |
+| AIDE²        | Recursive self-improvement of AI research agents. arXiv:2609.26457                                                               | UCB1 による探索方針の選択、非公開課題での評価                                                                                                                      |
+| DGM          | Darwin Gödel Machine                                                                                                             | 候補の系統樹と親の選択                                                                                                                                             |
+| SICA         | Self-Improving Coding Agent                                                                                                      | ハーネスの実装コードの自己修正                                                                                                                                     |
+| GEPA         | GEPA                                                                                                                             | 実行履歴からの指示文の改善                                                                                                                                         |
+| SpecForge    | Cheng, Chen, Gao, Cheng. SpecForge: Recursive Self-Improvement for Coding Agents via Behavioral Specifications. arXiv:2610.15708 | 振る舞いの仕様をテストの失敗から直す。呼ばれる側を先に直す依存順と、失敗の部分集合ごとの修正案（失敗分散）                                                         |
+| Innovators   | 文献ではなく役割の名前（利用者の説明による）                                                                                     | 改善のアイデアを出すエージェント。段階4bの worker がこれにあたる                                                                                                   |
+| ReCAP        | Yang ほか. Persistent Context Graphs for Efficient Memory Compaction in LLM Agents. arXiv:2609.40118                             | 文脈選択。アテンションから重要度と依存のグラフを作るため、アテンションを返さない API では代わりの方法（論文では小さな公開モデルで再計算）が要る。図の「RECAP代替」 |
