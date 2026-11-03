@@ -180,18 +180,19 @@ flowchart TD
             TESTRUN["隔離環境で実行<br/>固定計算予算"]
             VALID_RSI{"動作・自己編集能力を維持したか"}
             FILTER["RRSI<br/>批評・不要変更の除去"]
+            REMEASURE["上位の候補を繰り返し計測<br/>選ぶのに使った1回は判定に使わない"]
             HIDDEN["AIDE²<br/>独立した非公開課題で評価"]
-            COMPARE["基準版と比較<br/>成功率・費用・汎化・改善能力"]
+            COMPARE["基準版と比較<br/>成功率の差を差のばらつきの2倍で検定<br/>成功率・費用・汎化・改善能力"]
             GATE{"性能・安全性・費用の<br/>採用条件を満たすか"}
 
             MERGE --> TESTRUN --> VALID_RSI
             VALID_RSI -->|"はい"| FILTER
-            FILTER --> HIDDEN --> COMPARE --> GATE
+            REMEASURE --> HIDDEN --> COMPARE --> GATE
         end
 
         subgraph RELEASE["D. 配備・復旧"]
             CANDIDATE["次世代候補の版を固定"]
-            CANARY["一部タスクで試験配備"]
+            CANARY["一部タスクで試験配備<br/>判定コマンドの成否で旧版と比較"]
             RELEASE_GATE{"実運用でも改善を確認したか"}
             PROMOTE["検証済み版へ昇格"]
             ROLLBACK["旧版へ復帰"]
@@ -215,8 +216,11 @@ flowchart TD
         TESTRUN --> LOG
         TESTRUN --> ARCH
         VALID_RSI -->|"いいえ"| LOG
-        GATE -->|"不採用"| PARENT
+        FILTER -->|"1回の計測とともに記録<br/>周回では採否を決めない"| ARCH
+        ARCH -->|"配る版を決めるとき"| REMEASURE
+        GATE -.->|"不採用でも親候補として残る"| ARCH
         GATE -->|"採用"| CANDIDATE
+        ROLLBACK -.->|"候補を不採用にする"| ARCH
     end
 
     H --> RUN
@@ -244,7 +248,7 @@ flowchart TD
             REGISTRY["Node・Agent・Task Registry"]
             SCHED["Scheduler / Reconciler"]
             LEASE["実行権管理<br/>世代番号・排他制御"]
-            CSTATE[("複製管理状態<br/>Raft等")]
+            CSTATE[("管理状態<br/>Durable Object の SQLite<br/>識別子ごとに1つだけ動くため Raft を使わない")]
 
             REGISTRY --> SCHED --> LEASE
             REGISTRY <--> CSTATE
@@ -273,7 +277,7 @@ flowchart TD
 
         FAILURE["ノード故障・接続切断"]
         RECOVER["復旧先ノードを選択"]
-        RESTORE["確定状態・作業領域を復元"]
+        RESUME["確定状態・作業領域を復元"]
 
         UI <--> REGISTRY
         LEASE --> RUNNER
@@ -286,9 +290,9 @@ flowchart TD
 
         FAILURE --> SCHED
         SCHED --> RECOVER
-        RECOVER --> RESTORE
-        MANIFEST --> RESTORE
-        RESTORE --> RUNNER
+        RECOVER --> RESUME
+        MANIFEST --> RESUME
+        RESUME --> RUNNER
     end
 
     SCHED -.->|"エージェント配置・資源割当"| DELM
