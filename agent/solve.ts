@@ -13,7 +13,9 @@ const INSTRUCTIONS =
 // ponytail: 1課題でモデルを呼ぶのは30回まで。足りない課題が多ければ増やす
 const MAX_STEPS = 30
 const OUTPUT_LIMIT = 4000
-const COMMAND_TIMEOUT_MS = 60_000
+// コマンドは180秒まで。timeout で包み、時間切れのときは子のプロセスごと止める（sh だけを止めると、子が出力の管を開いたまま残り、
+// 出力を待ち続ける）
+const COMMAND_TIMEOUT_SECONDS = 180
 
 const tools = [
   {
@@ -35,11 +37,18 @@ const tools = [
 
 async function sh(command: unknown) {
   if (typeof command !== 'string') throw new Error('command は文字列です')
-  const child = Bun.spawn(['sh', '-c', `exec 2>&1\n${command}`], {
-    cwd: '/work',
-    stdout: 'pipe',
-    timeout: COMMAND_TIMEOUT_MS,
-  })
+  const child = Bun.spawn(
+    [
+      'timeout',
+      '-k',
+      '5',
+      String(COMMAND_TIMEOUT_SECONDS),
+      'sh',
+      '-c',
+      `exec 2>&1\n${command}`,
+    ],
+    { cwd: '/work', stdout: 'pipe' },
+  )
   const [output, code] = await Promise.all([
     new Response(child.stdout).text(),
     child.exited,
@@ -48,7 +57,10 @@ async function sh(command: unknown) {
     output.length > OUTPUT_LIMIT
       ? `${output.slice(0, OUTPUT_LIMIT)}\n（${output.length}文字のうち先頭${OUTPUT_LIMIT}文字）`
       : output
-  return `終了コード ${code}\n${shown}`
+  // timeout は時間切れのとき終了コード124を返す
+  const note =
+    code === 124 ? `（${COMMAND_TIMEOUT_SECONDS}秒の時間切れで止めました）` : ''
+  return `終了コード ${code}${note}\n${shown}`
 }
 
 const context: Context = {
