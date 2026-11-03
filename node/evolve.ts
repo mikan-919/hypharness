@@ -117,12 +117,13 @@ export function openLineage(m: Measure) {
 
 // 現在の課題の数で測った、そのコミットの最新の成功率。課題が増えた後の古い計測は使わない
 export function rate(m: Measure, commit: string, split: Split) {
+  // 繰り返し測った版は平均で比べる。ばらつき（noise）と同じ計測群を使うため
   const row = m.db
-    .query<{ ok: number; total: number }, [string, string, number]>(
-      'SELECT ok, total FROM measurements WHERE commit_id = ? AND split = ? AND total = ? ORDER BY id DESC LIMIT 1',
+    .query<{ r: number | null }, [string, string, number]>(
+      'SELECT AVG(CAST(ok AS REAL) / total) AS r FROM measurements WHERE commit_id = ? AND split = ? AND total = ?',
     )
     .get(commit, split, m.tasks(split).length)
-  return row ? row.ok / row.total : null
+  return row?.r ?? null
 }
 
 // 基準版を繰り返し測ったときの成功率のばらつき。2回以上測っていなければ 0

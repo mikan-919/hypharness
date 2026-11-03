@@ -2,8 +2,8 @@ import { beforeAll, expect, test } from 'bun:test'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { type ArmStats, commitAgent, gate, ucb } from './evolve'
-import { REPO } from './measure'
+import { type ArmStats, commitAgent, gate, rate, ucb } from './evolve'
+import { openMeasure, REPO } from './measure'
 
 // 利用者のリポジトリに参照を足さないよう、複製した上で候補を作る
 let repo = ''
@@ -125,3 +125,23 @@ test('変更行数が上限を超える候補は通さない', async () => {
     '変更が 30 行で、上限の 20 行を超えています',
   )
 }, 120_000)
+
+test('繰り返し測った版の成功率は、最新の1回ではなく平均で返す', () => {
+  const m = openMeasure(':memory:')
+  const task = {
+    statement: 's',
+    files: {},
+    check: 'true',
+    check_files: {},
+    solution: {},
+  }
+  for (let i = 0; i < 3; i++) m.addTask(task, 'val')
+  for (const ok of [1, 1, 0]) {
+    m.db.run(
+      "INSERT INTO measurements (commit_id, split, ok, total, started_at) VALUES ('c', 'val', ?, 3, 0)",
+      [ok],
+    )
+  }
+  expect(rate(m, 'c', 'val')).toBeCloseTo(2 / 9)
+  expect(rate(m, 'none', 'val')).toBeNull()
+})
