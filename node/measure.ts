@@ -5,6 +5,7 @@
 //   bun run measure <セッション> review [件数]
 //   bun run measure <セッション> run <コミット> [回数] [val|test]
 //   bun run measure <セッション> evolve [周回数] [最初の基準版のコミット] [simple|explore]
+//   bun run measure <セッション> promote [候補の数] [測り直す回数]
 //   bun run measure <セッション> harden [val|test] [生成する数]
 //   bun run measure <セッション> flag <課題の番号>
 import { Database } from 'bun:sqlite'
@@ -449,10 +450,17 @@ if (import.meta.main) {
       console.log(`周回 ${i}/${times}（${policy}）`)
       await evolve(m, commit, solver, generator, policy)
     }
-    console.log(`基準版: ${m.meta('base')}`)
+  } else if (command === 'promote') {
+    const [top = '3', repeats = '5'] = args
+    if (![top, repeats].every((x) => /^[1-9]\d*$/.test(x))) {
+      throw new Error('候補の数と測り直す回数は正の整数です')
+    }
+    const { promote } = await import('./evolve')
+    const { solver } = await models()
+    await promote(m, solver, Number(top), Number(repeats))
   } else {
     console.log(
-      '使い方: bun run measure <セッション> generate|review|run|evolve|harden|flag',
+      '使い方: bun run measure <セッション> generate|review|run|evolve|promote|harden|flag',
     )
   }
 }

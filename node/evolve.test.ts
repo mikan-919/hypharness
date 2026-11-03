@@ -2,7 +2,7 @@ import { beforeAll, expect, test } from 'bun:test'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { type ArmStats, commitAgent, gate, rate, ucb } from './evolve'
+import { type ArmStats, commitAgent, compare, gate, rate, ucb } from './evolve'
 import { openMeasure, REPO } from './measure'
 
 // 利用者のリポジトリに参照を足さないよう、複製した上で候補を作る
@@ -144,4 +144,14 @@ test('繰り返し測った版の成功率は、最新の1回ではなく平均�
   }
   expect(rate(m, 'c', 'val')).toBeCloseTo(2 / 9)
   expect(rate(m, 'none', 'val')).toBeNull()
+})
+
+test('成功率の差は、課題数と計測回数から求めたばらつきの2倍を超えたときだけ偶然でないとみなす', () => {
+  // 8問で 0.542 と 0.75 を各3回: 差 0.208 は基準 0.269 に届かない
+  const few = compare([0.5, 0.625, 0.5], [0.75, 0.75, 0.75], 8)
+  expect(few.delta).toBeCloseTo(0.208, 3)
+  expect(few.delta).toBeLessThan(few.margin)
+  // 同じ差でも計測回数を増やせば基準を超える
+  const many = compare(Array(10).fill(0.542), Array(10).fill(0.75), 8)
+  expect(many.delta).toBeGreaterThan(many.margin)
 })
