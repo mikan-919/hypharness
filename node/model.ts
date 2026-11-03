@@ -1,6 +1,10 @@
 import type { AssistantMessage, Context } from '@earendil-works/pi-ai'
 
-export type Complete = (context: Context) => Promise<AssistantMessage>
+// sessionId は、同じ接頭辞を持つ呼び出しを同じキャッシュに振り分けるための鍵（OpenAI の prompt_cache_key）
+export type Complete = (
+  context: Context,
+  options?: { sessionId?: string },
+) => Promise<AssistantMessage>
 // 1回の実行で使える費用。limit が null なら上限なし（予算の基準を作る最初の計測）。
 // outage は、モデルの障害が再試行しても回復せず、呼び出しを諦めたときの理由
 export type Budget = { limit: number | null; spent: number; outage?: string }
@@ -17,11 +21,12 @@ async function withRetry(
   complete: Complete,
   context: Context,
   delays: number[],
+  sessionId: string,
 ) {
   let reason = ''
   for (let i = 0; ; i++) {
     try {
-      const reply = await complete(context)
+      const reply = await complete(context, { sessionId })
       if (
         reply.stopReason !== 'error' ||
         !TRANSIENT.test(reply.errorMessage ?? '')
@@ -46,6 +51,8 @@ export function serveModel(
   onCall: (call: Call) => void,
   delays = RETRY_DELAYS_MS,
 ) {
+  // 1回の試行の呼び出しは会話を追記していくだけなので、同じ鍵でキャッシュに当てる
+  const sessionId = crypto.randomUUID()
   return Bun.serve({
     unix: socket,
     async fetch(request) {
@@ -68,7 +75,12 @@ export function serveModel(
           { status: 400 },
         )
       }
-      const { reply, reason } = await withRetry(complete, context, delays)
+      const { reply, reason } = await withRetry(
+        complete,
+        context,
+        delays,
+        sessionId,
+      )
       if (!reply) {
         budget.outage = reason
         return Response.json(
