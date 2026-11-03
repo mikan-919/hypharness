@@ -62,3 +62,14 @@ bun run typecheck
 bun test
 bun run lint
 ```
+
+## 配備する
+
+画面と中継は Cloudflare Workers に配備する。チェックポイントを置く R2 のバケットは、初回だけ先に作る。
+
+```sh
+bunx cf r2 buckets create --name hypharness-checkpoints
+bun run deploy
+```
+
+ノードは `bun run node <セッション> <配備先の URL>` で配備先とペアリングする。
