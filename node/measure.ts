@@ -4,7 +4,7 @@
 //   bun run measure <セッション> generate <最終目的のファイル> [検証用の数] [成績用の数]
 //   bun run measure <セッション> review [件数]
 //   bun run measure <セッション> run <コミット> [回数] [val|test]
-//   bun run measure <セッション> evolve [周回数] [最初の基準版のコミット]
+//   bun run measure <セッション> evolve [周回数] [最初の基準版のコミット] [simple|explore]
 //   bun run measure <セッション> harden [val|test] [生成する数]
 //   bun run measure <セッション> flag <課題の番号>
 import { Database } from 'bun:sqlite'
@@ -436,15 +436,18 @@ if (import.meta.main) {
       `予算の基準（${split} 1回分）: $${Number(m.meta(`budget:${split}`)).toFixed(4)}`,
     )
   } else if (command === 'evolve') {
-    const [times = '1', start = 'HEAD'] = args
+    const [times = '1', start = 'HEAD', policy = 'simple'] = args
+    if (policy !== 'simple' && policy !== 'explore') {
+      throw new Error('方式は simple か explore です')
+    }
     const { evolve } = await import('./evolve')
     const commit = (
       await Bun.$`git -C ${REPO} rev-parse ${start}`.text()
     ).trim()
-    const { solver: complete } = await models()
+    const { solver, generator } = await models()
     for (let i = 1; i <= Number(times); i++) {
-      console.log(`周回 ${i}/${times}`)
-      await evolve(m, commit, complete)
+      console.log(`周回 ${i}/${times}（${policy}）`)
+      await evolve(m, commit, solver, generator, policy)
     }
     console.log(`基準版: ${m.meta('base')}`)
   } else {

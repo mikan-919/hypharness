@@ -2,8 +2,8 @@ import { beforeAll, expect, test } from 'bun:test'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { commitAgent, gate } from './evolve'
-import { REPO } from './measure'
+import { type ArmStats, commitAgent, gate, rate, ucb } from './evolve'
+import { openMeasure, REPO } from './measure'
 
 // 利用者のリポジトリに参照を足さないよう、複製した上で候補を作る
 let repo = ''
@@ -92,3 +92,56 @@ test('進化対象の外の変更はコミットに入らず、外を変えた�
     '進化対象の外を変更しています: node/measure.ts',
   )
 }, 120_000)
+
+test('UCB1 は試していない改善対象を先に選び、その後は勝率と試行の少なさで選ぶ', () => {
+  expect(ucb([])).toBe('prompt')
+  expect(ucb([{ arm: 'prompt', n: 1, wins: 0 }])).toBe('module')
+  const tried = (wins: [number, number, number]): ArmStats[] => [
+    { arm: 'prompt', n: 10, wins: wins[0] },
+    { arm: 'module', n: 10, wins: wins[1] },
+    { arm: 'code', n: 10, wins: wins[2] },
+  ]
+  expect(ucb(tried([1, 8, 2]))).toBe('module')
+  // 勝率が同程度なら、試行の少ない対象を選ぶ
+  expect(
+    ucb([
+      { arm: 'prompt', n: 20, wins: 10 },
+      { arm: 'module', n: 2, wins: 1 },
+      { arm: 'code', n: 20, wins: 10 },
+    ]),
+  ).toBe('module')
+})
+
+test('変更行数が上限を超える候補は通さない', async () => {
+  const commit = await candidate(async (agent) => {
+    await Bun.write(
+      join(agent, 'long.ts'),
+      Array.from({ length: 30 }, (_, i) => `export const v${i} = ${i}\n`).join(
+        '',
+      ),
+    )
+  })
+  expect(await gate(repo, head, commit as string, passes, 20)).toBe(
+    '変更が 30 行で、上限の 20 行を超えています',
+  )
+}, 120_000)
+
+test('繰り返し測った版の成功率は、最新の1回ではなく平均で返す', () => {
+  const m = openMeasure(':memory:')
+  const task = {
+    statement: 's',
+    files: {},
+    check: 'true',
+    check_files: {},
+    solution: {},
+  }
+  for (let i = 0; i < 3; i++) m.addTask(task, 'val')
+  for (const ok of [1, 1, 0]) {
+    m.db.run(
+      "INSERT INTO measurements (commit_id, split, ok, total, started_at) VALUES ('c', 'val', ?, 3, 0)",
+      [ok],
+    )
+  }
+  expect(rate(m, 'c', 'val')).toBeCloseTo(2 / 9)
+  expect(rate(m, 'none', 'val')).toBeNull()
+})
