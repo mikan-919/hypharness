@@ -193,11 +193,16 @@ ${goal}
       })
       continue
     }
-    for (const call of calls) {
-      const task = call.name === submitTask.name ? asTask(call.arguments) : null
-      const reason = task
-        ? await accept(task)
-        : 'submit_task の引数の形式が不正です'
+    // 1回の応答に含まれる課題は並列に選別し、結果は提出の順に返す
+    const reasons = await Promise.all(
+      calls.map((call) => {
+        const task =
+          call.name === submitTask.name ? asTask(call.arguments) : null
+        return task ? accept(task) : 'submit_task の引数の形式が不正です'
+      }),
+    )
+    for (const [i, call] of calls.entries()) {
+      const reason = reasons[i]
       submitted++
       if (!reason) accepted++
       context.messages.push({
