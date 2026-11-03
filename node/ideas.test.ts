@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { judge, openIdeas, settle } from './ideas'
+import { history, judge, openIdeas, settle } from './ideas'
 import { openMeasure, withMemory } from './measure'
 
 test('アイデアは、成功率が確かに上がるか、成功率を下げずに費用が下がったときだけ採用する', () => {
@@ -37,4 +37,34 @@ test('投資家は資本に比例して試す番を配り、採用されたア�
   expect(ideas.pick(0.3)).toBe('policy')
   expect(withMemory('', '課題')).toBe('課題')
   expect(withMemory('- 方針', '課題')).toContain('- 方針\n\n## 課題\n課題')
+})
+
+test('worker には、これまでのアイデアを採否と成功率・費用の変化つきで古い順に見せる', () => {
+  const m = openMeasure(':memory:')
+  const ideas = openIdeas(m)
+  expect(history(m)).toBe('')
+  const base = { rate: 0.5, cost: 0.01 }
+  ideas.record(
+    'skill',
+    '案A',
+    'c',
+    base,
+    { rate: 0.4, cost: 0.012 },
+    0.2,
+    false,
+    -1,
+  )
+  ideas.record(
+    'policy',
+    '案B',
+    'c',
+    base,
+    { rate: 0.75, cost: 0.01 },
+    0.2,
+    true,
+    2,
+  )
+  expect(history(m)).toBe(
+    '- [不採用] 案A（成功率 0.500 → 0.400、平均費用 $0.0100 → $0.0120）\n- [採用] 案B（成功率 0.500 → 0.750、平均費用 $0.0100 → $0.0100）',
+  )
 })
