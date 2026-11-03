@@ -23,6 +23,8 @@ const REPEATS = 5
 // 成功率を下げずに、平均費用をこの割合以下にしたアイデアも採用する
 const COST_RATIO = 0.8
 const IDEA_LIMIT = 300
+// worker に見せる、これまでのアイデアの数
+const HISTORY_LIMIT = 20
 
 // アイデアを採用するか。成功率が確かに上がったか、成功率を下げずに費用が下がったら採用する
 export function judge(
@@ -154,6 +156,29 @@ async function measured(
   }
 }
 
+// これまでに試したアイデアとその結果。worker が同じ方向の案を繰り返さないよう、根拠として共有する
+export const history = (m: Measure) =>
+  m.db
+    .query<
+      {
+        worker: string
+        text: string
+        base_rate: number
+        rate: number
+        base_cost: number
+        cost: number
+        adopted: number
+      },
+      [number]
+    >('SELECT * FROM ideas ORDER BY id DESC LIMIT ?')
+    .all(HISTORY_LIMIT)
+    .reverse()
+    .map(
+      (r) =>
+        `- [${r.adopted ? '採用' : '不採用'}] ${r.text}（成功率 ${r.base_rate.toFixed(3)} → ${r.rate.toFixed(3)}、平均費用 $${r.base_cost.toFixed(4)} → $${r.cost.toFixed(4)}）`,
+    )
+    .join('\n')
+
 // worker にアイデアを1つ出させる。今の記憶で失敗した課題の応答を見せる
 async function propose(
   m: Measure,
@@ -189,7 +214,10 @@ ${memory || '（なし）'}
 今の方針で失敗した例:
 ${failed.join('\n---\n') || '（なし）'}
 
-方針に1行で加える改善案を1つだけ、${IDEA_LIMIT}文字以内の日本語で答えてください。担当の範囲に限り、特定の課題の答えは書かないでください。改善案の文だけを答えてください。`,
+これまでに試したアイデアと結果（成功率と平均費用の変化）:
+${history(m) || '（なし）'}
+
+これまでに不採用だったアイデアと同じ方向の案は避けてください。方針に1行で加える改善案を1つだけ、${IDEA_LIMIT}文字以内の日本語で答えてください。担当の範囲に限り、特定の課題の答えは書かないでください。改善案の文だけを答えてください。`,
         timestamp: Date.now(),
       },
     ],
