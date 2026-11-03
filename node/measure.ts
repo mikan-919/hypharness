@@ -221,6 +221,14 @@ export function openMeasure(path: string) {
 }
 export type Measure = ReturnType<typeof openMeasure>
 
+// 既にある課題の冒頭。生成役が同じ内容の課題を作らないように見せる
+const existing = (m: Measure) => {
+  const all = [...m.tasks('val'), ...m.tasks('test')]
+  return all.length
+    ? `次の課題は既にあります。これらと同じ内容の課題は作らないでください:\n${all.map((t) => `- ${t.statement.split('\n')[0].slice(0, 150)}`).join('\n')}`
+    : ''
+}
+
 // セッションの作業領域（命令 workspace で設定）に、リポジトリの今のコミットを付けたもの。設定がなければ undefined
 export async function currentWorkspace(
   m: Measure,
@@ -462,7 +470,7 @@ if (import.meta.main) {
     m.setMeta('goal', goal)
     const { generator: complete } = await models(charge)
     const workspace = await currentWorkspace(m)
-    // 検証用と成績用は別の呼び出しで作り、互いの課題文を見せない
+    // 検証用と成績用は別の呼び出しで作る。同じ内容の課題が両方に入らないよう、既にある課題の冒頭だけを見せる
     for (const [split, count] of [
       ['val', Number(val)],
       ['test', Number(test)],
@@ -486,7 +494,7 @@ if (import.meta.main) {
           console.log(`  採用: ${task.statement.slice(0, 60)}`)
           return null
         },
-        '',
+        existing(m),
         workspace,
       )
       console.log(`${split}: 提出 ${r.submitted}、採用 ${r.accepted}`)
