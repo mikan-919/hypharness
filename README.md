@@ -39,6 +39,17 @@ bun run measure <セッション> ledger  # 期ごとの予算・使用額・改
 bun run measure <セッション> ideas-check [回数]  # 記憶ありとなしを成績用課題で比べる
 bun run measure <セッション> harden [val|test] [生成する数]                            # 課題を敵対的に強化する
 bun run measure <セッション> flag <課題の番号>                                         # 抽出確認で関係しない課題を外す
+bun run measure <セッション> workspace <リポジトリ> <開発環境の設定> [読み取り専用のディレクトリ...]  # 課題をリポジトリの上に作る
+bun run measure <セッション> pr [試行の番号]  # 成功した試行の差分からリポジトリに PR を作る（番号なしで候補を表示）
+```
+
+`workspace` を設定したセッションでは、課題を `generate` のときのリポジトリの HEAD の上に作る。生成役は隔離環境のリポジトリの複製でシェルを使い、変更と隠しテストを作って提出し、解答役は同じコミットの中身で解く。hibana の場合は次のように設定する。開発環境の設定には、依存の取得済みの置き場を指す `CARGO_HOME` を足す（隔離環境にはネットワークがない）。
+
+```sh
+(cd ~/ghq/github.com/mikan-919/hibana && nix print-dev-env) > ~/.hyph/hibana.env.sh
+echo "export CARGO_HOME=$HOME/.cargo CARGO_NET_OFFLINE=true" >> ~/.hyph/hibana.env.sh
+bun run measure hibana workspace ~/ghq/github.com/mikan-919/hibana ~/.hyph/hibana.env.sh ~/.cargo/registry
+bun run measure hibana generate <最終目的のファイル> 4 2
 ```
 
 `harden` は、基準版の解けた割合と失敗の記録を生成役に渡して新しい課題を作らせ、基準版に4回ずつ解かせて、解けた割合が20〜80%の課題だけを加える。課題を加えたときは、基準版が3回以上の計測ですべて解いた課題を外し、その分割の予算の基準を作り直す。
