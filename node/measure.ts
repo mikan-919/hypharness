@@ -411,7 +411,8 @@ export async function models(onCost?: (cost: number) => void) {
       `${DIR} で bunx @earendil-works/pi-ai login openai を実行してサインインしてください`,
     )
   }
-  // timeoutMs は1回の呼び出しの上限。SDK の既定は10分で、候補の制限時間（10分）と同じため、止まった呼び出しが1回あると試行全体が時間切れになる
+  // timeoutMs は1回の呼び出しの上限。SDK の既定は10分で、候補の制限時間（10分）と同じため、止まった呼び出しが1回あると試行全体が時間切れになる。
+  // 上限を付けるときは SDK の中の呼び直し（既定2回）をやめ、withRetry だけが理由を残して呼び直す
   const load = (
     role: string,
     name: string,
@@ -424,7 +425,7 @@ export async function models(onCost?: (cost: number) => void) {
     const complete: Complete = (context, options) =>
       m.complete(model, context, {
         ...(reasoning && { reasoningEffort: reasoning }),
-        ...(timeoutMs && { timeoutMs }),
+        ...(timeoutMs && { timeoutMs, maxRetries: 0 }),
         ...options,
       } as never)
     return onCost ? metered(complete, onCost) : complete

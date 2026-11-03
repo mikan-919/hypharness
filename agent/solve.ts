@@ -83,6 +83,8 @@ for (let step = 1; step <= MAX_STEPS; step++) {
     method: 'POST',
     unix: '/model.sock',
     body: JSON.stringify(context),
+    // 中継は一時的な障害のとき待って呼び直すため、5分を超えて応答しないことがある。Bun の既定の無通信の上限（5分）を外す
+    timeout: false,
   })
   if (!response.ok) {
     console.error(
