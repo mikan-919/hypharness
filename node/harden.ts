@@ -1,7 +1,13 @@
 // 進化用課題の敵対的強化（固定部）。基準版の成績と失敗の記録を生成役に渡して新しい課題を作らせ、
 // 基準版がときどき解ける課題だけを加え、安定して解く課題を外す
 import { join } from 'node:path'
-import { attempt, checkout, DIR, type Measure } from './measure'
+import {
+  attempt,
+  checkout,
+  currentWorkspace,
+  DIR,
+  type Measure,
+} from './measure'
 import type { Complete } from './model'
 import {
   type EvalTask,
@@ -159,6 +165,7 @@ export async function harden(
     generator,
     accept,
     guidance(m, base, split, before),
+    await currentWorkspace(m),
   )
   for (const id of stable(before, added)) {
     m.db.run('UPDATE tasks SET split = ? WHERE id = ?', [

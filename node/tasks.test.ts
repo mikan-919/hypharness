@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AssistantMessage, Context } from '@earendil-works/pi-ai'
+import type { AssistantMessage, Context, ToolCall } from '@earendil-works/pi-ai'
 import { attempt } from './measure'
 import { type Budget, type Complete, serveModel } from './model'
-import { type EvalTask, generate, validate } from './tasks'
+import { diff, type EvalTask, generate, prepare, validate } from './tasks'
 
 const task = (t: Partial<EvalTask>): EvalTask => ({
   statement: 'answer.txt に 42 と書いてください',
@@ -100,7 +100,7 @@ test('判定用ファイルは解答役から読めず、上書きしても判�
     () => {},
     join(dir, 'agent.log'),
   )
-  expect(result).toEqual({ ok: true, code: 0 })
+  expect(result).toEqual({ ok: true, code: 0, patch: null })
   // 台本のコマンド文字列は除き、ツールの結果だけを見る
   const outputs = JSON.stringify(
     contexts.at(-1)?.messages.filter((m) => m.role === 'toolResult'),
@@ -267,4 +267,111 @@ test('モデル中継は、1回の試行の呼び出しに同じキャッシュ�
   expect(keys[1]).toBe(keys[0])
   expect(keys[2]).toBe(keys[3])
   expect(keys[2]).not.toBe(keys[0])
+})
+
+test('作業領域の課題は、リポジトリのコミットの中身・開発環境の設定・読み取り専用のディレクトリを使う', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hyph-test-'))
+  const repo = join(dir, 'repo')
+  await Bun.write(join(repo, 'a.txt'), 'old\n')
+  await Bun.write(join(repo, '.gitignore'), 'target\n')
+  await Bun.$`git -C ${repo} init -q && git -C ${repo} add -A && git -C ${repo} -c user.name=t -c user.email=t@localhost commit -qm a`.quiet()
+  const commit = (await Bun.$`git -C ${repo} rev-parse HEAD`.text()).trim()
+  const shared = join(dir, 'shared')
+  await Bun.write(join(shared, 'mark'), 'ok')
+  await Bun.write(
+    join(dir, 'prelude.sh'),
+    `export MARK=$(cat ${shared}/mark)\n`,
+  )
+  const t = task({
+    workspace: {
+      repo,
+      commit,
+      prelude: join(dir, 'prelude.sh'),
+      mounts: [shared],
+    },
+    check: 'test "$MARK" = ok && grep -q new a.txt',
+    solution: { 'a.txt': 'new\n' },
+  })
+  expect(await validate(t, always)).toBeNull()
+  // 成功した試行の差分には、変更したファイルだけが入り、.gitignore の対象は入らない
+  const work = join(dir, 'work')
+  await mkdir(work)
+  await prepare(work, t)
+  await Bun.write(join(work, 'a.txt'), 'new\n')
+  await Bun.write(join(work, 'target', 'x'), 'built')
+  const patch = await diff(work)
+  expect(patch).toContain('+new')
+  expect(patch).not.toContain('target')
+  await expect(
+    prepare(
+      join(dir, 'other'),
+      task({ workspace: { repo, commit: 'HEAD', prelude: '', mounts: [] } }),
+    ),
+  ).rejects.toThrow('コミットが不正です')
+})
+
+test('作業領域の課題では、生成役が /work でシェルを使い、提出時の変更が模範解答になる', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hyph-test-'))
+  const repo = join(dir, 'repo')
+  await Bun.write(join(repo, 'a.txt'), 'old\n')
+  await Bun.$`git -C ${repo} init -q && git -C ${repo} add -A && git -C ${repo} -c user.name=t -c user.email=t@localhost commit -qm a`.quiet()
+  const commit = (await Bun.$`git -C ${repo} rev-parse HEAD`.text()).trim()
+  await Bun.write(join(dir, 'prelude.sh'), '')
+  const workspace = {
+    repo,
+    commit,
+    prelude: join(dir, 'prelude.sh'),
+    mounts: [],
+  }
+  const steps: Pick<ToolCall, 'name' | 'arguments'>[] = [
+    {
+      name: 'sh',
+      arguments: { command: 'echo new > a.txt && echo h > hidden.txt' },
+    },
+    {
+      name: 'submit_task',
+      arguments: {
+        statement: 'a.txt を new にしてください',
+        files: {},
+        check: 'grep -q new a.txt && test -f hidden.txt',
+        check_files: { 'hidden.txt': 'h\n' },
+      },
+    },
+    // 提出のあと /work は元のコミットに戻っている
+    { name: 'sh', arguments: { command: 'cat a.txt; ls; echo b > b.txt' } },
+    {
+      name: 'submit_task',
+      arguments: {
+        statement: 'b.txt を作ってください',
+        files: {},
+        check: 'test -f b.txt',
+        check_files: {},
+      },
+    },
+  ]
+  const contexts: Context[] = []
+  const complete: Complete = async (context) => {
+    contexts.push(structuredClone(context))
+    const step = steps[contexts.length - 1]
+    return reply([{ type: 'toolCall', id: String(contexts.length), ...step }])
+  }
+  const accepted: EvalTask[] = []
+  const result = await generate(
+    '目的',
+    2,
+    complete,
+    async (t) => {
+      const reason = await validate(t, always)
+      if (!reason) accepted.push(t)
+      return reason
+    },
+    '',
+    workspace,
+  )
+  expect(result).toEqual({ submitted: 2, accepted: 2 })
+  expect(accepted[0].solution).toEqual({ 'a.txt': 'new\n' })
+  expect(accepted[1].solution).toEqual({ 'b.txt': 'b\n' })
+  expect(accepted[0].workspace).toEqual(workspace)
+  expect(JSON.stringify(contexts[3].messages.at(-1))).toContain('old')
+  expect(JSON.stringify(contexts[3].messages.at(-1))).not.toContain('hidden')
 })

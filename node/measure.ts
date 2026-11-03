@@ -17,21 +17,23 @@ import { Database } from 'bun:sqlite'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { createModels } from '@earendil-works/pi-ai/models'
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
 import { KINDS, type Kind, metered, openLedger } from './ledger'
 import { type Budget, type Complete, serveModel } from './model'
-import { sandbox } from './sandbox'
 import {
+  diff,
   type EvalTask,
   generate,
   judge,
+  prepare,
   relevance,
   type Split,
+  sandboxFor,
   validate,
-  writeFiles,
+  type Workspace,
 } from './tasks'
 import { unpack } from './vault'
 
@@ -59,7 +61,8 @@ export function openMeasure(path: string) {
       check_command TEXT NOT NULL,
       check_files TEXT NOT NULL,
       solution TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      workspace TEXT
     );
     CREATE TABLE IF NOT EXISTS rejected (
       id INTEGER PRIMARY KEY,
@@ -83,7 +86,8 @@ export function openMeasure(path: string) {
       task_id INTEGER NOT NULL,
       ok INTEGER NOT NULL,
       cost REAL NOT NULL,
-      exit_code INTEGER
+      exit_code INTEGER,
+      patch TEXT
     );
     CREATE TABLE IF NOT EXISTS calls (
       id INTEGER PRIMARY KEY,
@@ -92,18 +96,23 @@ export function openMeasure(path: string) {
       reply TEXT NOT NULL,
       cost REAL NOT NULL
     );`)
-  // 段階4bで足した列。前のセッションの表にもなければ足す。記憶（方針の文章）を付けて測った計測を、付けない計測と分ける
-  const columns = new Set(
+  // あとの段階で足した列。前のセッションの表にもなければ足す
+  const has = (table: string, column: string) =>
     db
-      .query<{ name: string }, []>('PRAGMA table_info(measurements)')
+      .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
       .all()
-      .map((c) => c.name),
-  )
-  if (!columns.has('memory')) {
+      .some((c) => c.name === column)
+  // 段階4b: 記憶（方針の文章）を付けて測った計測を、付けない計測と分ける
+  if (!has('measurements', 'memory')) {
     db.run(
       "ALTER TABLE measurements ADD COLUMN memory TEXT NOT NULL DEFAULT ''",
     )
   }
+  // 段階7: 課題の作業領域（JSON）と、作業領域の課題で成功した試行の差分
+  if (!has('tasks', 'workspace')) {
+    db.run('ALTER TABLE tasks ADD COLUMN workspace TEXT')
+  }
+  if (!has('runs', 'patch')) db.run('ALTER TABLE runs ADD COLUMN patch TEXT')
   const meta = (key: string) =>
     db
       .query<{ value: string }, [string]>(
@@ -122,9 +131,18 @@ export function openMeasure(path: string) {
       db
         .query<
           { id: number },
-          [string, string, string, string, string, string, number]
+          [
+            string,
+            string,
+            string,
+            string,
+            string,
+            string,
+            number,
+            string | null,
+          ]
         >(
-          'INSERT INTO tasks (split, statement, files, check_command, check_files, solution, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id',
+          'INSERT INTO tasks (split, statement, files, check_command, check_files, solution, created_at, workspace) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id',
         )
         .get(
           split,
@@ -134,6 +152,7 @@ export function openMeasure(path: string) {
           JSON.stringify(task.check_files),
           JSON.stringify(task.solution),
           Date.now(),
+          task.workspace ? JSON.stringify(task.workspace) : null,
         )?.id as number,
     reject: (task: EvalTask, reason: string) =>
       db.run('INSERT INTO rejected (task, reason) VALUES (?, ?)', [
@@ -154,6 +173,7 @@ export function openMeasure(path: string) {
           check: r.check_command as string,
           check_files: JSON.parse(r.check_files as string),
           solution: JSON.parse(r.solution as string),
+          ...(r.workspace && { workspace: JSON.parse(r.workspace as string) }),
         })),
     startMeasurement: (
       commit: string,
@@ -182,12 +202,16 @@ export function openMeasure(path: string) {
       ok: boolean,
       cost: number,
       code: number | null,
+      patch: string | null = null,
     ) =>
       db
-        .query<{ id: number }, [number, number, number, number, number | null]>(
-          'INSERT INTO runs (measurement_id, task_id, ok, cost, exit_code) VALUES (?, ?, ?, ?, ?) RETURNING id',
+        .query<
+          { id: number },
+          [number, number, number, number, number | null, string | null]
+        >(
+          'INSERT INTO runs (measurement_id, task_id, ok, cost, exit_code, patch) VALUES (?, ?, ?, ?, ?, ?) RETURNING id',
         )
-        .get(measurement, task, ok ? 1 : 0, cost, code)?.id as number,
+        .get(measurement, task, ok ? 1 : 0, cost, code, patch)?.id as number,
     addCall: (run: number, context: unknown, reply: unknown, cost: number) =>
       db.run(
         'INSERT INTO calls (run_id, context, reply, cost) VALUES (?, ?, ?, ?)',
@@ -196,6 +220,17 @@ export function openMeasure(path: string) {
   }
 }
 export type Measure = ReturnType<typeof openMeasure>
+
+// セッションの作業領域（命令 workspace で設定）に、リポジトリの今のコミットを付けたもの。設定がなければ undefined
+export async function currentWorkspace(
+  m: Measure,
+): Promise<Workspace | undefined> {
+  const saved = m.meta('workspace')
+  if (!saved) return undefined
+  const w = JSON.parse(saved) as Omit<Workspace, 'commit'>
+  const commit = (await Bun.$`git -C ${w.repo} rev-parse HEAD`.text()).trim()
+  return { ...w, commit }
+}
 
 // 候補の agent/ をコミットから取り出す。作業ツリーの未コミットの変更は含まない
 export async function checkout(commit: string) {
@@ -221,6 +256,8 @@ export async function runAgent(
   onCall: Parameters<typeof serveModel>[3],
   log: string,
   signal?: AbortSignal,
+  // 作業領域の課題では、その開発環境の設定と、読み取り専用のディレクトリを隔離環境に渡す
+  workspace?: Workspace,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'hyph-agent-'))
   const socket = join(root, 'model.sock')
@@ -228,7 +265,7 @@ export async function runAgent(
   const server = serveModel(socket, complete, budget, onCall)
   try {
     const child = Bun.spawn(
-      sandbox(work, 'bun /agent/solve.ts', [
+      sandboxFor(workspace, work, 'bun /agent/solve.ts', [
         [agent, '/agent'],
         [join(root, 'task.md'), '/task.md'],
         [socket, '/model.sock', 'rw'],
@@ -265,7 +302,7 @@ export async function attempt(
   const { signal, restore, onWork } = options
   const work = await mkdtemp(join(tmpdir(), 'hyph-work-'))
   try {
-    await writeFiles(work, task.files)
+    await prepare(work, task)
     if (restore) await unpack(work, restore)
     onWork?.(work)
     const code = await runAgent(
@@ -277,12 +314,16 @@ export async function attempt(
       onCall,
       log,
       signal,
+      task.workspace,
     )
     // 障害で解けなかった試行は候補の失敗ではないため記録させず、計測を中断する
     if (budget.outage) {
       throw new Error(`モデルの障害で計測を中断します: ${budget.outage}`)
     }
-    return { ok: await judge(task, work), code }
+    const ok = await judge(task, work)
+    // 作業領域の課題で成功したら、その差分を返す（hibana への PR の材料）
+    const patch = ok && task.workspace ? await diff(work) : null
+    return { ok, code, patch }
   } finally {
     await rm(work, { recursive: true, force: true })
   }
@@ -316,7 +357,7 @@ export async function measure(
       const task = tasks[next++]
       const budget: Budget = { limit, spent: 0 }
       const calls: Parameters<Parameters<typeof serveModel>[3]>[0][] = []
-      const { ok, code } = await attempt(
+      const { ok, code, patch } = await attempt(
         { ...task, statement: withMemory(memory, task.statement) },
         agent,
         complete,
@@ -324,7 +365,7 @@ export async function measure(
         (call) => calls.push(call),
         join(DIR, 'logs', `measure-${id}-${task.id}.log`),
       )
-      const run = m.addRun(id, task.id, ok, budget.spent, code)
+      const run = m.addRun(id, task.id, ok, budget.spent, code, patch)
       for (const c of calls)
         m.addCall(run, c.context, c.reply, c.reply.usage.cost.total)
       console.log(
@@ -420,25 +461,69 @@ if (import.meta.main) {
     }
     m.setMeta('goal', goal)
     const { generator: complete } = await models(charge)
+    const workspace = await currentWorkspace(m)
     // 検証用と成績用は別の呼び出しで作り、互いの課題文を見せない
     for (const [split, count] of [
       ['val', Number(val)],
       ['test', Number(test)],
     ] as const) {
-      const r = await generate(goal, count, complete, async (task) => {
-        const reason = await validate(task, (t) => relevance(goal, t, complete))
-        if (reason) {
-          m.reject(task, reason)
-          console.log(
-            `  除外: ${task.statement.slice(0, 60)}\n    ${reason.split('\n')[0]}`,
+      const r = await generate(
+        goal,
+        count,
+        complete,
+        async (task) => {
+          const reason = await validate(task, (t) =>
+            relevance(goal, t, complete),
           )
-          return reason
-        }
-        m.addTask(task, split)
-        console.log(`  採用: ${task.statement.slice(0, 60)}`)
-        return null
-      })
+          if (reason) {
+            m.reject(task, reason)
+            console.log(
+              `  除外: ${task.statement.slice(0, 60)}\n    ${reason.split('\n')[0]}`,
+            )
+            return reason
+          }
+          m.addTask(task, split)
+          console.log(`  採用: ${task.statement.slice(0, 60)}`)
+          return null
+        },
+        '',
+        workspace,
+      )
       console.log(`${split}: 提出 ${r.submitted}、採用 ${r.accepted}`)
+    }
+  } else if (command === 'workspace') {
+    // 課題をリポジトリの上に作るセッションにする。コミットは generate のときの HEAD を使う
+    const [repo, prelude, ...mounts] = args
+    if (!repo || !prelude) {
+      throw new Error(
+        '使い方: workspace <リポジトリ> <開発環境の設定のファイル> [読み取り専用で見せるディレクトリ...]',
+      )
+    }
+    await Bun.$`git -C ${repo} rev-parse HEAD`.quiet()
+    if (!existsSync(prelude)) throw new Error(`${prelude} がありません`)
+    for (const p of mounts) {
+      if (!existsSync(p)) throw new Error(`${p} がありません`)
+    }
+    m.setMeta(
+      'workspace',
+      JSON.stringify({
+        repo: resolve(repo),
+        prelude: resolve(prelude),
+        mounts: mounts.map((p) => resolve(p)),
+      }),
+    )
+    console.log(`作業領域: ${resolve(repo)}`)
+  } else if (command === 'pr') {
+    const { pr, candidates } = await import('./pr')
+    if (!args[0]) {
+      for (const c of candidates(m)) {
+        console.log(
+          `試行 ${c.run}（課題 ${c.task}、${c.lines}行の差分）: ${c.statement.slice(0, 60)}`,
+        )
+      }
+    } else {
+      const { generator } = await models(charge)
+      console.log(await pr(m, Number(args[0]), generator))
     }
   } else if (command === 'review') {
     // 抽出確認。課題・解答・判定を同系統のモデルが作るため、最終目的からのずれを人が見る

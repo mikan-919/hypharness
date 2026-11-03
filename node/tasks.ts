@@ -5,13 +5,16 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { Context, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { Complete } from './model'
-import { sandbox } from './sandbox'
+import { type Bind, sandbox } from './sandbox'
 
-const CHECK_TIMEOUT_MS = 60_000
+// ponytail: 判定は5分まで。hibana の判定（ビルドと cargo test）は1分を超えることがある
+const CHECK_TIMEOUT_MS = 5 * 60_000
 // 生成役に返す判定の出力の上限
 const OUTPUT_LIMIT = 1500
 // ponytail: 生成役は選別の結果を見て3回まで出し直せる。帯に入る課題が足りなければ増やす
 const ROUNDS = 3
+// ponytail: 作業領域の課題では、生成役はシェルで調べるため、モデルを100回まで呼べる。課題が揃わなければ増やす
+const GENERATE_STEPS = 100
 
 export type Split = 'val' | 'test'
 type Files = Record<string, string>
@@ -25,6 +28,17 @@ export type EvalTask = {
   check_files: Files
   // 模範解答。files に重ねて置くと判定を通るファイル
   solution: Files
+  // 作業領域。あれば、作業用ディレクトリをこのリポジトリのコミットの中身から作り、その上に files を置く
+  workspace?: Workspace
+}
+
+export type Workspace = {
+  repo: string
+  commit: string
+  // 隔離環境でコマンドの前に読み込むシェルの設定（nix print-dev-env の出力）
+  prelude: string
+  // 隔離環境に同じパスで読み取り専用に見せるディレクトリ（依存の取得済みの置き場など）
+  mounts: string[]
 }
 
 // 課題のファイル名は、作業用ディレクトリの中を指す相対パスに限る
@@ -39,6 +53,43 @@ export async function writeFiles(dir: string, files: Files) {
   }
 }
 
+// 課題の作業用ディレクトリを作る。作業領域があれば、そのコミットの中身を1つのコミットにした git のリポジトリとして置く。
+// 解答役は git diff で自分の変更を見られ、成功した試行の差分もここから取る。履歴は渡さない（後のコミットに答えがあるため）
+export async function prepare(
+  dir: string,
+  task: Pick<EvalTask, 'files' | 'workspace'>,
+) {
+  const w = task.workspace
+  if (w) {
+    if (!/^[0-9a-f]{40}$/.test(w.commit)) {
+      throw new Error(`コミットが不正です: ${w.commit}`)
+    }
+    await Bun.$`git -C ${w.repo} archive ${w.commit} | tar -x -C ${dir}`.quiet()
+    await Bun.$`git -C ${dir} init -q && git -C ${dir} add -A && git -C ${dir} -c user.name=hyph -c user.email=hyph@localhost commit -qm base`.quiet()
+  }
+  await writeFiles(dir, task.files)
+}
+
+// 課題の作業領域の設定で、隔離環境のコマンドを作る
+export const sandboxFor = (
+  workspace: Workspace | undefined,
+  dir: string,
+  command: string,
+  binds: Bind[] = [],
+) =>
+  sandbox(
+    dir,
+    command,
+    [...binds, ...(workspace?.mounts ?? []).map((p): Bind => [p, p])],
+    workspace?.prelude,
+  )
+
+// 作業領域の課題で、作業用ディレクトリの変更を差分にする（.gitignore の対象は含まない）
+export async function diff(dir: string) {
+  await Bun.$`git -C ${dir} add -A`.quiet()
+  return (await Bun.$`git -C ${dir} diff --cached`.quiet()).text()
+}
+
 // 作業用ディレクトリの複製に判定用ファイルを足し、別の隔離環境で判定コマンドを実行する。
 // 解答役が判定用ファイルと同じ名前のファイルを置いていても、判定用ファイルで上書きする
 async function check(task: EvalTask, work: string) {
@@ -46,11 +97,14 @@ async function check(task: EvalTask, work: string) {
   try {
     await Bun.$`cp -a ${work}/. ${dir}`.quiet()
     await writeFiles(dir, task.check_files)
-    const child = Bun.spawn(sandbox(dir, `exec 2>&1\n${task.check}`), {
-      stdout: 'pipe',
-      stderr: 'ignore',
-      timeout: CHECK_TIMEOUT_MS,
-    })
+    const child = Bun.spawn(
+      sandboxFor(task.workspace, dir, `exec 2>&1\n${task.check}`),
+      {
+        stdout: 'pipe',
+        stderr: 'ignore',
+        timeout: CHECK_TIMEOUT_MS,
+      },
+    )
     const [output, code] = await Promise.all([
       new Response(child.stdout).text(),
       child.exited,
@@ -67,7 +121,7 @@ export const judge = async (task: EvalTask, work: string) =>
 async function passes(task: EvalTask, answer: Files) {
   const dir = await mkdtemp(join(tmpdir(), 'hyph-task-'))
   try {
-    await writeFiles(dir, task.files)
+    await prepare(dir, task)
     await writeFiles(dir, answer)
     return await check(task, dir)
   } finally {
@@ -94,44 +148,100 @@ const files = {
   additionalProperties: { type: 'string' },
   description: 'パスから内容への対応。パスは作業用ディレクトリからの相対パス',
 }
-const submitTask = {
-  name: 'submit_task',
-  description: '課題を1つ提出する。課題の数だけ呼ぶ',
+// 作業領域の課題では、模範解答は引数で受け取らず、生成役が /work に加えた変更から取る
+const submitTask = (workspace: boolean) =>
+  ({
+    name: 'submit_task',
+    description: '課題を1つ提出する。課題の数だけ呼ぶ',
+    parameters: {
+      type: 'object',
+      properties: {
+        statement: {
+          type: 'string',
+          description: '解答役に渡す課題文。判定の方法や正解は書かない',
+        },
+        files: {
+          ...files,
+          description: `解答役に最初から渡すファイル。${files.description}`,
+        },
+        check: {
+          type: 'string',
+          description:
+            '判定コマンド。作業用ディレクトリで sh -c で実行し、終了コード0なら成功',
+        },
+        check_files: {
+          ...files,
+          description: `判定にだけ使い、解答役には見せないファイル（テストなど）。${files.description}`,
+        },
+        ...(!workspace && {
+          solution: {
+            ...files,
+            description: `files に重ねると判定を通る模範解答。${files.description}`,
+          },
+        }),
+      },
+      required: [
+        'statement',
+        'files',
+        'check',
+        'check_files',
+        ...(workspace ? [] : ['solution']),
+      ],
+    },
+  }) as unknown as Tool
+
+const shTool = {
+  name: 'sh',
+  description:
+    '/work（課題の作業領域の複製）で sh -c を実行し、終了コードと出力を返す。変更や判定を試すのに使う',
   parameters: {
     type: 'object',
-    properties: {
-      statement: {
-        type: 'string',
-        description: '解答役に渡す課題文。判定の方法や正解は書かない',
-      },
-      files: {
-        ...files,
-        description: `解答役に最初から渡すファイル。${files.description}`,
-      },
-      check: {
-        type: 'string',
-        description:
-          '判定コマンド。作業用ディレクトリで sh -c で実行し、終了コード0なら成功',
-      },
-      check_files: {
-        ...files,
-        description: `判定にだけ使い、解答役には見せないファイル（テストなど）。${files.description}`,
-      },
-      solution: {
-        ...files,
-        description: `files に重ねると判定を通る模範解答。${files.description}`,
-      },
-    },
-    required: ['statement', 'files', 'check', 'check_files', 'solution'],
+    properties: { command: { type: 'string' } },
+    required: ['command'],
   },
 } as unknown as Tool
+
+// 生成役のシェル。作業領域の設定の隔離環境で実行する
+async function shell(workspace: Workspace, work: string, command: unknown) {
+  if (typeof command !== 'string') return 'command は文字列です'
+  const child = Bun.spawn(
+    sandboxFor(workspace, work, `exec 2>&1\n${command}`),
+    { stdout: 'pipe', stderr: 'ignore', timeout: CHECK_TIMEOUT_MS },
+  )
+  const [output, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    child.exited,
+  ])
+  const shown =
+    output.length > OUTPUT_LIMIT
+      ? `${output.slice(0, OUTPUT_LIMIT)}\n（${output.length}文字のうち先頭${OUTPUT_LIMIT}文字）`
+      : output
+  return `終了コード ${code}\n${shown}`
+}
+
+// 作業用ディレクトリで変更・追加したファイル（exclude のパスを除く）。削除は扱わない
+async function changed(dir: string, exclude: Files) {
+  await Bun.$`git -C ${dir} add -A`.quiet()
+  const paths = (
+    await Bun.$`git -C ${dir} diff --cached --name-only --diff-filter=AM`.quiet()
+  )
+    .text()
+    .split('\n')
+    .filter((p) => p && !(p in exclude))
+  const result: Files = {}
+  for (const p of paths) result[p] = await Bun.file(join(dir, p)).text()
+  return result
+}
 
 const isFiles = (v: unknown): v is Files =>
   typeof v === 'object' &&
   v !== null &&
   Object.values(v).every((x) => typeof x === 'string')
 
-const asTask = (args: Record<string, unknown>): EvalTask | null =>
+const asTask = (
+  args: Record<string, unknown>,
+  workspace?: Workspace,
+): EvalTask | null =>
   typeof args.statement === 'string' &&
   typeof args.check === 'string' &&
   isFiles(args.files) &&
@@ -143,6 +253,7 @@ const asTask = (args: Record<string, unknown>): EvalTask | null =>
         check: args.check,
         check_files: args.check_files,
         solution: args.solution,
+        ...(workspace && { workspace }),
       }
     : null
 
@@ -158,7 +269,20 @@ export async function generate(
   complete: Complete,
   accept: (task: EvalTask) => Promise<string | null>,
   guidance = '',
+  // 作業領域。あれば課題をこのリポジトリのコミットの上に作り、生成役は /work の複製でシェルを使える
+  workspace?: Workspace,
 ) {
+  const environment = workspace
+    ? `- 解答役は課題文を見て、ネットワークのない Linux の隔離環境で解きます。/work には、最終目的のリポジトリのコミットの中身（git の1コミット）に files を重ねたものがあります
+- あなたは sh ツールで、解答役と同じ環境の /work の複製を調べ、変更を試せます
+- 判定は機械で行います。check は終了コード0で成功を表すコマンドにし、隠しテストや期待値は check_files に入れてください。既存のテストも壊していないことを check で確かめてください
+- 何もしない解答では判定を通らないようにしてください
+- 提出すると、そのときの /work の変更（check_files のパスを除く）が模範解答になります。提出のあと /work は元のコミットに戻ります（.gitignore の対象は残ります）。1課題ずつ、変更を作り、判定が通ることを確かめてから提出してください`
+    : `- 解答役は課題文と files だけを見て、ネットワークのない Linux の隔離環境（sh、coreutils、bun がある）で解きます
+- 判定は機械で行います。check は終了コード0で成功を表すコマンドにし、テストや期待値は check_files に入れてください
+- 何もしない解答では判定を通らないようにしてください
+- solution は files に重ねると判定を通る模範解答です`
+  const submit = submitTask(Boolean(workspace))
   const context: Context = {
     systemPrompt:
       'あなたは、AI エージェントのハーネスを評価する課題の作成者です。最終目的の達成に必要な能力を測る課題を作り、submit_task で提出してください。',
@@ -169,18 +293,44 @@ export async function generate(
 ${goal}
 
 この最終目的に必要な能力を測る課題を ${count} 個、互いに異なる内容で作ってください。
-- 解答役は課題文と files だけを見て、ネットワークのない Linux の隔離環境（sh、coreutils、bun がある）で解きます
-- 判定は機械で行います。check は終了コード0で成功を表すコマンドにし、テストや期待値は check_files に入れてください
-- 何もしない解答では判定を通らないようにしてください
-- solution は files に重ねると判定を通る模範解答です${guidance && `\n\n${guidance}`}`,
+${environment}${guidance && `\n\n${guidance}`}`,
         timestamp: Date.now(),
       },
     ],
-    tools: [submitTask],
+    tools: workspace ? [submit, shTool] : [submit],
   }
+  const work = workspace
+    ? await mkdtemp(join(tmpdir(), 'hyph-generate-'))
+    : null
+  if (work) await prepare(work, { files: {}, workspace })
+  try {
+    return await rounds(
+      context,
+      count,
+      complete,
+      accept,
+      submit,
+      workspace,
+      work,
+    )
+  } finally {
+    if (work) await rm(work, { recursive: true, force: true })
+  }
+}
+
+async function rounds(
+  context: Context,
+  count: number,
+  complete: Complete,
+  accept: (task: EvalTask) => Promise<string | null>,
+  submit: Tool,
+  workspace: Workspace | undefined,
+  work: string | null,
+) {
   let submitted = 0
   let accepted = 0
-  for (let round = 0; round < ROUNDS && accepted < count; round++) {
+  const limit = workspace ? GENERATE_STEPS : ROUNDS
+  for (let round = 0; round < limit && accepted < count; round++) {
     const reply = await complete(context)
     context.messages.push(reply)
     const calls = toolCalls(reply)
@@ -193,29 +343,42 @@ ${goal}
       })
       continue
     }
-    // 1回の応答に含まれる課題は並列に選別し、結果は提出の順に返す
-    const reasons = await Promise.all(
-      calls.map((call) => {
-        const task =
-          call.name === submitTask.name ? asTask(call.arguments) : null
-        return task ? accept(task) : 'submit_task の引数の形式が不正です'
-      }),
-    )
-    for (const [i, call] of calls.entries()) {
-      const reason = reasons[i]
+    // シェルと、提出時の /work の変更の取り出しは順に行う。課題の選別は並列に行い、結果は呼び出しの順に返す
+    const pending: Promise<{ text: string; isError: boolean }>[] = []
+    for (const call of calls) {
+      if (call.name === shTool.name && workspace && work) {
+        const text = await shell(workspace, work, call.arguments.command)
+        pending.push(Promise.resolve({ text, isError: false }))
+        continue
+      }
       submitted++
-      if (!reason) accepted++
+      const args = { ...call.arguments }
+      if (workspace && work && isFiles(args.check_files)) {
+        args.solution = await changed(work, args.check_files)
+        await Bun.$`git -C ${work} reset -q --hard && git -C ${work} clean -fdq`.quiet()
+      }
+      const task = call.name === submit.name ? asTask(args, workspace) : null
+      pending.push(
+        (task
+          ? accept(task)
+          : Promise.resolve('submit_task の引数の形式が不正です')
+        ).then((reason) => {
+          if (!reason) accepted++
+          return {
+            text: `${reason ? `除外しました: ${reason}` : '採用しました'}\n採用は ${accepted}/${count} 個です`,
+            isError: Boolean(reason),
+          }
+        }),
+      )
+    }
+    const results = await Promise.all(pending)
+    for (const [i, call] of calls.entries()) {
       context.messages.push({
         role: 'toolResult',
         toolCallId: call.id,
         toolName: call.name,
-        content: [
-          {
-            type: 'text',
-            text: `${reason ? `除外しました: ${reason}` : '採用しました'}\n採用は ${accepted}/${count} 個です`,
-          },
-        ],
-        isError: Boolean(reason),
+        content: [{ type: 'text', text: results[i].text }],
+        isError: results[i].isError,
         timestamp: Date.now(),
       })
     }
