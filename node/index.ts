@@ -1,13 +1,20 @@
-import { chmod, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
-import { homedir, hostname } from 'node:os'
+import { chmod, mkdir, rename } from 'node:fs/promises'
+import { hostname } from 'node:os'
 import { join } from 'node:path'
-import { LEASE_MS, type RelayMessage } from '../src/queue'
-import { sandbox } from './sandbox'
+import { type Grant, LEASE_MS, type RelayMessage } from '../src/queue'
+import { openDeploy } from './deploy'
+import {
+  attempt,
+  BUDGET_MARGIN,
+  checkout,
+  DIR,
+  models,
+  openMeasure,
+} from './measure'
+import type { Budget } from './model'
 
-const DIR = join(homedir(), '.hyph')
 // 旧ランナーの config.json はアカウント単位のトークンで使えないため、別の名前にする
 const CONFIG = join(DIR, 'node.json')
-const WORK = join(DIR, 'work')
 const LOGS = join(DIR, 'logs')
 const DEFAULT_URL = 'http://localhost:5173'
 const PAIRING_POLL_MS = 3000
@@ -16,12 +23,25 @@ const RECONNECT_MS = 5000
 const RENEW_MS = LEASE_MS / 3
 
 type Config = { url: string; token: string }
-type Running = { id: number; generation: number; child: Bun.Subprocess }
+type Running = { id: number; generation: number; abort: AbortController }
 
-// 使い方: bun run node [URL]
-const [url] = process.argv.slice(2)
-await mkdir(DIR, { recursive: true, mode: 0o700 })
-await mkdir(WORK, { recursive: true, mode: 0o700 })
+// 使い方: bun run node <セッション> [URL]
+// タスクは、セッションの稼働版（一部は試験版）のエージェントで解く
+const [session = '', url] = process.argv.slice(2)
+const path = join(DIR, 'sessions', `${session}.sqlite`)
+if (!/^[\w-]{1,32}$/.test(session) || !(await Bun.file(path).exists())) {
+  throw new Error(
+    '使い方: bun run node <セッション> [URL]（セッションは bun run measure で作ったもの）',
+  )
+}
+const m = openMeasure(path)
+const deploy = openDeploy(m)
+if (!deploy.stable() || !m.meta('budget:val')) {
+  throw new Error(
+    `セッション ${session} に基準版と予算の基準がありません。先に evolve を回してください`,
+  )
+}
+const { solver } = await models()
 await mkdir(LOGS, { recursive: true, mode: 0o700 })
 const saved: Config | undefined = (await Bun.file(CONFIG).exists())
   ? await Bun.file(CONFIG).json()
@@ -72,7 +92,7 @@ function connect() {
       running.generation === m.generation
     ) {
       console.log(`タスク ${m.id} の実行権を失ったため止めます`)
-      running.child.kill()
+      running.abort.abort()
     }
   }
   socket.onclose = (event) => {
@@ -84,34 +104,66 @@ function connect() {
   }
 }
 
-// タスクのコマンドを、タスクごとの作業用ディレクトリで隔離して実行する。
-// 出力はノードの外に出さず、ログに残す。中継に送るのは終了コードだけ
-async function run(task: { id: number; generation: number; command: string }) {
+// タスクを、選んだ版のエージェントに隔離環境で解かせ、判定コマンドがあれば成否を決める。
+// 出力はノードの外に出さず、ログに残す。中継に送るのは終了コード・成否・版だけ
+async function run(task: Grant) {
   if (running) {
     console.error(`タスク ${running.id} の実行中に別のタスクが届きました`)
     return
   }
-  const work = await mkdtemp(join(WORK, `${task.id}-`))
-  const log = join(LOGS, `${task.id}-${task.generation}.log`)
-  try {
-    // 標準エラーも同じログに順に残す。隔離環境を作る bwrap 自体のエラーはノードの画面に出る
-    const child = Bun.spawn(sandbox(work, `exec 2>&1\n${task.command}`), {
-      stdout: Bun.file(log),
-      stderr: 'inherit',
+  const { version, role } = deploy.pick()
+  const abort = new AbortController()
+  running = { id: task.id, generation: task.generation, abort }
+  const done = (code: number, ok: boolean | null) =>
+    send({
+      type: 'done',
+      id: task.id,
+      generation: task.generation,
+      code,
+      ok,
+      version,
     })
-    running = { ...task, child }
-    console.log(`タスク ${task.id}（世代 ${task.generation}）: ${task.command}`)
-    const code = await child.exited
-    console.log(`タスク ${task.id} が終了コード ${code} で終わりました`)
+  // ponytail: 1タスクの予算は、検証用課題1問あたりの予算と同じにする。実際のタスクの費用が貯まったら、それを基準にする
+  const budget: Budget = {
+    limit:
+      (Number(m.meta('budget:val')) / m.tasks('val').length) * BUDGET_MARGIN,
+    spent: 0,
+  }
+  console.log(
+    `タスク ${task.id}（世代 ${task.generation}）を${role === 'canary' ? '試験版' : '稼働版'} ${version.slice(0, 7)} で解きます`,
+  )
+  try {
+    const result = await attempt(
+      {
+        statement: task.statement,
+        files: {},
+        check: task.check ?? 'true',
+        check_files: {},
+        solution: {},
+      },
+      await checkout(version),
+      solver,
+      budget,
+      () => {},
+      join(LOGS, `${task.id}-${task.generation}.log`),
+      abort.signal,
+    )
+    const ok = task.check === null ? null : result.ok
+    console.log(
+      `タスク ${task.id}: 終了コード ${result.code}${ok === null ? '' : ok ? '、成功' : '、失敗'}（$${budget.spent.toFixed(4)}）`,
+    )
     running = null
-    send({ type: 'done', id: task.id, generation: task.generation, code })
+    if (!abort.signal.aborted) {
+      deploy.record(task.id, version, role, ok, budget.spent)
+      if (role === 'canary') deploy.decide()
+      done(result.code ?? 127, ok)
+    }
   } catch (e) {
-    // 隔離環境を作れないときも、終了コード 127 で報告して待ち行列を止めない
-    console.error(e instanceof Error ? e.message : e)
     running = null
-    send({ type: 'done', id: task.id, generation: task.generation, code: 127 })
-  } finally {
-    await rm(work, { recursive: true, force: true })
+    console.error(e instanceof Error ? e.message : e)
+    // モデルの障害では報告しない。実行権の期限が切れると待ち行列に戻り、解き直される。
+    // 隔離環境を作れないなどのときは、終了コード 127 で報告して待ち行列を止めない
+    if (!budget.outage && !abort.signal.aborted) done(127, null)
   }
   send({ type: 'ready' })
 }

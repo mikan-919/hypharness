@@ -56,11 +56,12 @@ export default function Home({ user, status }: PageProps<'Home'>) {
             <thead>
               <tr>
                 <th>番号</th>
-                <th>コマンド</th>
+                <th>課題文</th>
                 <th>状態</th>
                 <th>ノード</th>
                 <th>世代</th>
-                <th>終了コード</th>
+                <th>版</th>
+                <th>成否</th>
               </tr>
             </thead>
             <tbody>
@@ -69,11 +70,24 @@ export default function Home({ user, status }: PageProps<'Home'>) {
                   <td>
                     <History id={t.id} />
                   </td>
-                  <td className='font-mono break-all'>{t.command}</td>
+                  <td className='break-all whitespace-pre-wrap'>
+                    {t.statement}
+                    {t.check_command && (
+                      <span className='block font-mono text-muted-foreground'>
+                        判定: {t.check_command}
+                      </span>
+                    )}
+                  </td>
                   <td>{t.state}</td>
                   <td>{t.node ? (names.get(t.node) ?? '切断中') : ''}</td>
                   <td>{t.generation}</td>
-                  <td>{t.code ?? ''}</td>
+                  <td className='font-mono'>{t.version?.slice(0, 7) ?? ''}</td>
+                  <td>
+                    {t.ok === null ? '' : t.ok ? '成功' : '失敗'}
+                    {t.code !== null &&
+                      t.code !== 0 &&
+                      `（終了コード ${t.code}）`}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -119,15 +133,17 @@ function Pairing() {
 }
 
 function NewTask() {
-  const [command, setCommand] = useState('')
+  const [statement, setStatement] = useState('')
+  const [check, setCheck] = useState('')
   const [error, setError] = useState('')
 
   const add = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
     try {
-      await post('/tasks', { command })
-      setCommand('')
+      await post('/tasks', { statement, check })
+      setStatement('')
+      setCheck('')
       router.reload({ only: ['status'] })
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -136,16 +152,25 @@ function NewTask() {
 
   return (
     <>
-      <form className='flex gap-2' onSubmit={add}>
-        <Input
-          aria-label='コマンド'
-          placeholder='隔離環境で実行するコマンド'
-          className='font-mono'
-          value={command}
-          onChange={(e) => setCommand(e.target.value)}
+      <form className='flex flex-col gap-2' onSubmit={add}>
+        <textarea
+          aria-label='課題文'
+          placeholder='エージェントに解かせる課題文'
+          className='min-h-24 rounded-md border bg-transparent p-2'
+          value={statement}
+          onChange={(e) => setStatement(e.target.value)}
           required
         />
-        <Button type='submit'>追加</Button>
+        <div className='flex gap-2'>
+          <Input
+            aria-label='判定コマンド'
+            placeholder='判定コマンド（任意。終了コード 0 で成功）'
+            className='font-mono'
+            value={check}
+            onChange={(e) => setCheck(e.target.value)}
+          />
+          <Button type='submit'>追加</Button>
+        </div>
       </form>
       {error && <p className='text-destructive'>{error}</p>}
     </>

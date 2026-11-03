@@ -560,6 +560,10 @@ export async function promote(
   }
   lineage.set(best.commit, 'adopted', `検証用 +${best.delta.toFixed(3)}`)
   m.setMeta('base', best.commit)
-  console.log(`採用: ${best.commit.slice(0, 7)} を基準版にしました`)
+  // 配る前に、目的遂行タスクの一部で試す（段階3）
+  m.setMeta('canary', best.commit)
+  console.log(
+    `採用: ${best.commit.slice(0, 7)} を基準版にし、試験版として配りました`,
+  )
   return best.commit
 }

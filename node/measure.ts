@@ -6,6 +6,7 @@
 //   bun run measure <セッション> run <コミット> [回数] [val|test]
 //   bun run measure <セッション> evolve [周回数] [最初の基準版のコミット] [simple|explore]
 //   bun run measure <セッション> promote [候補の数] [測り直す回数]
+//   bun run measure <セッション> deploy <コミット>
 //   bun run measure <セッション> harden [val|test] [生成する数]
 //   bun run measure <セッション> flag <課題の番号>
 import { Database } from 'bun:sqlite'
@@ -195,6 +196,7 @@ export async function runAgent(
   budget: Budget,
   onCall: Parameters<typeof serveModel>[3],
   log: string,
+  signal?: AbortSignal,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'hyph-agent-'))
   const socket = join(root, 'model.sock')
@@ -207,7 +209,12 @@ export async function runAgent(
         [join(root, 'task.md'), '/task.md'],
         [socket, '/model.sock', 'rw'],
       ]),
-      { stdout: Bun.file(log), stderr: 'inherit', timeout: AGENT_TIMEOUT_MS },
+      {
+        stdout: Bun.file(log),
+        stderr: 'inherit',
+        timeout: AGENT_TIMEOUT_MS,
+        signal,
+      },
     )
     return await child.exited
   } finally {
@@ -224,6 +231,7 @@ export async function attempt(
   budget: Budget,
   onCall: Parameters<typeof serveModel>[3],
   log: string,
+  signal?: AbortSignal,
 ) {
   const work = await mkdtemp(join(tmpdir(), 'hyph-work-'))
   try {
@@ -236,6 +244,7 @@ export async function attempt(
       budget,
       onCall,
       log,
+      signal,
     )
     // 障害で解けなかった試行は候補の失敗ではないため記録させず、計測を中断する
     if (budget.outage) {
@@ -454,6 +463,16 @@ if (import.meta.main) {
       console.log(`周回 ${i}/${times}（${policy}）`)
       await evolve(m, commit, solver, generator, policy)
     }
+  } else if (command === 'deploy') {
+    const [rev] = args
+    if (!rev) throw new Error('試験版にするコミットを指定してください')
+    const commit = (await Bun.$`git -C ${REPO} rev-parse ${rev}`.text()).trim()
+    const { openDeploy } = await import('./deploy')
+    const stable = openDeploy(m).stable()
+    if (!stable) throw new Error('稼働版も基準版もありません')
+    if (commit === stable) throw new Error('稼働版と同じコミットです')
+    m.setMeta('canary', commit)
+    console.log(`試験版: ${commit.slice(0, 7)}、稼働版: ${stable.slice(0, 7)}`)
   } else if (command === 'promote') {
     const [top = '3', repeats = '5'] = args
     if (![top, repeats].every((x) => /^[1-9]\d*$/.test(x))) {
@@ -464,7 +483,7 @@ if (import.meta.main) {
     await promote(m, solver, Number(top), Number(repeats))
   } else {
     console.log(
-      '使い方: bun run measure <セッション> generate|review|run|evolve|promote|harden|flag',
+      '使い方: bun run measure <セッション> generate|review|run|evolve|promote|deploy|harden|flag',
     )
   }
 }
