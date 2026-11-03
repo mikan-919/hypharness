@@ -130,7 +130,7 @@ export function rate(m: Measure, commit: string, split: Split) {
 const rates = (m: Measure, commit: string, split: Split) =>
   m.db
     .query<{ r: number }, [string, string, number]>(
-      'SELECT CAST(ok AS REAL) / total AS r FROM measurements WHERE commit_id = ? AND split = ? AND total = ?',
+      'SELECT CAST(ok AS REAL) / total AS r FROM measurements WHERE commit_id = ? AND split = ? AND total = ? ORDER BY id',
     )
     .all(commit, split, m.tasks(split).length)
     .map((x) => x.r)
@@ -491,8 +491,9 @@ ${await weakness(m, parent.commit_id, generator)}`
   return { commit, status: 'measured' as const, reason: null }
 }
 
-// 配る版を決める。検証用の成功率の平均で上位 top 件の候補を選び、検証用・成績用を repeats 回ずつ測り直す。
-// 選ぶのに使った計測は上振れしているため、判定には測り直した分だけを使う。基準版は全計測を使う。
+// 配る版を決める。進化の周回での検証用の成功率で上位 top 件の候補を選び、検証用・成績用を repeats 回ずつ測り直す。
+// 候補は進化の周回で測った最初の1回で選び、上振れしているその1回は判定に使わない。2回目以降は前に中断した分も含めて使い、
+// 足りない分だけ測る。基準版と、候補の成績用は全計測を使う。
 // 検証用で基準版を確かに上回り、成績用で確かに下回らない候補のうち、検証用の差が最大のものを基準版にする
 export async function promote(
   m: Measure,
@@ -506,7 +507,7 @@ export async function promote(
   const candidates = lineage
     .pool()
     .filter((c) => c.status === 'measured')
-    .map((c) => ({ c, r: rate(m, c.commit_id, 'val') }))
+    .map((c) => ({ c, r: rates(m, c.commit_id, 'val')[0] ?? null }))
     .filter((x): x is { c: Candidate; r: number } => x.r !== null)
     .sort((a, b) => b.r - a.r)
     .slice(0, top)
@@ -518,8 +519,8 @@ export async function promote(
     }
     return out
   }
-  const pad = async (commit: string, split: Split) => {
-    const known = rates(m, commit, split)
+  const pad = async (commit: string, split: Split, skip = 0) => {
+    const known = rates(m, commit, split).slice(skip)
     return [...known, ...(await again(commit, split, repeats - known.length))]
   }
   const baseVal = await pad(base, 'val')
@@ -529,7 +530,7 @@ export async function promote(
     const id = c.commit_id.slice(0, 7)
     const val = compare(
       baseVal,
-      await again(c.commit_id, 'val', repeats),
+      await pad(c.commit_id, 'val', 1),
       m.tasks('val').length,
     )
     const line = `検証用 差 ${val.delta.toFixed(3)}（基準 ${val.margin.toFixed(3)}）`
@@ -539,7 +540,7 @@ export async function promote(
     }
     const test = compare(
       baseTest,
-      await again(c.commit_id, 'test', repeats),
+      await pad(c.commit_id, 'test'),
       m.tasks('test').length,
     )
     if (-test.delta > test.margin) {
