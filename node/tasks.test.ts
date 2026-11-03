@@ -185,3 +185,57 @@ test('1回の応答の課題は並列に選別し、結果は提出の順に返�
   const results = contexts[1].messages.filter((m) => m.role === 'toolResult')
   expect(results.map((m) => m.toolCallId)).toEqual(['遅い', '速い'])
 })
+
+test('モデルの一時的な障害は再試行し、回復しなければ障害として残し、それ以外の失敗はそのまま返す', async () => {
+  const socket = join(await mkdtemp(join(tmpdir(), 'hyph-test-')), 'm.sock')
+  const failure = (errorMessage: string): AssistantMessage => ({
+    ...reply([]),
+    stopReason: 'error',
+    errorMessage,
+  })
+  const serve = (answers: (() => AssistantMessage)[]) => {
+    const budget: Budget = { limit: null, spent: 0 }
+    let i = 0
+    const server = serveModel(
+      socket,
+      async () => answers[Math.min(i++, answers.length - 1)](),
+      budget,
+      () => {},
+      [0, 0, 0],
+    )
+    const call = () =>
+      fetch('http://model/', {
+        method: 'POST',
+        unix: socket,
+        body: JSON.stringify({ messages: [] }),
+      })
+    return { budget, server, call, count: () => i }
+  }
+  const timeout = () => {
+    throw new DOMException('The operation timed out.', 'TimeoutError')
+  }
+
+  const recovered = serve([
+    () => failure('OpenAI API error (504): Gateway time-out'),
+    timeout,
+    () => reply([]),
+  ])
+  expect((await recovered.call()).status).toBe(200)
+  expect(recovered.budget.outage).toBeUndefined()
+  recovered.server.stop(true)
+
+  const down = serve([() => failure('OpenAI API error (503): unavailable')])
+  expect((await down.call()).status).toBe(503)
+  expect(down.count()).toBe(4)
+  expect(down.budget.outage).toContain('503')
+  down.server.stop(true)
+
+  const invalid = serve([
+    () => failure('OpenAI API error (400): context too long'),
+  ])
+  const res = await invalid.call()
+  expect(res.status).toBe(200)
+  expect(((await res.json()) as AssistantMessage).stopReason).toBe('error')
+  expect(invalid.count()).toBe(1)
+  invalid.server.stop(true)
+})

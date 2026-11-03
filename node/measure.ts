@@ -237,6 +237,10 @@ export async function attempt(
       onCall,
       log,
     )
+    // 障害で解けなかった試行は候補の失敗ではないため記録させず、計測を中断する
+    if (budget.outage) {
+      throw new Error(`モデルの障害で計測を中断します: ${budget.outage}`)
+    }
     return { ok: await judge(task, work), code }
   } finally {
     await rm(work, { recursive: true, force: true })
