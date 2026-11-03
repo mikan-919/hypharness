@@ -13,8 +13,9 @@ const INSTRUCTIONS =
 // ponytail: 1課題でモデルを呼ぶのは30回まで。足りない課題が多ければ増やす
 const MAX_STEPS = 30
 const OUTPUT_LIMIT = 4000
-// コマンドは180秒まで。timeout で包み、時間切れのときは子のプロセスごと止める（sh だけを止めると、子が出力の管を開いたまま残り、
-// 出力を待ち続ける）
+// コマンドは180秒まで。timeout で包み、時間切れのときは子のプロセスごと止める。
+// 出力は管ではなくファイルで受け取り、コマンドが終わった時点で読む。管にすると、コマンドが起動したサーバーのように
+// 別のプロセスグループで残るプロセスが管を開いたままにし、出力を待ち続ける
 const COMMAND_TIMEOUT_SECONDS = 180
 
 const tools = [
@@ -35,8 +36,11 @@ const tools = [
   },
 ] as unknown as Tool[]
 
+let commands = 0
+
 async function sh(command: unknown) {
   if (typeof command !== 'string') throw new Error('command は文字列です')
+  const file = Bun.file(`/tmp/sh-${++commands}.out`)
   const child = Bun.spawn(
     [
       'timeout',
@@ -47,12 +51,11 @@ async function sh(command: unknown) {
       '-c',
       `exec 2>&1\n${command}`,
     ],
-    { cwd: '/work', stdout: 'pipe' },
+    { cwd: '/work', stdout: file },
   )
-  const [output, code] = await Promise.all([
-    new Response(child.stdout).text(),
-    child.exited,
-  ])
+  const code = await child.exited
+  const output = await file.text()
+  await file.delete()
   const shown =
     output.length > OUTPUT_LIMIT
       ? `${output.slice(0, OUTPUT_LIMIT)}\n（${output.length}文字のうち先頭${OUTPUT_LIMIT}文字）`
