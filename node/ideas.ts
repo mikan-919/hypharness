@@ -139,13 +139,12 @@ async function measured(
   memory: string,
   complete: Complete,
 ) {
-  const tasks = m.tasks('val').length
   const rows = () =>
     m.db
-      .query<{ r: number; cost: number }, [string, number, string]>(
-        "SELECT CAST(ok AS REAL) / total AS r, cost FROM measurements WHERE commit_id = ? AND split = 'val' AND total = ? AND memory = ? ORDER BY id",
+      .query<{ r: number; cost: number }, [string, string, string]>(
+        "SELECT CAST(ok AS REAL) / total AS r, cost FROM measurements WHERE commit_id = ? AND split = 'val' AND conditions = ? AND memory = ? AND total IS NOT NULL ORDER BY id",
       )
-      .all(commit, tasks, memory)
+      .all(commit, m.conditions('val'), memory)
   for (let i = rows().length; i < REPEATS; i++) {
     await measure(m, commit, 'val', complete, memory)
   }
