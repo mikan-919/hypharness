@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { AssistantMessage, Context, ToolCall } from '@earendil-works/pi-ai'
 import { attempt, slot } from './measure'
 import { type Budget, type Complete, serveModel } from './model'
+import { sandbox } from './sandbox'
 import { diff, type EvalTask, generate, prepare, validate } from './tasks'
 
 const task = (t: Partial<EvalTask>): EvalTask => ({
@@ -414,3 +415,14 @@ test('試行は、並べた計測すべてを合わせて同時に8つまでし�
   expect(peak).toBe(8)
   expect(done).toEqual(Array.from({ length: 20 }, (_, i) => i))
 })
+
+test('隔離環境のプログラムがメモリの上限を超えると止める', async () => {
+  const work = await mkdtemp(join(tmpdir(), 'hyph-test-'))
+  // 改行のない 5GB を tail が1行として溜め込む。上限の 4GB を超えると、systemd が隔離環境ごと止める
+  const child = Bun.spawn(
+    sandbox(work, 'head -c 5G /dev/zero | tail >/dev/null; echo 生き残った'),
+    { stdout: 'pipe', stderr: 'ignore' },
+  )
+  await child.exited
+  expect(await new Response(child.stdout).text()).not.toContain('生き残った')
+}, 60_000)
