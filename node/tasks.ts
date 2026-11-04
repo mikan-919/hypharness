@@ -15,6 +15,8 @@ const OUTPUT_LIMIT = 1500
 const ROUNDS = 3
 // ponytail: 作業領域の課題では、生成役はシェルで調べるため、モデルを100回まで呼べる。課題が揃わなければ増やす
 const GENERATE_STEPS = 100
+// 生成役のコマンドの上限。sh -c の引数1つは Linux で 128KiB までで、超えると起動が E2BIG で失敗する
+const COMMAND_LIMIT = 100_000
 
 export type Split = 'val' | 'test'
 type Files = Record<string, string>
@@ -204,6 +206,10 @@ const shTool = {
 // 生成役のシェル。作業領域の設定の隔離環境で実行する
 async function shell(workspace: Workspace, work: string, command: unknown) {
   if (typeof command !== 'string') return 'command は文字列です'
+  const size = Buffer.byteLength(command)
+  if (size > COMMAND_LIMIT) {
+    return `コマンドが ${size} バイトで、上限の ${COMMAND_LIMIT} バイトを超えています。ファイルは複数のコマンドに分けて書いてください`
+  }
   const child = Bun.spawn(
     sandboxFor(workspace, work, `exec 2>&1\n${command}`),
     { stdout: 'pipe', stderr: 'ignore', timeout: CHECK_TIMEOUT_MS },
