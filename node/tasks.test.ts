@@ -3,7 +3,7 @@ import { mkdir, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AssistantMessage, Context, ToolCall } from '@earendil-works/pi-ai'
-import { attempt } from './measure'
+import { attempt, slot } from './measure'
 import { type Budget, type Complete, serveModel } from './model'
 import { diff, type EvalTask, generate, prepare, validate } from './tasks'
 
@@ -396,4 +396,21 @@ test('不正なファイル名の課題は、生成を止めずに除外の理�
   expect(JSON.stringify(contexts[1].messages.at(-1))).toContain(
     'ファイル名が不正です: .',
   )
+})
+
+test('試行は、並べた計測すべてを合わせて同時に8つまでしか動かさず、待った試行もすべて動く', async () => {
+  let now = 0
+  let peak = 0
+  const done = await Promise.all(
+    Array.from({ length: 20 }, (_, i) =>
+      slot(async () => {
+        peak = Math.max(peak, ++now)
+        await Bun.sleep(5)
+        now--
+        return i
+      }),
+    ),
+  )
+  expect(peak).toBe(8)
+  expect(done).toEqual(Array.from({ length: 20 }, (_, i) => i))
 })

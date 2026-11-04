@@ -514,14 +514,13 @@ export async function promote(
   console.log(
     `測り直す候補: ${candidates.map(({ c, r }) => `${c.commit_id.slice(0, 7)}（最初の検証用 ${r.toFixed(2)}）`).join('、') || 'なし'}`,
   )
-  const again = async (commit: string, split: Split, n: number) => {
-    const out: number[] = []
-    for (let i = 0; i < n; i++) {
-      const r = await measure(m, commit, split, complete)
-      out.push(r.ok / r.total)
-    }
-    return out
-  }
+  // 互いに依存しない計測は並べて測る。同時に動く試行の数は measure の側で抑える
+  const again = (commit: string, split: Split, n: number) =>
+    Promise.all(
+      Array.from({ length: n }, () =>
+        measure(m, commit, split, complete).then((r) => r.ok / r.total),
+      ),
+    )
   const pad = async (commit: string, split: Split, skip = 0) => {
     const known = rates(m, commit, split).slice(skip)
     const rest = Math.max(0, repeats - known.length)
@@ -530,37 +529,38 @@ export async function promote(
     )
     return [...known, ...(await again(commit, split, rest))]
   }
-  const baseVal = await pad(base, 'val')
-  const baseTest = await pad(base, 'test')
-  let best: { commit: string; delta: number } | null = null
-  for (const { c } of candidates) {
-    const id = c.commit_id.slice(0, 7)
-    const val = compare(
-      baseVal,
-      await pad(c.commit_id, 'val', 1),
-      m.tasks('val').length,
-    )
-    const line = `検証用 差 ${val.delta.toFixed(3)}（基準 ${val.margin.toFixed(3)}）`
-    if (val.delta <= val.margin) {
-      console.log(`${id}: 見送り、${line}`)
-      continue
-    }
-    const test = compare(
-      baseTest,
-      await pad(c.commit_id, 'test'),
-      m.tasks('test').length,
-    )
-    if (-test.delta > test.margin) {
-      console.log(
-        `${id}: 見送り、${line}、成績用で下回る（差 ${test.delta.toFixed(3)}）`,
+  // 候補の成績用は、検証用で基準版を上回ったときだけ測る
+  const [baseVal, baseTest, ...vals] = await Promise.all([
+    pad(base, 'val'),
+    pad(base, 'test'),
+    ...candidates.map(({ c }) => pad(c.commit_id, 'val', 1)),
+  ])
+  const passed = await Promise.all(
+    candidates.map(async ({ c }, i) => {
+      const id = c.commit_id.slice(0, 7)
+      const val = compare(baseVal, vals[i], m.tasks('val').length)
+      const line = `検証用 差 ${val.delta.toFixed(3)}（基準 ${val.margin.toFixed(3)}）`
+      if (val.delta <= val.margin) {
+        console.log(`${id}: 見送り、${line}`)
+        return null
+      }
+      const test = compare(
+        baseTest,
+        await pad(c.commit_id, 'test'),
+        m.tasks('test').length,
       )
-      continue
-    }
-    console.log(`${id}: 合格、${line}、成績用 差 ${test.delta.toFixed(3)}`)
-    if (!best || val.delta > best.delta) {
-      best = { commit: c.commit_id, delta: val.delta }
-    }
-  }
+      if (-test.delta > test.margin) {
+        console.log(
+          `${id}: 見送り、${line}、成績用で下回る（差 ${test.delta.toFixed(3)}）`,
+        )
+        return null
+      }
+      console.log(`${id}: 合格、${line}、成績用 差 ${test.delta.toFixed(3)}`)
+      return { commit: c.commit_id, delta: val.delta }
+    }),
+  )
+  let best: { commit: string; delta: number } | null = null
+  for (const p of passed) if (p && (!best || p.delta > best.delta)) best = p
   if (!best) {
     console.log('基準版は変えません')
     return null
