@@ -5,9 +5,12 @@ import { existsSync } from 'node:fs'
 // binds で、ホストのパスを隔離環境の中に見せる。既定は読み取り専用で、Unix ソケットのように書き込みが要るものだけ rw にする
 export type Bind = [host: string, inside: string, mode?: 'ro' | 'rw']
 
-// ponytail: 隔離環境1つのメモリの上限。生成役の書いたプログラムが無限にメモリを取り、ノードの PC ごと落ちたことがある。
-// 同時に動く試行（最大8）がすべて上限まで使うことは想定しない。大きなビルドが要るリポジトリでは見直す
+// ponytail: 隔離環境1つのメモリの上限と、同時に動く隔離環境すべての合計の上限。生成役の書いたプログラムが無限にメモリを取り、
+// ノードの PC ごと落ちたことがある。合計の上限は 16GB の PC で OS と hypharness 本体の分を残す値。PC のメモリに合わせて変える
 const MEMORY_MAX = '4G'
+const TOTAL_MEMORY_MAX = '10G'
+const SLICE = 'hyph.slice'
+let sliceReady = false
 
 // prelude は、コマンドの前に読み込むシェルの設定（nix print-dev-env の出力など）。読み込んだあとも、一時ディレクトリと
 // bun の場所は隔離環境のものに戻す
@@ -26,6 +29,24 @@ export function sandbox(
       'タスクの実行には systemd-run（ユーザーの systemd）が必要です',
     )
   }
+  // 隔離環境はすべて同じ slice に入れ、slice に合計の上限を付ける。--runtime なので再起動で消え、最初の呼び出しで付け直す
+  if (!sliceReady) {
+    const set = Bun.spawnSync([
+      'systemctl',
+      '--user',
+      'set-property',
+      '--runtime',
+      SLICE,
+      `MemoryMax=${TOTAL_MEMORY_MAX}`,
+      'MemorySwapMax=0',
+    ])
+    if (set.exitCode !== 0) {
+      throw new Error(
+        `隔離環境の合計のメモリの上限を付けられません: ${set.stderr.toString()}`,
+      )
+    }
+    sliceReady = true
+  }
   const system = [
     '/nix/store',
     '/run/current-system/sw',
@@ -41,6 +62,7 @@ export function sandbox(
     '--user',
     '--scope',
     '--quiet',
+    `--slice=${SLICE}`,
     '-p',
     `MemoryMax=${MEMORY_MAX}`,
     '-p',

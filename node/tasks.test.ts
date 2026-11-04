@@ -425,4 +425,14 @@ test('隔離環境のプログラムがメモリの上限を超えると止め�
   )
   await child.exited
   expect(await new Response(child.stdout).text()).not.toContain('生き残った')
+  // 同時に動く隔離環境の合計にも上限が付いている（合計を超えさせるのは重いので、設定だけ確かめる）
+  const slice = Bun.spawnSync([
+    'systemctl',
+    '--user',
+    'show',
+    'hyph.slice',
+    '-p',
+    'MemoryMax',
+  ])
+  expect(slice.stdout.toString().trim()).toBe(`MemoryMax=${10 * 1024 ** 3}`)
 }, 60_000)
