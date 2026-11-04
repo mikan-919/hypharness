@@ -511,6 +511,9 @@ export async function promote(
     .filter((x): x is { c: Candidate; r: number } => x.r !== null)
     .sort((a, b) => b.r - a.r)
     .slice(0, top)
+  console.log(
+    `測り直す候補: ${candidates.map(({ c, r }) => `${c.commit_id.slice(0, 7)}（最初の検証用 ${r.toFixed(2)}）`).join('、') || 'なし'}`,
+  )
   const again = async (commit: string, split: Split, n: number) => {
     const out: number[] = []
     for (let i = 0; i < n; i++) {
@@ -521,7 +524,11 @@ export async function promote(
   }
   const pad = async (commit: string, split: Split, skip = 0) => {
     const known = rates(m, commit, split).slice(skip)
-    return [...known, ...(await again(commit, split, repeats - known.length))]
+    const rest = Math.max(0, repeats - known.length)
+    console.log(
+      `${commit === base ? '基準版' : '候補'} ${commit.slice(0, 7)} の${split}: 計測済み ${known.length} 回、あと ${rest} 回`,
+    )
+    return [...known, ...(await again(commit, split, rest))]
   }
   const baseVal = await pad(base, 'val')
   const baseTest = await pad(base, 'test')

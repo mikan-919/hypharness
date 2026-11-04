@@ -361,11 +361,18 @@ export async function measure(
   const agent = await checkout(commit)
   const id = m.startMeasurement(commit, split, limit, memory)
   await mkdir(join(DIR, 'logs'), { recursive: true })
+  // 1課題の試行は数分かかるため、計測と課題の始まりも出して、どこまで進んだかをわかるようにする
+  console.log(
+    `${commit.slice(0, 7)} の${split}を測ります（課題 ${tasks.length} 件、同時に ${CONCURRENCY} 件）`,
+  )
   let next = 0
+  let done = 0
   const worker = async () => {
     while (next < tasks.length) {
       const task = tasks[next++]
       const budget: Budget = { limit, spent: 0 }
+      const started = Date.now()
+      console.log(`  課題 ${task.id}: 開始`)
       const calls: Parameters<Parameters<typeof serveModel>[3]>[0][] = []
       const { ok, code, patch } = await attempt(
         { ...task, statement: withMemory(memory, task.statement) },
@@ -379,7 +386,7 @@ export async function measure(
       for (const c of calls)
         m.addCall(run, c.context, c.reply, c.reply.usage.cost.total)
       console.log(
-        `  課題 ${task.id}: ${ok ? '成功' : '失敗'}（$${budget.spent.toFixed(4)}）`,
+        `  課題 ${task.id}: ${ok ? '成功' : '失敗'}（$${budget.spent.toFixed(4)}、${Math.round((Date.now() - started) / 1000)}秒、${++done}/${tasks.length}）`,
       )
     }
   }
