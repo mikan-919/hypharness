@@ -136,10 +136,17 @@ test('繰り返し測った版の成功率は、最新の1回ではなく平均�
     solution: {},
   }
   for (let i = 0; i < 3; i++) m.addTask(task, 'val')
-  for (const ok of [1, 1, 0]) {
+  const now = m.conditions('val')
+  // 最後の1件は、解答役の推論の深さが違う条件で測ったもの。比べる計測には入れない
+  for (const [ok, conditions] of [
+    [1, now],
+    [1, now],
+    [0, now],
+    [3, `${now}x`],
+  ]) {
     m.db.run(
-      "INSERT INTO measurements (commit_id, split, ok, total, started_at) VALUES ('c', 'val', ?, 3, 0)",
-      [ok],
+      "INSERT INTO measurements (commit_id, split, ok, total, started_at, conditions) VALUES ('c', 'val', ?, 3, 0, ?)",
+      [ok, conditions],
     )
   }
   expect(rate(m, 'c', 'val')).toBeCloseTo(2 / 9)

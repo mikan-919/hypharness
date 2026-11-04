@@ -115,24 +115,24 @@ export function openLineage(m: Measure) {
   }
 }
 
-// 現在の課題の数で測った、そのコミットの成功率の平均。課題が増えた後の古い計測は使わない
+// 今と同じ条件（解答役の設定と課題の組）で測った、そのコミットの成功率の平均。条件が変わる前の計測は使わない
 export function rate(m: Measure, commit: string, split: Split) {
   // 繰り返し測った版は平均で比べる。ばらつき（noise）と同じ計測群を使うため
   const row = m.db
-    .query<{ r: number | null }, [string, string, number]>(
-      "SELECT AVG(CAST(ok AS REAL) / total) AS r FROM measurements WHERE commit_id = ? AND split = ? AND total = ? AND memory = ''",
+    .query<{ r: number | null }, [string, string, string]>(
+      "SELECT AVG(CAST(ok AS REAL) / total) AS r FROM measurements WHERE commit_id = ? AND split = ? AND conditions = ? AND memory = '' AND total IS NOT NULL",
     )
-    .get(commit, split, m.tasks(split).length)
+    .get(commit, split, m.conditions(split))
   return row?.r ?? null
 }
 
-// 現在の課題の数で測った、そのコミットの計測ごとの成功率
+// 今と同じ条件で測った、そのコミットの計測ごとの成功率
 const rates = (m: Measure, commit: string, split: Split) =>
   m.db
-    .query<{ r: number }, [string, string, number]>(
-      "SELECT CAST(ok AS REAL) / total AS r FROM measurements WHERE commit_id = ? AND split = ? AND total = ? AND memory = '' ORDER BY id",
+    .query<{ r: number }, [string, string, string]>(
+      "SELECT CAST(ok AS REAL) / total AS r FROM measurements WHERE commit_id = ? AND split = ? AND conditions = ? AND memory = '' AND total IS NOT NULL ORDER BY id",
     )
-    .all(commit, split, m.tasks(split).length)
+    .all(commit, split, m.conditions(split))
     .map((x) => x.r)
 
 // 2つの成功率の差の検定。各計測を課題数 tasks 回の試行とみなし、二項分布のばらつきから差のばらつきを求める。

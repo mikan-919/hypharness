@@ -38,6 +38,7 @@ import {
 import { unpack } from './vault'
 
 export const DIR = join(homedir(), '.hyph')
+const solverModel = () => process.env.MODEL || 'gpt-6.1-sol'
 export const REPO = join(import.meta.dir, '..')
 // ponytail: 解答役を同時に4つまで動かす。ノードの CPU とモデルの流量制限を見て変える
 const CONCURRENCY = 4
@@ -115,6 +116,18 @@ export function openMeasure(path: string) {
     db.run('ALTER TABLE tasks ADD COLUMN workspace TEXT')
   }
   if (!has('runs', 'patch')) db.run('ALTER TABLE runs ADD COLUMN patch TEXT')
+  // 解答役のモデル・推論の深さと課題の組。これが違う計測どうしは比べない（前の列がない計測は、どれとも比べない）
+  if (!has('measurements', 'conditions')) {
+    db.run('ALTER TABLE measurements ADD COLUMN conditions TEXT')
+  }
+  const conditions = (split: Split) =>
+    `${solverModel()} ${process.env.REASONING || '既定'} 課題 ${db
+      .query<{ id: number }, [string]>(
+        'SELECT id FROM tasks WHERE split = ? ORDER BY id',
+      )
+      .all(split)
+      .map((t) => t.id)
+      .join(',')}`
   const meta = (key: string) =>
     db
       .query<{ value: string }, [string]>(
@@ -124,6 +137,7 @@ export function openMeasure(path: string) {
   return {
     db,
     meta,
+    conditions,
     setMeta: (key: string, value: string) =>
       db.run(
         'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
@@ -184,10 +198,14 @@ export function openMeasure(path: string) {
       memory = '',
     ) =>
       db
-        .query<{ id: number }, [string, string, number | null, number, string]>(
-          'INSERT INTO measurements (commit_id, split, budget, started_at, memory) VALUES (?, ?, ?, ?, ?) RETURNING id',
+        .query<
+          { id: number },
+          [string, string, number | null, number, string, string]
+        >(
+          'INSERT INTO measurements (commit_id, split, budget, started_at, memory, conditions) VALUES (?, ?, ?, ?, ?, ?) RETURNING id',
         )
-        .get(commit, split, budget, Date.now(), memory)?.id as number,
+        .get(commit, split, budget, Date.now(), memory, conditions(split))
+        ?.id as number,
     finishMeasurement: (id: number) =>
       db
         .query<Measurement, [number]>(
@@ -437,7 +455,7 @@ export async function models(onCost?: (cost: number) => void) {
       } as never)
     return onCost ? metered(complete, onCost) : complete
   }
-  const name = process.env.MODEL || 'gpt-6.1-sol'
+  const name = solverModel()
   const reasoning = process.env.REASONING
   return {
     solver: load('候補のモデル', name, reasoning, SOLVER_TIMEOUT_MS),
