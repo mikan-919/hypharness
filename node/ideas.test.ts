@@ -3,11 +3,22 @@ import { history, judge, openIdeas, settle } from './ideas'
 import { openMeasure, withMemory } from './measure'
 
 test('アイデアは、成功率が確かに上がるか、成功率を下げずに費用が下がったときだけ採用する', () => {
-  const base = Array(5).fill(0.5)
-  expect(judge(base, Array(5).fill(0.75), 8, 0.01, 0.01).adopted).toBe(true)
-  expect(judge(base, Array(5).fill(0.625), 8, 0.01, 0.01).adopted).toBe(false)
-  expect(judge(base, Array(5).fill(0.5), 8, 0.01, 0.007).adopted).toBe(true)
-  expect(judge(base, Array(5).fill(0.375), 8, 0.01, 0.005).adopted).toBe(false)
+  // 8課題を5回ずつ。基準は4課題を毎回解き、4課題を一度も解かない
+  const of = (oks: number[]) =>
+    new Map(oks.map((ok, i) => [i, { ok, n: 5 }] as const))
+  const base = of([5, 5, 5, 5, 0, 0, 0, 0])
+  // 解けなかった2課題を毎回解く
+  expect(judge(base, of([5, 5, 5, 5, 5, 5, 0, 0]), 0.01, 0.01).adopted).toBe(
+    true,
+  )
+  // 1課題を1回だけ多く解いた差は偶然とみなす
+  expect(judge(base, of([5, 5, 5, 5, 1, 0, 0, 0]), 0.01, 0.01).adopted).toBe(
+    false,
+  )
+  expect(judge(base, base, 0.01, 0.007).adopted).toBe(true)
+  expect(judge(base, of([5, 5, 5, 4, 0, 0, 0, 0]), 0.01, 0.005).adopted).toBe(
+    false,
+  )
 })
 
 test('資本は採用で増え、不採用で減り、下限を下回らない', () => {

@@ -1,7 +1,7 @@
 // 段階4b: 経済のループによるオンライン RSI。worker がエージェントの記憶（方針の文章）を変えるアイデアを出し、
 // 投資家が資本に応じて試す番を配る。アイデアは記憶を付けた計測と付けない計測の比較で採点し、LLM では採点しない。
 // アイデアが変えるのは記憶だけで、コードは変えない（コードの変更はオフライン RSI だけが行う）
-import { compare } from './evolve'
+import { type Counts, counts, paired } from './evolve'
 import { type Measure, measure, summary } from './measure'
 import type { Complete } from './model'
 
@@ -28,13 +28,12 @@ const HISTORY_LIMIT = 20
 
 // アイデアを採用するか。成功率が確かに上がったか、成功率を下げずに費用が下がったら採用する
 export function judge(
-  base: number[],
-  candidate: number[],
-  tasks: number,
+  base: Counts,
+  candidate: Counts,
   baseCost: number,
   cost: number,
 ) {
-  const { delta, margin } = compare(base, candidate, tasks)
+  const { delta, margin } = paired(base, candidate)
   const adopted =
     delta > margin || (delta >= 0 && cost <= baseCost * COST_RATIO)
   return { delta, margin, adopted }
@@ -153,6 +152,7 @@ async function measured(
   )
   const all = rows()
   return {
+    counts: counts(m, commit, 'val', memory),
     rates: all.map((x) => x.r),
     cost: summary(all.map((x) => x.cost)).mean,
   }
@@ -250,9 +250,8 @@ export async function round(m: Measure, solver: Complete, generator: Complete) {
   const candidate = await measured(m, commit, next, solver)
   const tasks = m.tasks('val').length
   const { delta, margin, adopted } = judge(
-    base.rates,
-    candidate.rates,
-    tasks,
+    base.counts,
+    candidate.counts,
     base.cost,
     candidate.cost,
   )
@@ -301,10 +300,9 @@ export async function check(m: Measure, solver: Complete, repeats = 3) {
       return { name, rates, cost: summary(costs).mean }
     }),
   )
-  const { delta, margin } = compare(
-    results[0].rates,
-    results[1].rates,
-    m.tasks('test').length,
+  const { delta, margin } = paired(
+    counts(m, commit, 'test', ''),
+    counts(m, commit, 'test', memory),
   )
   console.log(`差 ${delta.toFixed(3)}（基準 ${margin.toFixed(3)}）`)
   return results
