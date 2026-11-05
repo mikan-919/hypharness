@@ -214,6 +214,13 @@ async function run(task: Grant) {
       `タスク ${task.id}: 終了コード ${result.code}${ok === null ? '' : ok ? '、成功' : '、失敗'}（$${budget.spent.toFixed(4)}）`,
     )
     running = null
+    // 判定のあるタスクの成否を、エージェントの状態に置く。次のタスクで、エージェントが使った記憶の評価に反映する
+    if (ok !== null && !abort.signal.aborted) {
+      await Bun.write(
+        join(STATE, 'outcome.json'),
+        JSON.stringify({ ok, cost: budget.spent, limit: budget.limit }),
+      )
+    }
     if (!abort.signal.aborted) {
       deploy.record(task.id, version, role, ok, budget.spent)
       if (role === 'canary') deploy.decide()

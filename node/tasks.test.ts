@@ -458,10 +458,58 @@ test('状態のディレクトリを渡した試行だけが /state を次の試
       join(dir, 'agent.log'),
       { state },
     )
-    return JSON.stringify(contexts.at(-1)?.messages.at(-1))
+    return JSON.stringify(
+      contexts.at(-1)?.messages.filter((m) => m.role === 'toolResult'),
+    )
   }
   const state = await mkdtemp(join(tmpdir(), 'hyph-state-'))
   await run('echo 覚えた > /state/note', state)
   expect(await run('cat /state/note', state)).toContain('覚えた')
   expect(await run('cat /state/note')).not.toContain('覚えた')
+}, 120_000)
+
+test('エージェントは振り返りで残した記憶を、同じ状態で解く次の課題の最初に受け取る', async () => {
+  const state = await mkdtemp(join(tmpdir(), 'hyph-state-'))
+  const run = async (script: ToolCall[]) => {
+    const contexts: Context[] = []
+    const complete: Complete = async (context) => {
+      contexts.push(structuredClone(context))
+      const call = script[contexts.length - 1]
+      return reply([
+        call ?? { type: 'toolCall', id: 'f', name: 'finish', arguments: {} },
+      ])
+    }
+    const dir = await mkdtemp(join(tmpdir(), 'hyph-test-'))
+    await attempt(
+      task({ statement: '字句解析の課題', check: 'true' }),
+      join(import.meta.dir, '../agent'),
+      complete,
+      { limit: null, spent: 0 },
+      () => {},
+      join(dir, 'agent.log'),
+      { state },
+    )
+    return contexts
+  }
+  const call = (id: string, name: string, args: object): ToolCall => ({
+    type: 'toolCall',
+    id,
+    name,
+    arguments: args as ToolCall['arguments'],
+  })
+  const first = await run([
+    call('1', 'sh', { command: 'echo 原因は字句解析の位置' }),
+    call('2', 'finish', {}),
+    call('3', 'remember', {
+      scope: 'shared',
+      gist: '字句解析の位置がずれる',
+      summary: '位置の更新を確かめる',
+      quotes: [{ raw: 1, text: '原因は字句解析の位置' }],
+    }),
+  ])
+  expect(JSON.stringify(first.at(-1)?.messages.at(-1))).toContain('記憶 #1')
+  const second = await run([])
+  expect(JSON.stringify(second[0].messages[0])).toContain(
+    '字句解析の位置がずれる',
+  )
 }, 120_000)
