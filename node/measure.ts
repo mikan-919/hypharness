@@ -14,6 +14,7 @@
 //   bun run measure <セッション> harden [val|test] [生成する数]
 //   bun run measure <セッション> flag <課題の番号>
 //   bun run measure <セッション> state-check <コミット> [回数]
+//   bun run measure <セッション> mine [検証用の数] [成績用の数] [差分の行数の上限]
 //   bun run measure <セッション> proposals
 //   bun run measure <セッション> approve|reject <提案の番号>
 import { Database } from 'bun:sqlite'
@@ -265,6 +266,125 @@ const existing = (m: Measure) => {
   return all.length
     ? `次の課題は既にあります。これらと同じ内容の課題は作らないでください:\n${all.map((t) => `- ${t.statement.split('\n')[0].slice(0, 150)}`).join('\n')}`
     : ''
+}
+
+// 作業領域のリポジトリの過去のコミットから課題を作る。各コミットの1つ前を課題のコミットにし、そのコミットの変更を
+// /work に当てた状態から、生成役に課題文と隠しテストだけを書かせる。変更そのものが模範解答になるため、
+// 模範解答が判定を通る・空の解答では通らない、を満たす課題を、ゼロから作らせるより少ない手順で作れる。
+// 使うのは、既存の課題のコミットすべての祖先にあたるコミットだけにする。既存の課題が直す不具合を、後のコミットが直していることがあり、
+// その変更を種にすると、同じ課題が検証用と成績用に分かれて入るため
+export async function mine(
+  m: Measure,
+  generator: Complete,
+  val: number,
+  test: number,
+  maxLines: number,
+) {
+  const goal = m.meta('goal')
+  const workspace = await currentWorkspace(m)
+  if (!goal || !workspace) {
+    throw new Error(
+      '先に workspace と generate で作業領域と最終目的を決めてください',
+    )
+  }
+  const repo = workspace.repo
+  const commits = [
+    ...new Set(
+      [...m.tasks('val'), ...m.tasks('test')]
+        .map((t) => t.workspace?.commit)
+        .filter((c): c is string => Boolean(c)),
+    ),
+  ]
+  const base = commits.length
+    ? (
+        await Bun.$`git -C ${repo} merge-base --octopus ${commits}`.text()
+      ).trim()
+    : workspace.commit
+  const done = new Set<string>(JSON.parse(m.meta('mined') ?? '[]'))
+  const candidates: string[] = []
+  // 各コミットは「@ コミット 親」の行と、その後の numstat の行（追加 削除 パス）からなる
+  const log = (
+    await Bun.$`git -C ${repo} log --no-merges --format=@%x09%H%x09%P --numstat ${base}`.text()
+  )
+    .split(/^@\t/m)
+    .map((chunk) => chunk.split('\n').filter(Boolean))
+  for (const [head, ...files] of log) {
+    const [commit, parent] = (head ?? '').split('\t')
+    if (!commit || !parent || done.has(commit)) continue
+    const stats = files.map((f) => f.split('\t'))
+    const changed = stats.reduce(
+      (n, [a, d]) => n + (Number(a) || 0) + (Number(d) || 0),
+      0,
+    )
+    // 文書だけの変更は、振る舞いを判定できる課題にならない
+    const code = stats.some(
+      ([, , f]) => f && !f.startsWith('docs/') && !f.endsWith('.md'),
+    )
+    if (code && changed > 0 && changed <= maxLines) candidates.push(commit)
+  }
+  console.log(
+    `種にするコミットの候補: ${candidates.length} 件（${base.slice(0, 7)} とその祖先）`,
+  )
+  const need = { val, test }
+  const take = (): Split | null =>
+    need.val > 0 ? 'val' : need.test > 0 ? 'test' : null
+  // ponytail: 生成役は同時に4つまで。1つの生成役が隔離環境でビルドしながら、選別でも判定を流すため、計測の上限（8）の半分にする
+  const queue = [...candidates]
+  const worker = async () => {
+    for (let commit = queue.shift(); commit && take(); commit = queue.shift()) {
+      await one(commit)
+    }
+  }
+  const one = async (commit: string) => {
+    if (!take()) return
+    const parent = (
+      await Bun.$`git -C ${repo} rev-parse ${commit}^`.text()
+    ).trim()
+    const patch = await Bun.$`git -C ${repo} diff ${parent} ${commit}`.text()
+    const subject = (
+      await Bun.$`git -C ${repo} log -1 --format=%B ${commit}`.text()
+    ).trim()
+    const r = await generate(
+      goal,
+      1,
+      generator,
+      async (task) => {
+        const reason = await validate(task, (t) =>
+          relevance(goal, t, generator),
+        )
+        if (reason) {
+          m.reject(task, reason)
+          return reason
+        }
+        const split = take()
+        if (!split) return '必要な数の課題が揃いました'
+        need[split]--
+        m.addTask(task, split)
+        console.log(
+          `  採用（${split}、${commit.slice(0, 7)}）: ${task.statement.slice(0, 60)}`,
+        )
+        return null
+      },
+      `この課題は、リポジトリの過去のコミット ${commit.slice(0, 7)}（題: ${subject.split('\n')[0]}）の変更を種にします。
+- /work には、そのコミットの1つ前の中身に、そのコミットの変更を当てたものがあります（git diff で見られます）。この変更を解答役に作らせる課題を1つ作ってください
+- 課題文には差分や実装の方法を書かず、満たすべき振る舞いと、判定で確かめる出力や入出力を書いてください
+- 隠しテストは新しいファイルとして check_files に入れ、check で実行してください。/work の既存のファイルは、変更を含めて触らないでください
+- 提出する前に、変更を当てた /work で check が通り、git stash で変更を外すと通らないことを確かめてください
+- 変更が複数の振る舞いにまたがるなら、そのうち判定しやすい1つを課題にしてください。判定できる振る舞いがなければ提出しないでください
+
+コミットのメッセージ:
+${subject.slice(0, 2000)}${existing(m) && `\n\n${existing(m)}`}`,
+      { ...workspace, commit: parent },
+      patch,
+    )
+    done.add(commit)
+    m.setMeta('mined', JSON.stringify([...done]))
+    console.log(
+      `${commit.slice(0, 7)}: 提出 ${r.submitted}、採用 ${r.accepted}`,
+    )
+  }
+  await Promise.all(Array.from({ length: 4 }, worker))
+  console.log(`残り: 検証用 ${need.val}、成績用 ${need.test}`)
 }
 
 // セッションの作業領域（命令 workspace で設定）に、リポジトリの今のコミットを付けたもの。設定がなければ undefined
@@ -691,6 +811,13 @@ if (import.meta.main) {
       )
       console.log(`${split}: 提出 ${r.submitted}、採用 ${r.accepted}`)
     }
+  } else if (command === 'mine') {
+    const [val = '10', test = '4', lines = '400'] = args
+    if (![val, test, lines].every((x) => /^\d+$/.test(x))) {
+      throw new Error('数と行数の上限は0以上の整数です')
+    }
+    const { generator } = await models(charge)
+    await mine(m, generator, Number(val), Number(test), Number(lines))
   } else if (command === 'workspace') {
     // 課題をリポジトリの上に作るセッションにする。コミットは generate のときの HEAD を使う
     const [repo, prelude, ...mounts] = args
