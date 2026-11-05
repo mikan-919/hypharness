@@ -436,3 +436,32 @@ test('隔離環境のプログラムがメモリの上限を超えると止め�
   ])
   expect(slice.stdout.toString().trim()).toBe(`MemoryMax=${10 * 1024 ** 3}`)
 }, 60_000)
+
+test('状態のディレクトリを渡した試行だけが /state を次の試行に持ち越す', async () => {
+  const run = async (command: string, state?: string) => {
+    const contexts: Context[] = []
+    const complete: Complete = async (context) => {
+      contexts.push(structuredClone(context))
+      return contexts.length === 1
+        ? reply([
+            { type: 'toolCall', id: '1', name: 'sh', arguments: { command } },
+          ])
+        : reply([{ type: 'toolCall', id: 'f', name: 'finish', arguments: {} }])
+    }
+    const dir = await mkdtemp(join(tmpdir(), 'hyph-test-'))
+    await attempt(
+      task({ check: 'true' }),
+      join(import.meta.dir, '../agent'),
+      complete,
+      { limit: null, spent: 0 },
+      () => {},
+      join(dir, 'agent.log'),
+      { state },
+    )
+    return JSON.stringify(contexts.at(-1)?.messages.at(-1))
+  }
+  const state = await mkdtemp(join(tmpdir(), 'hyph-state-'))
+  await run('echo 覚えた > /state/note', state)
+  expect(await run('cat /state/note', state)).toContain('覚えた')
+  expect(await run('cat /state/note')).not.toContain('覚えた')
+}, 120_000)

@@ -295,7 +295,8 @@ export async function checkout(commit: string) {
 }
 
 // 候補のエージェントを、作業用ディレクトリ work で動かす。隔離環境に見せるのは、作業用ディレクトリ・課題文・
-// 候補のコード・モデル中継のソケットだけ。終了コードを返す
+// 候補のコード・モデル中継のソケット・エージェントの状態（/state）だけ。終了コードを返す。
+// state はタスクをまたいで持ち越す状態のディレクトリ。渡さなければ空のディレクトリを使い、終わったら消す（計測では課題の間で答えが漏れないようにする）
 export async function runAgent(
   agent: string,
   work: string,
@@ -307,8 +308,11 @@ export async function runAgent(
   signal?: AbortSignal,
   // 作業領域の課題では、その開発環境の設定と、読み取り専用のディレクトリを隔離環境に渡す
   workspace?: Workspace,
+  state?: string,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'hyph-agent-'))
+  const dir = state ?? join(root, 'state')
+  await mkdir(dir, { recursive: true })
   const socket = join(root, 'model.sock')
   await Bun.write(join(root, 'task.md'), statement)
   const server = serveModel(socket, complete, budget, onCall)
@@ -318,6 +322,7 @@ export async function runAgent(
         [agent, '/agent'],
         [join(root, 'task.md'), '/task.md'],
         [socket, '/model.sock', 'rw'],
+        [dir, '/state', 'rw'],
       ]),
       {
         stdout: Bun.file(log),
@@ -346,9 +351,10 @@ export async function attempt(
     signal?: AbortSignal
     restore?: Uint8Array
     onWork?: (work: string) => void
+    state?: string
   } = {},
 ) {
-  const { signal, restore, onWork } = options
+  const { signal, restore, onWork, state } = options
   const work = await mkdtemp(join(tmpdir(), 'hyph-work-'))
   try {
     await prepare(work, task)
@@ -364,6 +370,7 @@ export async function attempt(
       log,
       signal,
       task.workspace,
+      state,
     )
     // 障害で解けなかった試行は候補の失敗ではないため記録させず、計測を中断する
     if (budget.outage) {

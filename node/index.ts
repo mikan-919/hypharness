@@ -36,6 +36,10 @@ type Running = { id: number; generation: number; abort: AbortController }
 // タスクは、セッションの稼働版（一部は試験版）のエージェントで解く
 const [session = '', url] = process.argv.slice(2)
 const path = join(DIR, 'sessions', `${session}.sqlite`)
+// エージェントがタスクをまたいで持つ状態（記憶など）。セッションごとに分ける。
+// ponytail: 状態はこのノードにだけ置き、チェックポイントには入れない。別のノードで再開したタスクは、そのノードの状態で続ける。
+// ノード間で記憶を揃える必要が出たら、状態の差分を中継経由で配る
+const STATE = join(DIR, 'state', session)
 if (!/^[\w-]{1,32}$/.test(session) || !(await Bun.file(path).exists())) {
   throw new Error(
     '使い方: bun run node <セッション> [URL]（セッションは bun run measure で作ったもの）',
@@ -53,6 +57,7 @@ const ledger = openLedger(m)
 const { solver } = await models((cost) => ledger.record('task', cost))
 const key = await loadKey(join(DIR, 'vault.key'))
 await mkdir(LOGS, { recursive: true, mode: 0o700 })
+await mkdir(STATE, { recursive: true, mode: 0o700 })
 const saved: Config | undefined = (await Bun.file(CONFIG).exists())
   ? await Bun.file(CONFIG).json()
   : undefined
@@ -201,6 +206,7 @@ async function run(task: Grant) {
         onWork: (dir) => {
           work = dir
         },
+        state: STATE,
       },
     )
     const ok = task.check === null ? null : result.ok
