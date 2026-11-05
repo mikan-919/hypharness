@@ -7,6 +7,7 @@ import {
   currentWorkspace,
   DIR,
   type Measure,
+  slot,
 } from './measure'
 import type { Complete } from './model'
 import {
@@ -130,13 +131,16 @@ export async function harden(
     const probes = await Promise.all(
       Array.from({ length: SAMPLES }, async () => {
         const budget = { limit: null, spent: 0 }
-        const r = await attempt(
-          task,
-          agent,
-          complete,
-          budget,
-          () => {},
-          join(DIR, 'logs', `harden-${crypto.randomUUID()}.log`),
+        // 並べた試行すべてを合わせた同時の数は、計測と同じ上限に任せる
+        const r = await slot(() =>
+          attempt(
+            task,
+            agent,
+            complete,
+            budget,
+            () => {},
+            join(DIR, 'logs', `harden-${crypto.randomUUID()}.log`),
+          ),
         )
         return { ...r, cost: budget.spent }
       }),

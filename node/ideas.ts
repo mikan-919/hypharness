@@ -145,9 +145,12 @@ async function measured(
         "SELECT CAST(ok AS REAL) / total AS r, cost FROM measurements WHERE commit_id = ? AND split = 'val' AND conditions = ? AND memory = ? AND total IS NOT NULL ORDER BY id",
       )
       .all(commit, m.conditions('val'), memory)
-  for (let i = rows().length; i < REPEATS; i++) {
-    await measure(m, commit, 'val', complete, memory)
-  }
+  // 足りない回数を並べて測る。同時に動く試行の数は measure の側の上限に任せる
+  await Promise.all(
+    Array.from({ length: Math.max(0, REPEATS - rows().length) }, () =>
+      measure(m, commit, 'val', complete, memory),
+    ),
+  )
   const all = rows()
   return {
     rates: all.map((x) => x.r),
@@ -277,23 +280,27 @@ export async function check(m: Measure, solver: Complete, repeats = 3) {
   if (!commit) throw new Error('稼働版も基準版もありません')
   const memory = openIdeas(m).memory()
   if (!memory) throw new Error('採用されたアイデアがありません')
-  const results = []
-  for (const [name, mem] of [
-    ['記憶なし', ''],
-    ['記憶あり', memory],
-  ] as const) {
-    const rates: number[] = []
-    const costs: number[] = []
-    for (let i = 0; i < repeats; i++) {
-      const r = await measure(m, commit, 'test', solver, mem)
-      rates.push(r.ok / r.total)
-      costs.push(r.cost)
-    }
-    results.push({ name, rates, cost: summary(costs).mean })
-    console.log(
-      `${name}: 成功率 ${summary(rates).mean.toFixed(3)}、平均費用 $${summary(costs).mean.toFixed(4)}`,
-    )
-  }
+  // 記憶なしと記憶ありの計測をすべて並べて測る
+  const results = await Promise.all(
+    (
+      [
+        ['記憶なし', ''],
+        ['記憶あり', memory],
+      ] as const
+    ).map(async ([name, mem]) => {
+      const rs = await Promise.all(
+        Array.from({ length: repeats }, () =>
+          measure(m, commit, 'test', solver, mem),
+        ),
+      )
+      const rates = rs.map((r) => r.ok / r.total)
+      const costs = rs.map((r) => r.cost)
+      console.log(
+        `${name}: 成功率 ${summary(rates).mean.toFixed(3)}、平均費用 $${summary(costs).mean.toFixed(4)}`,
+      )
+      return { name, rates, cost: summary(costs).mean }
+    }),
+  )
   const { delta, margin } = compare(
     results[0].rates,
     results[1].rates,

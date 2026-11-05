@@ -11,6 +11,7 @@ import {
   measure,
   REPO,
   runAgent,
+  slot,
   summary,
 } from './measure'
 import type { Budget, Complete } from './model'
@@ -247,14 +248,16 @@ export async function selfEdit(
   const work = await mkdtemp(join(tmpdir(), 'hyph-self-'))
   try {
     await Bun.$`cp -a ${agent} ${join(work, 'agent')}`.quiet()
-    await runAgent(
-      agent,
-      work,
-      'agent/ の中に NOTE.md というファイルを作り、内容を ok の1行にしてください。それ以外は変更しないでください。',
-      complete,
-      budget,
-      () => {},
-      join(DIR, 'logs', 'self-edit.log'),
+    await slot(() =>
+      runAgent(
+        agent,
+        work,
+        'agent/ の中に NOTE.md というファイルを作り、内容を ok の1行にしてください。それ以外は変更しないでください。',
+        complete,
+        budget,
+        () => {},
+        join(DIR, 'logs', 'self-edit.log'),
+      ),
     )
     return (
       (await Bun.file(join(work, 'agent/NOTE.md'))
@@ -307,19 +310,21 @@ async function improve(
         `# 課題 ${r.task_id}: ${r.ok ? '成功' : '失敗'}、費用 $${r.cost}\n\n## 課題文\n${statements.get(r.task_id)}\n\n## 実行記録（末尾）\n${transcript}\n`,
       )
     }
-    await runAgent(
-      agent,
-      work,
-      `/work/agent は、あなた自身のコード（課題を解くエージェント）の複製です。このエージェントは隔離環境で bun /agent/solve.ts として動き、/task.md の課題文を読み、/work で作業し、モデルは Unix ソケット /model.sock の中継を通して呼びます。依存パッケージはなく、型以外は import できません。
+    await slot(() =>
+      runAgent(
+        agent,
+        work,
+        `/work/agent は、あなた自身のコード（課題を解くエージェント）の複製です。このエージェントは隔離環境で bun /agent/solve.ts として動き、/task.md の課題文を読み、/work で作業し、モデルは Unix ソケット /model.sock の中継を通して呼びます。依存パッケージはなく、型以外は import できません。
 /work/runs に、検証用課題での実行記録があります。記録から失敗の原因や無駄な費用を見つけ、成功率を上げるか、成功率を保ったまま費用を下げるように /work/agent を変更してください。
 - 変更は /work/agent の中だけにしてください。それ以外は採用されません
 - /task.md・/work・/model.sock を使う動き方は変えないでください
 - 最後に、変更内容を1〜3行で /work/CHANGE.md に書いてください
 - 失敗の原因が固定部（/work/fixed の中継・ノード・評価器・モデル中継）にあり、agent/ では直せないときは、固定部の変更を /work/fixed からの相対パスの unified diff で /work/META.patch に書いてください。固定部の変更は自動では採用されず、利用者の承認を待ちます${focus && `\n${focus}`}`,
-      complete,
-      budget,
-      () => {},
-      join(DIR, 'logs', `improve-${parent.slice(0, 7)}-${Date.now()}.log`),
+        complete,
+        budget,
+        () => {},
+        join(DIR, 'logs', `improve-${parent.slice(0, 7)}-${Date.now()}.log`),
+      ),
     )
     const description =
       (
