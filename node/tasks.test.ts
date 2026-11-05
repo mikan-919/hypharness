@@ -3,7 +3,7 @@ import { mkdir, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AssistantMessage, Context, ToolCall } from '@earendil-works/pi-ai'
-import { attempt, slot } from './measure'
+import { attempt, measure, openMeasure, REPO, slot } from './measure'
 import { type Budget, type Complete, serveModel } from './model'
 import { sandbox } from './sandbox'
 import { diff, type EvalTask, generate, prepare, validate } from './tasks'
@@ -512,4 +512,42 @@ test('エージェントは振り返りで残した記憶を、同じ状態で�
   expect(JSON.stringify(second[0].messages[0])).toContain(
     '字句解析の位置がずれる',
   )
+}, 120_000)
+
+test('状態を渡した計測は、各課題を状態の複製から始め、記憶ありの計測として印を残す', async () => {
+  const m = openMeasure(':memory:')
+  m.addTask(
+    task({
+      statement: '/state/note の中身を answer.txt に書いてください',
+      check: 'test "$(cat answer.txt)" = 覚えた',
+    }),
+    'val',
+  )
+  const complete: Complete = async (context) =>
+    context.messages.some((x) => x.role === 'toolResult')
+      ? reply([{ type: 'toolCall', id: 'f', name: 'finish', arguments: {} }])
+      : reply([
+          {
+            type: 'toolCall',
+            id: '1',
+            name: 'sh',
+            arguments: {
+              command: 'cp /state/note answer.txt; echo 消す > /state/note',
+            },
+          },
+        ])
+  const dir = await mkdtemp(join(tmpdir(), 'hyph-state-'))
+  await Bun.write(join(dir, 'note'), '覚えた')
+  const head = (await Bun.$`git -C ${REPO} rev-parse HEAD`.text()).trim()
+  const r = await measure(m, head, 'val', complete, '', {
+    dir,
+    label: 'テスト',
+  })
+  expect(r.ok).toBe(1)
+  // 試行は複製に書くため、元の状態は変わらない
+  expect(await Bun.file(join(dir, 'note')).text()).toBe('覚えた')
+  expect(
+    m.db.query<{ memory: string }, []>('SELECT memory FROM measurements').get()
+      ?.memory,
+  ).toBe('（状態 テスト）')
 }, 120_000)
