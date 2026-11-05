@@ -43,6 +43,7 @@ bun run measure <セッション> harden [val|test] [生成する数]           
 bun run measure <セッション> flag <課題の番号>                                         # 抽出確認で関係しない課題を外す
 bun run measure <セッション> workspace <リポジトリ> <開発環境の設定> [読み取り専用のディレクトリ...]  # 課題をリポジトリの上に作る
 bun run measure <セッション> pr [試行の番号]  # 成功した試行の差分からリポジトリに PR を作る（番号なしで候補を表示）
+bun run measure <セッション> mine [検証用の数] [成績用の数] [差分の行数の上限]  # 作業領域のリポジトリの過去のコミットを種にして課題を作る
 bun run measure <セッション> state-check <コミット> [回数]  # 成績用課題で貯めた状態（記憶）から検証用課題を測り、状態なしと比べる
 bun run measure <セッション> proposals  # 改善役が出した固定部の変更の提案を表示する
 bun run measure <セッション> approve|reject <提案の番号>  # 提案を承認して hypharness に PR を作るか、棄却する
@@ -56,6 +57,8 @@ echo "export CARGO_HOME=$HOME/.cargo CARGO_NET_OFFLINE=true" >> ~/.hyph/hibana.e
 bun run measure hibana workspace ~/ghq/github.com/mikan-919/hibana ~/.hyph/hibana.env.sh ~/.cargo/registry
 bun run measure hibana generate <最終目的のファイル> 4 2
 ```
+
+`mine` は、作業領域のリポジトリの過去のコミットを1件ずつ種にする。そのコミットの1つ前を課題のコミットにし、そのコミットの変更を当てた複製から、生成役に課題文と隠しテストだけを書かせる。変更そのものが模範解答になるため、ゼロから作らせるより少ない手順で課題ができる。種にするのは、既存の課題のコミットすべての祖先にあたるコミットだけで、文書だけの変更と、差分が上限（既定400行）を超える変更は使わない。生成役は同時に4つまで動かす。
 
 `harden` は、基準版の解けた割合と失敗の記録を生成役に渡して新しい課題を作らせ、基準版に4回ずつ解かせて、解けた割合が20〜80%の課題だけを加える。課題を加えたときは、基準版が3回以上の計測ですべて解いた課題を外し、その分割の予算の基準を作り直す。
 
