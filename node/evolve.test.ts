@@ -2,7 +2,16 @@ import { beforeAll, expect, test } from 'bun:test'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { type ArmStats, commitAgent, compare, gate, rate, ucb } from './evolve'
+import {
+  type ArmStats,
+  commitAgent,
+  compare,
+  filter,
+  gate,
+  openProposals,
+  rate,
+  ucb,
+} from './evolve'
 import { openMeasure, REPO } from './measure'
 
 // 利用者のリポジトリに参照を足さないよう、複製した上で候補を作る
@@ -96,17 +105,19 @@ test('進化対象の外の変更はコミットに入らず、外を変えた�
 test('UCB1 は試していない改善対象を先に選び、その後は勝率と試行の少なさで選ぶ', () => {
   expect(ucb([])).toBe('prompt')
   expect(ucb([{ arm: 'prompt', n: 1, wins: 0 }])).toBe('module')
-  const tried = (wins: [number, number, number]): ArmStats[] => [
+  const tried = (wins: [number, number, number, number]): ArmStats[] => [
     { arm: 'prompt', n: 10, wins: wins[0] },
     { arm: 'module', n: 10, wins: wins[1] },
-    { arm: 'code', n: 10, wins: wins[2] },
+    { arm: 'spec', n: 10, wins: wins[2] },
+    { arm: 'code', n: 10, wins: wins[3] },
   ]
-  expect(ucb(tried([1, 8, 2]))).toBe('module')
+  expect(ucb(tried([1, 8, 2, 2]))).toBe('module')
   // 勝率が同程度なら、試行の少ない対象を選ぶ
   expect(
     ucb([
       { arm: 'prompt', n: 20, wins: 10 },
       { arm: 'module', n: 2, wins: 1 },
+      { arm: 'spec', n: 20, wins: 10 },
       { arm: 'code', n: 20, wins: 10 },
     ]),
   ).toBe('module')
@@ -161,4 +172,56 @@ test('成功率の差は、課題数と計測回数から求めたばらつき�
   // 同じ差でも計測回数を増やせば基準を超える
   const many = compare(Array(10).fill(0.542), Array(10).fill(0.75), 8)
   expect(many.delta).toBeGreaterThan(many.margin)
+})
+
+test('批評役が不要とした変更を親の版に戻した候補を作り、全部か何も挙げなければ作らない', async () => {
+  const commit = (await candidate(async (agent) => {
+    await Bun.write(join(agent, 'needed.ts'), 'export const a = 1\n')
+    await Bun.write(join(agent, 'noise.ts'), 'export const b = 2\n')
+  })) as string
+  const critic = (answer: string) => async () =>
+    ({
+      role: 'assistant',
+      content: [{ type: 'text', text: answer }],
+      usage: { cost: { total: 0 } },
+    }) as never
+  const kept = (await filter(
+    repo,
+    head,
+    commit,
+    '説明',
+    critic('不要なのは ["agent/noise.ts"] です'),
+  )) as string
+  expect(
+    (
+      await Bun.$`git -C ${repo} diff --name-only ${head} ${kept}`.text()
+    ).trim(),
+  ).toBe('agent/needed.ts')
+  expect(await filter(repo, head, commit, '説明', critic('[]'))).toBeNull()
+  expect(
+    await filter(
+      repo,
+      head,
+      commit,
+      '説明',
+      critic('["agent/needed.ts","agent/noise.ts"]'),
+    ),
+  ).toBeNull()
+  expect(
+    await filter(repo, head, commit, '説明', critic('読めない')),
+  ).toBeNull()
+})
+
+test('固定部の変更の提案は承認を待つ状態で残り、棄却すると一覧から消える', () => {
+  const m = openMeasure(':memory:')
+  const p = openProposals(m)
+  const id = p.add(
+    'c',
+    '中継の予算を直す',
+    'diff --git a/node/model.ts b/node/model.ts\n',
+  )
+  expect(p.pending().map((x) => x.id)).toEqual([id])
+  p.set(id, 'rejected')
+  expect(p.pending()).toEqual([])
+  expect(p.get(id)?.status).toBe('rejected')
 })

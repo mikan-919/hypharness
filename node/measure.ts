@@ -13,6 +13,8 @@
 //   bun run measure <セッション> ideas-check [回数]
 //   bun run measure <セッション> harden [val|test] [生成する数]
 //   bun run measure <セッション> flag <課題の番号>
+//   bun run measure <セッション> proposals
+//   bun run measure <セッション> approve|reject <提案の番号>
 import { Database } from 'bun:sqlite'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
@@ -713,9 +715,30 @@ if (import.meta.main) {
     if (exhausted()) process.exit(0)
     const adopted = await promote(m, solver, Number(top), Number(repeats))
     if (adopted) ledger.improved('self', adopted.delta, adopted.commit)
+  } else if (command === 'proposals') {
+    const { openProposals } = await import('./evolve')
+    const pending = openProposals(m).pending()
+    if (!pending.length) console.log('承認を待つ固定部の変更の提案はありません')
+    for (const p of pending) {
+      console.log(
+        `## 提案 #${p.id}（候補 ${p.parent.slice(0, 7)} の改善から）\n${p.description}\n\n${p.patch}`,
+      )
+    }
+  } else if (command === 'approve' || command === 'reject') {
+    const [id = ''] = args
+    if (!/^[1-9]\d*$/.test(id)) throw new Error('提案の番号は正の整数です')
+    const { approve, openProposals } = await import('./evolve')
+    if (command === 'approve') console.log(await approve(m, Number(id)))
+    else {
+      const p = openProposals(m).get(Number(id))
+      if (p?.status !== 'pending')
+        throw new Error(`承認を待つ提案 #${id} はありません`)
+      openProposals(m).set(Number(id), 'rejected')
+      console.log(`提案 #${id} を棄却しました`)
+    }
   } else {
     console.log(
-      '使い方: bun run measure <セッション> generate|review|run|evolve|promote|deploy|ideas|ideas-check|budget|ledger|harden|flag',
+      '使い方: bun run measure <セッション> generate|review|run|evolve|promote|deploy|ideas|ideas-check|budget|ledger|harden|flag|proposals|approve|reject',
     )
   }
 }
