@@ -24,6 +24,11 @@ export type Task = {
   version: string | null
   // 確定チェックポイント（暗号化した作業領域の SHA-256）。別のノードはここから再開する
   checkpoint: string | null
+  // task は利用者のタスク、trial は計測の試行（図の実験配置）。試行の中身（課題・候補のコード）は暗号化して R2 に置き、
+  // 中継には SHA-256（payload）だけを持つ。result は暗号化した結果の SHA-256
+  kind: 'task' | 'trial'
+  payload: string | null
+  result: string | null
   created_at: number
 }
 export type Grant = {
@@ -32,6 +37,8 @@ export type Grant = {
   check: string | null
   generation: number
   checkpoint: string | null
+  kind: 'task' | 'trial'
+  payload: string | null
 }
 // ノードが報告する結果。中継に置くのは数値とハッシュだけで、出力はノードの外に出さない
 export type Outcome = { code: number; ok: boolean | null; version: string }
@@ -46,16 +53,40 @@ export type LedgerRow = {
   spent: number
   improvement: number
 }
-// ノードから届く通知。ready は割り当てを待っていること、renew は実行権の更新、done は終了の報告、ledger は資源配分の内訳
+// オフライン RSI の系統の1候補。中継に置くのはコミット・状態・成功率だけ
+export type LineageRow = {
+  commit: string
+  parent: string | null
+  status: string
+  val: number | null
+}
+// 固定部の変更の提案。中継に置くのは番号・親・変えるファイルの名前・行数・状態だけで、差分の本文はノードに残す
+export type ProposalRow = {
+  id: number
+  parent: string
+  files: string[]
+  lines: number
+  status: 'pending' | 'approved' | 'rejected' | 'requested'
+  pr: string | null
+}
+// ノードから届く通知。ready は割り当てを待っていること、renew は実行権の更新、done は終了の報告、ledger は資源配分の内訳、
+// evolution はセッションの系統と固定部の変更の提案
 export type NodeMessage =
   | { type: 'ready' }
   | { type: 'ledger'; rows: LedgerRow[] }
+  | {
+      type: 'evolution'
+      session: string
+      lineage: LineageRow[]
+      proposals: ProposalRow[]
+    }
   | { type: 'renew'; id: number; generation: number }
   | ({ type: 'done'; id: number; generation: number } & Outcome)
 // 中継からノードへ送る指示。revoked は実行権を失ったので実行を止めること
 export type RelayMessage =
   | ({ type: 'task' } & Grant)
   | { type: 'revoked'; id: number; generation: number }
+  | { type: 'approve'; session: string; id: number }
 export type HistoryEvent = {
   task_id: number
   generation: number
@@ -93,6 +124,12 @@ export function openQueue(sql: Sql) {
   // 段階6より前の表には checkpoint の列がない
   if (!columns.has('checkpoint')) {
     sql('ALTER TABLE tasks ADD COLUMN checkpoint TEXT')
+  }
+  // 計測の試行を配るより前の表には kind・payload・result の列がない
+  if (!columns.has('kind')) {
+    sql("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'task'")
+    sql('ALTER TABLE tasks ADD COLUMN payload TEXT')
+    sql('ALTER TABLE tasks ADD COLUMN result TEXT')
   }
   sql(`CREATE TABLE IF NOT EXISTS history (
     id INTEGER PRIMARY KEY,
@@ -155,12 +192,19 @@ export function openQueue(sql: Sql) {
   return {
     reclaim,
 
-    add(statement: string, check: string | null, now: number) {
+    add(
+      statement: string,
+      check: string | null,
+      now: number,
+      payload: string | null = null,
+    ) {
       const [{ id }] = sql<{ id: number }>(
-        'INSERT INTO tasks (statement, check_command, created_at) VALUES (?, ?, ?) RETURNING id',
+        'INSERT INTO tasks (statement, check_command, created_at, kind, payload) VALUES (?, ?, ?, ?, ?) RETURNING id',
         statement,
         check,
         now,
+        payload ? 'trial' : 'task',
+        payload,
       )
       record({
         task_id: id,
@@ -207,6 +251,8 @@ export function openQueue(sql: Sql) {
         check: t.check_command,
         generation,
         checkpoint: t.checkpoint,
+        kind: t.kind,
+        payload: t.payload,
       }
     },
 
@@ -225,6 +271,22 @@ export function openQueue(sql: Sql) {
       sql('UPDATE tasks SET checkpoint = ? WHERE id = ?', hash, id)
       return true
     },
+
+    // 試行の結果（暗号化した結果の SHA-256）。今の実行権の保持者だけが置ける
+    result(
+      id: number,
+      generation: number,
+      node: string,
+      hash: string,
+      now: number,
+    ) {
+      if (!current(id, generation, node, now)) return false
+      sql('UPDATE tasks SET result = ? WHERE id = ?', hash, id)
+      return true
+    },
+
+    get: (id: number) =>
+      sql<Task>('SELECT * FROM tasks WHERE id = ?', id)[0] ?? null,
 
     renew(id: number, generation: number, node: string, now: number) {
       if (!current(id, generation, node, now)) return false

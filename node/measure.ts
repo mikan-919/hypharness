@@ -418,15 +418,24 @@ export async function measure(
     const budget: Budget = { limit, spent: 0 }
     const started = Date.now()
     console.log(`${tag} 課題 ${task.id}: 開始`)
-    const calls: Parameters<Parameters<typeof serveModel>[3]>[0][] = []
-    const { ok, code, patch } = await attempt(
-      { ...task, statement: withMemory(memory, task.statement) },
-      agent,
-      complete,
-      budget,
-      (call) => calls.push(call),
-      join(DIR, 'logs', `measure-${id}-${task.id}.log`),
-    )
+    let calls: Parameters<Parameters<typeof serveModel>[3]>[0][] = []
+    const solve = { ...task, statement: withMemory(memory, task.statement) }
+    const { ok, code, patch } = REMOTE
+      ? await (async () => {
+          const { remoteAttempt } = await import('./trials')
+          const r = await remoteAttempt(solve, agent, commit, limit)
+          budget.spent = r.cost
+          calls = r.calls
+          return r
+        })()
+      : await attempt(
+          solve,
+          agent,
+          complete,
+          budget,
+          (call) => calls.push(call),
+          join(DIR, 'logs', `measure-${id}-${task.id}.log`),
+        )
     const run = m.addRun(id, task.id, ok, budget.spent, code, patch)
     for (const c of calls)
       m.addCall(run, c.context, c.reply, c.reply.usage.cost.total)
@@ -434,13 +443,20 @@ export async function measure(
       `${tag} 課題 ${task.id}: ${ok ? '成功' : '失敗'}（$${budget.spent.toFixed(4)}、${Math.round((Date.now() - started) / 1000)}秒、${++done}/${tasks.length}）`,
     )
   }
-  await Promise.all(tasks.map((task) => slot(() => one(task))))
+  // 中継に配るときは、同時に動く数を中継の割り当て（1ノードに1つ）が決めるため、手元の上限をかけない
+  await Promise.all(
+    tasks.map((task) => (REMOTE ? one(task) : slot(() => one(task)))),
+  )
   const result = m.finishMeasurement(id)
   // 最初の計測の費用を、その分割の予算の基準にする
   if (base === null && !memory)
     m.setMeta(`budget:${split}`, String(result.cost))
   return result
 }
+
+// HYPH_TRIALS=relay のとき、計測の試行を ~/.hyph/node.json の中継に置き、接続中のノードに解かせる（図の実験配置）。
+// 既定は手元で解く。中継とペアリング済みのノードが要るため、既定にはしない
+const REMOTE = process.env.HYPH_TRIALS === 'relay'
 
 export const summary = (rates: number[]) => {
   const mean = rates.reduce((a, b) => a + b, 0) / rates.length

@@ -22,6 +22,8 @@ test('入れたタスクを1つのノードに割り当て、完了の報告を�
     check: 'true',
     generation: 1,
     checkpoint: null,
+    kind: 'task',
+    payload: null,
   })
   // 実行中のノードと、待ち行列が空のときは割り当てない
   expect(q.claim('a', 2)).toBeNull()
@@ -110,4 +112,23 @@ test('チェックポイントは今の実行権の保持者だけが記録で�
   // 古い世代の保持者は、もう記録できない
   expect(q.checkpoint(id, 1, 'a', 'h0', LEASE_MS + 2)).toBe(false)
   expect(q.tasks()[0].checkpoint).toBe('h1')
+})
+
+test('計測の試行は中身のハッシュだけを持ち、結果は今の実行権の保持者だけが置ける', () => {
+  const q = setup()
+  const id = q.add('', null, 0, 'p'.repeat(64))
+  expect(q.claim('a', 1)).toMatchObject({
+    id,
+    kind: 'trial',
+    payload: 'p'.repeat(64),
+  })
+  expect(q.result(id, 1, 'b', 'r', 2)).toBe(false)
+  expect(q.result(id, 0, 'a', 'r', 2)).toBe(false)
+  expect(q.result(id, 1, 'a', 'r', 2)).toBe(true)
+  expect(q.get(id)).toMatchObject({
+    kind: 'trial',
+    result: 'r',
+    state: 'leased',
+  })
+  expect(q.get(999)).toBeNull()
 })

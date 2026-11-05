@@ -3,6 +3,7 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { type Grant, LEASE_MS, type RelayMessage } from '../src/queue'
 import { openDeploy } from './deploy'
+import { approve, evolutionSummary } from './evolve'
 import { openIdeas } from './ideas'
 import { openLedger } from './ledger'
 import {
@@ -55,6 +56,10 @@ if (!deploy.stable() || !m.meta('budget:val')) {
 const ledger = openLedger(m)
 // 実際のタスクの費用は目的遂行の区分に記録する
 const { solver } = await models((cost) => ledger.record('task', cost))
+// 別のノードから配られた計測の試行の費用は、検証の区分に記録する
+const { solver: verifier } = await models((cost) =>
+  ledger.record('verify', cost),
+)
 const key = await loadKey(join(DIR, 'vault.key'))
 await mkdir(LOGS, { recursive: true, mode: 0o700 })
 await mkdir(STATE, { recursive: true, mode: 0o700 })
@@ -69,6 +74,8 @@ const config =
 
 let ws: WebSocket | null = null
 let running: Running | null = null
+// PR にしている途中の提案の番号
+const approving = new Set<number>()
 // 切断中に終わったタスクの報告。再接続したら送る
 const unsent: string[] = []
 
@@ -85,8 +92,13 @@ setInterval(() => {
   }
 }, RENEW_MS)
 
-// 資源配分の内訳を、接続時と1分ごとに中継へ送る。計測の命令が別のプロセスで書いた分も含まれる
-setInterval(() => send({ type: 'ledger', rows: ledger.rows() }), LEDGER_MS)
+// 資源配分の内訳と、このセッションの系統・固定部の変更の提案を、接続時と1分ごとに中継へ送る。
+// 計測の命令が別のプロセスで書いた分も含まれる
+const report = () => {
+  send({ type: 'ledger', rows: ledger.rows() })
+  send({ type: 'evolution', session, ...evolutionSummary(m) })
+}
+setInterval(report, LEDGER_MS)
 
 connect()
 
@@ -99,18 +111,37 @@ function connect() {
     ws = socket
     console.log(`${config.url} に接続しました`)
     for (const data of unsent.splice(0)) socket.send(data)
-    socket.send(JSON.stringify({ type: 'ledger', rows: ledger.rows() }))
+    report()
     if (!running) socket.send(JSON.stringify({ type: 'ready' }))
   }
   socket.onmessage = (event) => {
-    const m: RelayMessage = JSON.parse(String(event.data))
-    if (m.type === 'task') run(m)
+    const message: RelayMessage = JSON.parse(String(event.data))
+    if (message.type === 'task') run(message)
+    // 画面で承認された固定部の変更の提案を PR にする。中継は全ノードに送り、処理が終わるまで依頼を送り直すため、
+    // 自分のセッションの依頼だけを、同じ提案を重ねずに処理する
     if (
-      m.type === 'revoked' &&
-      running?.id === m.id &&
-      running.generation === m.generation
+      message.type === 'approve' &&
+      message.session === session &&
+      !approving.has(message.id)
     ) {
-      console.log(`タスク ${m.id} の実行権を失ったため止めます`)
+      const id = message.id
+      approving.add(id)
+      approve(m, id)
+        .then((url) => console.log(`提案 #${id} の PR を作りました: ${url}`))
+        .catch((e) =>
+          console.error(`提案 #${id} を PR にできません: ${e.message}`),
+        )
+        .finally(() => {
+          approving.delete(id)
+          report()
+        })
+    }
+    if (
+      message.type === 'revoked' &&
+      running?.id === message.id &&
+      running.generation === message.generation
+    ) {
+      console.log(`タスク ${message.id} の実行権を失ったため止めます`)
       running.abort.abort()
     }
   }
@@ -130,6 +161,7 @@ async function run(task: Grant) {
     console.error(`タスク ${running.id} の実行中に別のタスクが届きました`)
     return
   }
+  if (task.kind === 'trial') return runTrial(task)
   const { version, role } = deploy.pick()
   const abort = new AbortController()
   running = { id: task.id, generation: task.generation, abort }
@@ -235,6 +267,47 @@ async function run(task: Grant) {
   } finally {
     clearInterval(timer)
     await saving
+  }
+  send({ type: 'ready' })
+}
+
+// 別のノードが置いた計測の試行を解く。候補の版は試行の中身で決まり、試験配備の比較やチェックポイントには使わない。
+// 実行権が切れたら、別のノードが最初から解き直す
+async function runTrial(task: Grant) {
+  const abort = new AbortController()
+  running = { id: task.id, generation: task.generation, abort }
+  console.log(`試行 ${task.id}（世代 ${task.generation}）を解きます`)
+  try {
+    const { solveTrial } = await import('./trials')
+    const r = await solveTrial(task, verifier, abort.signal)
+    console.log(`試行 ${task.id}: ${r.ok ? '成功' : '失敗'}`)
+    running = null
+    if (!abort.signal.aborted) {
+      send({
+        type: 'done',
+        id: task.id,
+        generation: task.generation,
+        code: r.code ?? 127,
+        ok: r.ok,
+        version: r.commit,
+      })
+    }
+  } catch (e) {
+    running = null
+    console.error(e instanceof Error ? e.message : e)
+    // 解けなかった試行（中身を読めない・作業領域のディレクトリがない・モデルの障害）も終わったと報告する。
+    // 報告しないと期限切れで待ち行列に戻り、同じ失敗を繰り返す。計測する側は結果がないことで失敗を知る。
+    // 版は中身を読めないと分からないため、0 を並べた値にする
+    if (!abort.signal.aborted) {
+      send({
+        type: 'done',
+        id: task.id,
+        generation: task.generation,
+        code: 127,
+        ok: null,
+        version: '0'.repeat(40),
+      })
+    }
   }
   send({ type: 'ready' })
 }

@@ -5,7 +5,7 @@ import { csrf } from 'hono/csrf'
 import { createMiddleware } from 'hono/factory'
 import { HTTPException } from 'hono/http-exception'
 import type { Accounts, RelyingParty, User } from './accounts'
-import type { Relay } from './relay'
+import { type Relay, sessionName } from './relay'
 import { rootView } from './renderer'
 
 type AppEnv = { Bindings: Env; Variables: { user: User } }
@@ -62,6 +62,38 @@ app.onError((err, c) => {
 
 // 暗号化した作業領域の大きさの上限
 const CHECKPOINT_LIMIT = 10 * 1024 * 1024
+// 暗号化した試行の中身（課題・候補のコード・作業領域のリポジトリ）と結果（差分・モデルの呼び出しの記録）の大きさの上限
+const TRIAL_LIMIT = 50 * 1024 * 1024
+
+// R2 の置き場は内容の SHA-256 で決める（CAS）。同じ中身は1つだけ置き、キーから中身の取り違えを確かめられる
+const casKey = (userId: string, hash: string) => `${userId}/cas/${hash}`
+
+// ノード用トークンを確かめ、ノードとその利用者を返す
+async function nodeOwner(c: Context<AppEnv>) {
+  const token = c.req.header('Authorization')?.replace(/^Bearer /, '')
+  return token ? await accounts(c.env).nodeOwner(token) : null
+}
+
+// 本文を上限つきで読み、R2 に内容の SHA-256 で置く。上限を超えたら null
+async function putBlob(c: Context<AppEnv>, userId: string, limit: number) {
+  const declared = Number(c.req.header('content-length'))
+  if (!(declared > 0 && declared <= limit)) return null
+  const body = await c.req.arrayBuffer()
+  if (body.byteLength > limit) return null
+  const hash = toHex(await crypto.subtle.digest('SHA-256', body))
+  await c.env.CHECKPOINTS.put(casKey(userId, hash), body)
+  return hash
+}
+
+async function getBlob(
+  c: Context<AppEnv>,
+  userId: string,
+  hash: string | null,
+) {
+  const object = hash ? await c.env.CHECKPOINTS.get(casKey(userId, hash)) : null
+  if (!object) return c.json({ error: '中身がありません' }, 404)
+  return new Response(object.body)
+}
 
 const toHex = (buffer: ArrayBuffer) =>
   [...new Uint8Array(buffer)]
@@ -70,8 +102,7 @@ const toHex = (buffer: ArrayBuffer) =>
 
 // チェックポイントの読み書きの対象。ノードのトークンと、そのノードが今の実行権を持つことを確かめる
 async function checkpointTarget(c: Context<AppEnv>) {
-  const token = c.req.header('Authorization')?.replace(/^Bearer /, '')
-  const owner = token ? await accounts(c.env).nodeOwner(token) : null
+  const owner = await nodeOwner(c)
   if (!owner) return c.json({ error: 'ノード用トークンが不正です' }, 401)
   const id = Number(c.req.param('id'))
   const generation = Number(c.req.param('generation'))
@@ -87,7 +118,7 @@ async function checkpointTarget(c: Context<AppEnv>) {
     id,
     generation,
     node: owner.node.id,
-    key: `${owner.userId}/${id}`,
+    userId: owner.userId,
   }
 }
 
@@ -135,6 +166,19 @@ const routes = app
         check?.trim() || null,
       ),
     })
+  })
+  // 固定部の変更の提案を承認する。中継は依頼を残してノードに送り、ノードが PR を作る
+  .post('/proposals/approve', auth, async (c) => {
+    const { session, id } = await c.req.json<{
+      session?: unknown
+      id?: unknown
+    }>()
+    if (!sessionName(session) || !Number.isSafeInteger(id)) {
+      return c.json({ error: 'セッションと提案の番号を指定してください' }, 400)
+    }
+    return (await relay(c.env, c.var.user.id).approve(session, id as number))
+      ? c.json({ ok: true })
+      : c.json({ error: '承認を待つ提案がありません' }, 404)
   })
   .get('/tasks/:id/history', auth, async (c) => {
     const id = Number(c.req.param('id'))
@@ -216,22 +260,13 @@ const routes = app
   .put('/node/checkpoints/:id/:generation', async (c) => {
     const target = await checkpointTarget(c)
     if (target instanceof Response) return target
-    const declared = Number(c.req.header('content-length'))
-    if (!(declared > 0 && declared <= CHECKPOINT_LIMIT)) {
+    const hash = await putBlob(c, target.userId, CHECKPOINT_LIMIT)
+    if (!hash) {
       return c.json(
         { error: `チェックポイントは ${CHECKPOINT_LIMIT} バイトまでです` },
         413,
       )
     }
-    const body = await c.req.arrayBuffer()
-    if (body.byteLength > CHECKPOINT_LIMIT) {
-      return c.json(
-        { error: `チェックポイントは ${CHECKPOINT_LIMIT} バイトまでです` },
-        413,
-      )
-    }
-    const hash = toHex(await crypto.subtle.digest('SHA-256', body))
-    await c.env.CHECKPOINTS.put(target.key, body)
     const ok = await target.relay.checkpoint(
       target.id,
       target.generation,
@@ -244,13 +279,68 @@ const routes = app
   .get('/node/checkpoints/:id/:generation', async (c) => {
     const target = await checkpointTarget(c)
     if (target instanceof Response) return target
-    const object = await c.env.CHECKPOINTS.get(target.key)
-    if (!object) return c.json({ error: 'チェックポイントがありません' }, 404)
-    return new Response(object.body)
+    return getBlob(c, target.userId, await target.relay.checkpointOf(target.id))
+  })
+  // 計測の試行（図の実験配置）。計測するノードが暗号化した中身を置いて待ち行列に入れ、実行権を持つノードが中身を読んで解き、
+  // 暗号化した結果を置く。中継は鍵を持たず、ハッシュと状態だけを持つ
+  .post('/node/trials', async (c) => {
+    const owner = await nodeOwner(c)
+    if (!owner) return c.json({ error: 'ノード用トークンが不正です' }, 401)
+    const hash = await putBlob(c, owner.userId, TRIAL_LIMIT)
+    if (!hash) {
+      return c.json(
+        { error: `試行の中身は ${TRIAL_LIMIT} バイトまでです` },
+        413,
+      )
+    }
+    return c.json({ id: await relay(c.env, owner.userId).addTrial(hash) })
+  })
+  .get('/node/trials/:id', async (c) => {
+    const owner = await nodeOwner(c)
+    if (!owner) return c.json({ error: 'ノード用トークンが不正です' }, 401)
+    const id = Number(c.req.param('id'))
+    if (!Number.isSafeInteger(id)) {
+      return c.json({ error: '試行の番号が不正です' }, 400)
+    }
+    const trial = await relay(c.env, owner.userId).trial(id)
+    if (!trial) return c.json({ error: '試行がありません' }, 404)
+    return c.json(trial)
+  })
+  .get('/node/trials/:id/result', async (c) => {
+    const owner = await nodeOwner(c)
+    if (!owner) return c.json({ error: 'ノード用トークンが不正です' }, 401)
+    const trial = await relay(c.env, owner.userId).trial(
+      Number(c.req.param('id')),
+    )
+    return getBlob(c, owner.userId, trial?.result ?? null)
+  })
+  .get('/node/trials/:id/:generation/payload', async (c) => {
+    const target = await checkpointTarget(c)
+    if (target instanceof Response) return target
+    const trial = await target.relay.trial(target.id)
+    return getBlob(c, target.userId, trial?.payload ?? null)
+  })
+  .put('/node/trials/:id/:generation/result', async (c) => {
+    const target = await checkpointTarget(c)
+    if (target instanceof Response) return target
+    const hash = await putBlob(c, target.userId, TRIAL_LIMIT)
+    if (!hash) {
+      return c.json(
+        { error: `試行の結果は ${TRIAL_LIMIT} バイトまでです` },
+        413,
+      )
+    }
+    const ok = await target.relay.result(
+      target.id,
+      target.generation,
+      target.node,
+      hash,
+    )
+    if (!ok) return c.json({ error: '実行権を持っていません' }, 409)
+    return c.json({ hash })
   })
   .get('/node/socket', async (c) => {
-    const token = c.req.header('Authorization')?.replace(/^Bearer /, '')
-    const owner = token ? await accounts(c.env).nodeOwner(token) : null
+    const owner = await nodeOwner(c)
     if (!owner) return c.json({ error: 'ノード用トークンが不正です' }, 401)
     const headers = new Headers(c.req.raw.headers)
     headers.set('x-node-id', owner.node.id)

@@ -674,6 +674,12 @@ export function openProposals(m: Measure) {
           'SELECT id, parent, description, patch, status, pr FROM proposals WHERE id = ?',
         )
         .get(id),
+    all: () =>
+      m.db
+        .query<Proposal, []>(
+          'SELECT id, parent, description, patch, status, pr FROM proposals ORDER BY id',
+        )
+        .all(),
     pending: () =>
       m.db
         .query<Proposal, []>(
@@ -807,4 +813,39 @@ ${patch.slice(0, 30_000)}`,
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+}
+
+// 中継と画面に送る系統と提案。中継に置くのはコミット・状態・数値と、提案の変えるファイルの名前と行数だけ
+export function evolutionSummary(m: Measure) {
+  const lineage = openLineage(m)
+    .all()
+    .slice(-500)
+    .map((c) => ({
+      commit: c.commit_id,
+      parent: c.parent,
+      status: c.status,
+      val: rate(m, c.commit_id, 'val'),
+    }))
+  const proposals = openProposals(m)
+    .all()
+    .slice(-500)
+    .map((p) => {
+      const lines = p.patch.split('\n')
+      return {
+        id: p.id,
+        parent: p.parent,
+        files: [
+          ...new Set(
+            lines
+              .filter((l) => l.startsWith('+++ ') && !l.endsWith('/dev/null'))
+              .map((l) => l.slice(4).replace(/^b\//, '').slice(0, 200)),
+          ),
+        ].slice(0, 50),
+        lines: lines.filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l))
+          .length,
+        status: p.status,
+        pr: p.pr,
+      }
+    })
+  return { lineage, proposals }
 }

@@ -1,9 +1,11 @@
 import { DurableObject } from 'cloudflare:workers'
 import {
   type LedgerRow,
+  type LineageRow,
   type NodeInfo,
   type NodeMessage,
   openQueue,
+  type ProposalRow,
   type Queue,
   type RelayMessage,
 } from './queue'
@@ -18,6 +20,30 @@ const ledgerRow = (r: Record<string, unknown>) =>
   Number.isFinite(r.improvement)
 // 1回に受け取る内訳の行の上限（14期 × 4区分を収める）
 const LEDGER_ROWS = 100
+// ponytail: 1セッションの系統と提案は新しい500件まで受け取る。画面で全件を見る必要が出たら、ページに分けて送る
+const EVOLUTION_ROWS = 500
+const commit = (v: unknown) => typeof v === 'string' && /^[0-9a-f]{40}$/.test(v)
+const lineageRow = (r: Record<string, unknown>) =>
+  commit(r?.commit) &&
+  (r.parent === null || commit(r.parent)) &&
+  typeof r.status === 'string' &&
+  r.status.length <= 16 &&
+  (r.val === null || Number.isFinite(r.val))
+const proposalRow = (r: Record<string, unknown>) =>
+  Number.isSafeInteger(r?.id) &&
+  commit(r.parent) &&
+  Array.isArray(r.files) &&
+  r.files.length <= 50 &&
+  r.files.every((f) => typeof f === 'string' && f.length <= 200) &&
+  Number.isSafeInteger(r.lines) &&
+  ['pending', 'approved', 'rejected'].includes(r.status as string) &&
+  // 画面でリンクにするため、GitHub の URL だけを受け取る
+  (r.pr === null ||
+    (typeof r.pr === 'string' &&
+      r.pr.length <= 200 &&
+      r.pr.startsWith('https://github.com/')))
+export const sessionName = (v: unknown): v is string =>
+  typeof v === 'string' && /^[\w-]{1,32}$/.test(v)
 
 const parse = (data: string | ArrayBuffer): NodeMessage => {
   const m = JSON.parse(String(data))
@@ -27,6 +53,18 @@ const parse = (data: string | ArrayBuffer): NodeMessage => {
     Array.isArray(m.rows) &&
     m.rows.length <= LEDGER_ROWS &&
     m.rows.every(ledgerRow)
+  ) {
+    return m
+  }
+  if (
+    m?.type === 'evolution' &&
+    sessionName(m.session) &&
+    Array.isArray(m.lineage) &&
+    m.lineage.length <= EVOLUTION_ROWS &&
+    m.lineage.every(lineageRow) &&
+    Array.isArray(m.proposals) &&
+    m.proposals.length <= EVOLUTION_ROWS &&
+    m.proposals.every(proposalRow)
   ) {
     return m
   }
@@ -63,6 +101,18 @@ export class Relay extends DurableObject<Env> {
       spent REAL NOT NULL,
       improvement REAL NOT NULL,
       PRIMARY KEY (period, kind)
+    )`)
+    // セッションごとの系統と提案は、ノードが送った最新の一覧で置き換える。承認の依頼はノードが処理するまで残す
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS evolution (
+      session TEXT PRIMARY KEY,
+      lineage TEXT NOT NULL,
+      proposals TEXT NOT NULL,
+      at INTEGER NOT NULL
+    )`)
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS approvals (
+      session TEXT NOT NULL,
+      id INTEGER NOT NULL,
+      PRIMARY KEY (session, id)
     )`)
   }
 
@@ -108,6 +158,27 @@ export class Relay extends DurableObject<Env> {
       }
       return
     }
+    if (m.type === 'evolution') {
+      this.ctx.storage.sql.exec(
+        'INSERT OR REPLACE INTO evolution (session, lineage, proposals, at) VALUES (?, ?, ?, ?)',
+        m.session,
+        JSON.stringify(m.lineage),
+        JSON.stringify(m.proposals),
+        now,
+      )
+      // ノードが処理した（承認待ちでなくなった）提案の依頼は消し、残りは送り直す
+      for (const p of m.proposals) {
+        if (p.status !== 'pending') {
+          this.ctx.storage.sql.exec(
+            'DELETE FROM approvals WHERE session = ? AND id = ?',
+            m.session,
+            p.id,
+          )
+        }
+      }
+      this.sendApprovals(ws, m.session)
+      return
+    }
     if (m.type === 'done') {
       const { code, ok, version } = m
       this.queue.finish(m.id, m.generation, node.id, { code, ok, version }, now)
@@ -125,6 +196,46 @@ export class Relay extends DurableObject<Env> {
     const id = this.queue.add(statement, check, Date.now())
     await this.dispatch()
     return id
+  }
+
+  // 計測の試行を待ち行列に入れる。payload は R2 に置いた暗号化済みの中身の SHA-256
+  async addTrial(payload: string) {
+    const id = this.queue.add('', null, Date.now(), payload)
+    await this.dispatch()
+    return id
+  }
+
+  trial(id: number) {
+    const t = this.queue.get(id)
+    return t?.kind === 'trial'
+      ? { state: t.state, code: t.code, result: t.result, payload: t.payload }
+      : null
+  }
+
+  result(id: number, generation: number, node: string, hash: string) {
+    return this.queue.result(id, generation, node, hash, Date.now())
+  }
+
+  checkpointOf(id: number) {
+    return this.queue.get(id)?.checkpoint ?? null
+  }
+
+  // 画面での承認。そのセッションの提案が承認待ちなら依頼を残し、接続中のノードに送る
+  approve(session: string, id: number) {
+    const row = this.ctx.storage.sql
+      .exec('SELECT proposals FROM evolution WHERE session = ?', session)
+      .toArray()[0] as { proposals: string } | undefined
+    const proposals = row ? (JSON.parse(row.proposals) as ProposalRow[]) : []
+    if (!proposals.some((p) => p.id === id && p.status === 'pending')) {
+      return false
+    }
+    this.ctx.storage.sql.exec(
+      'INSERT OR IGNORE INTO approvals (session, id) VALUES (?, ?)',
+      session,
+      id,
+    )
+    for (const ws of this.ctx.getWebSockets()) this.sendApprovals(ws, session)
+    return true
   }
 
   holds(id: number, generation: number, node: string) {
@@ -145,6 +256,34 @@ export class Relay extends DurableObject<Env> {
           LEDGER_ROWS,
         )
         .toArray() as LedgerRow[],
+      evolution: (
+        this.ctx.storage.sql
+          .exec('SELECT * FROM evolution ORDER BY session')
+          .toArray() as {
+          session: string
+          lineage: string
+          proposals: string
+          at: number
+        }[]
+      ).map((e) => {
+        const requested = new Set(
+          (
+            this.ctx.storage.sql
+              .exec('SELECT id FROM approvals WHERE session = ?', e.session)
+              .toArray() as { id: number }[]
+          ).map((a) => a.id),
+        )
+        return {
+          session: e.session,
+          at: e.at,
+          lineage: JSON.parse(e.lineage) as LineageRow[],
+          proposals: (JSON.parse(e.proposals) as ProposalRow[]).map((p) =>
+            requested.has(p.id) && p.status === 'pending'
+              ? { ...p, status: 'requested' as const }
+              : p,
+          ),
+        }
+      }),
     }
   }
 
@@ -161,6 +300,16 @@ export class Relay extends DurableObject<Env> {
     }
     const next = this.queue.nextExpiry()
     if (next !== null) await this.ctx.storage.setAlarm(next)
+  }
+
+  // 承認の依頼は、どのノードがそのセッションを持つか中継が知らないため、接続中のノードすべてに送る。
+  // ノードは自分のセッションの依頼だけを処理する
+  private sendApprovals(ws: WebSocket, session: string) {
+    for (const a of this.ctx.storage.sql
+      .exec('SELECT id FROM approvals WHERE session = ?', session)
+      .toArray() as { id: number }[]) {
+      this.send(ws, { type: 'approve', session, id: a.id })
+    }
   }
 
   private send(ws: WebSocket, message: RelayMessage) {
