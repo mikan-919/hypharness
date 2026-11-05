@@ -1,4 +1,4 @@
-// 永続記憶（LCM + DeLM）と作業文脈の編集（CLM + TokenPilot）。隔離環境で動くため、bun の組み込みだけを使う
+// 永続記憶（LCM + DeLM）と作業文脈の圧縮（TokenPilot）。隔離環境で動くため、bun の組み込みだけを使う
 import { Database } from 'bun:sqlite'
 import type { Message } from '@earendil-works/pi-ai'
 
@@ -42,9 +42,6 @@ export function openMemory(path = ':memory:') {
   db.run(
     `CREATE TABLE IF NOT EXISTS raw (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL, task TEXT NOT NULL DEFAULT '')`,
   )
-  db.run(
-    "CREATE VIRTUAL TABLE IF NOT EXISTS raw_fts USING fts5(text, content='raw', content_rowid='id', tokenize='trigram')",
-  )
   db.run(`CREATE TABLE IF NOT EXISTS entries (id INTEGER PRIMARY KEY, scope TEXT NOT NULL, gist TEXT NOT NULL,
     summary TEXT NOT NULL, score INTEGER NOT NULL DEFAULT 0, used INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL)`)
   db.run(
@@ -81,7 +78,6 @@ export function openMemory(path = ':memory:') {
           .query('INSERT INTO raw (kind, text, task) VALUES (?, ?, ?)')
           .run(kind, text, task).lastInsertRowid,
       )
-      db.query('INSERT INTO raw_fts (rowid, text) VALUES (?, ?)').run(id, text)
       return id
     },
     get(id: number) {
@@ -91,27 +87,6 @@ export function openMemory(path = ':memory:') {
         )
         .get(id)
     },
-    // trigram は3文字未満の語を索引で引けないため、そのときは部分一致で探す
-    search(query: string, limit = 5) {
-      type Row = { id: number; kind: string; text: string }
-      const rows =
-        query.length >= 3
-          ? db
-              .query<Row, [string, number]>(
-                'SELECT r.id, r.kind, r.text FROM raw_fts f JOIN raw r ON r.id = f.rowid WHERE raw_fts MATCH ? ORDER BY r.id DESC LIMIT ?',
-              )
-              .all(phrase(query), limit)
-          : db
-              .query<Row, [string, number]>(
-                'SELECT id, kind, text FROM raw WHERE instr(text, ?) > 0 ORDER BY id DESC LIMIT ?',
-              )
-              .all(query, limit)
-      return rows.map(({ id, kind, text }) => {
-        const at = Math.max(0, text.indexOf(query) - 150)
-        return { id, kind, excerpt: text.slice(at, at + 400) }
-      })
-    },
-
     // 記憶を Gist（1行の要旨）・Summary（要約）・Raw（原文の番号）の3段で残す。Summary の根拠として、原文に
     // そのまま含まれる引用を1つ以上求め、機械で確かめる。要旨がほぼ同じ記憶があれば、新しく作らずにそこへ統合する
     remember(input: {
@@ -274,76 +249,4 @@ function stub(m: Message, refs: Map<string, number>) {
   ]
   refs.delete(m.toolCallId)
   return true
-}
-
-// モデルが提案した作業文脈の編集（CLM）。drop は原文を保存したツールの結果を参照に置き換え、note は作業メモを追加・置換、
-// unnote は削除、move は並べ替える。作業メモは最初のメッセージ（課題文）の後ろに置く。最初のメッセージを変えると接頭辞キャッシュが
-// すべて外れるため、編集はすぐには反映せず貯めておき、圧縮でどのみちキャッシュが外れるときにまとめて反映する（TokenPilot）
-export type Edit =
-  | { op: 'drop'; call: string }
-  | { op: 'note'; key: string; text: string }
-  | { op: 'unnote'; key: string }
-  | { op: 'move'; key: string; to: number }
-
-// 編集を確かめる。課題文（最初のメッセージ）は消せず、ツールの呼び出しと結果の対応は残し、原文のない結果は消せない
-export function checkEdits(
-  edits: unknown,
-  messages: Message[],
-  refs: Map<string, number>,
-  notes: Map<string, string>,
-): Edit[] {
-  if (!Array.isArray(edits)) throw new Error('edits は配列です')
-  return edits.map((e: Partial<Edit> & Record<string, unknown>) => {
-    if (e.op === 'drop') {
-      if (typeof e.call !== 'string')
-        throw new Error('drop には call が要ります')
-      const target = messages.find(
-        (m) => m.role === 'toolResult' && m.toolCallId === e.call,
-      )
-      if (!target) throw new Error(`ツールの結果 ${e.call} はありません`)
-      if (!refs.has(e.call)) {
-        throw new Error(
-          `ツールの結果 ${e.call} は原文がないか、すでに参照です。消すと戻せません`,
-        )
-      }
-      return { op: 'drop', call: e.call }
-    }
-    if (typeof e.key !== 'string' || !e.key) {
-      throw new Error('作業メモの編集には key が要ります')
-    }
-    if (e.op === 'note') {
-      if (typeof e.text !== 'string')
-        throw new Error('note には text が要ります')
-      return { op: 'note', key: e.key, text: e.text }
-    }
-    if (!notes.has(e.key)) throw new Error(`作業メモ ${e.key} はありません`)
-    if (e.op === 'unnote') return { op: 'unnote', key: e.key }
-    if (e.op === 'move' && typeof e.to === 'number') {
-      return { op: 'move', key: e.key, to: e.to }
-    }
-    throw new Error(`未知の編集です: ${String(e.op)}`)
-  })
-}
-
-export function applyEdits(
-  edits: Edit[],
-  messages: Message[],
-  refs: Map<string, number>,
-  notes: Map<string, string>,
-) {
-  for (const e of edits) {
-    if (e.op === 'drop') {
-      const m = messages.find(
-        (m) => m.role === 'toolResult' && m.toolCallId === e.call,
-      )
-      if (m) stub(m, refs)
-    } else if (e.op === 'note') notes.set(e.key, e.text)
-    else if (e.op === 'unnote') notes.delete(e.key)
-    else {
-      const list = [...notes].filter(([k]) => k !== e.key)
-      list.splice(Math.max(0, e.to), 0, [e.key, notes.get(e.key) ?? ''])
-      notes.clear()
-      for (const [k, v] of list) notes.set(k, v)
-    }
-  }
 }

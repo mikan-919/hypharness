@@ -19,19 +19,18 @@ flowchart TD
         direction TB
         START["前の課題の成否で記憶を評価<br/>agent/solve.ts（/state/last.json・outcome.json）<br/>memory.judge"]
         SELECT["文脈選択: 記憶を全文検索し、参照関係と評価で並べて上位5件<br/>memory.entries"]
-        HEAD["最初のメッセージ = 課題文 + 記憶 + 作業メモ<br/>solve.ts head"]
+        HEAD["最初のメッセージ = 課題文 + 記憶<br/>solve.ts loop"]
         API["モデル中継（/model.sock）<br/>node/model.ts serveModel<br/>予算・prompt_cache_key・再試行"]
         DECIDE{"次の行動<br/>solve.ts act"}
         SH["sh: /work でコマンド実行<br/>出力の全文は原文に、文脈には番号と先頭4,000字"]
-        RECALL["recall・expand: 原文と記憶を検索・復元"]
-        EDIT["edit_context: drop・note・unnote・move を提案<br/>checkEdits で検証して貯める"]
+        RECALL["expand: 参照に置き換えた原文を復元"]
         DELEGATE["delegate: 子のエージェント（新しい文脈・20回まで）<br/>要約だけを親に返す"]
         COMPACT{"入力が16,000トークンを超えたか"}
-        APPLY["貯めた編集と作業メモをまとめて反映し、<br/>直近6件より古い出力を原文の参照に置き換える<br/>applyEdits・compact"]
+        APPLY["直近6件より古い出力をまとめて<br/>原文の参照に置き換える<br/>compact"]
         DONE["finish"]
         REFLECT["振り返り: remember（3回まで）<br/>引用が原文に含まれるかを確かめ、似た要旨は統合"]
         subgraph MEM["/state/memory.sqlite（課題をまたいで残る。計測では試行ごとに空）"]
-            RAW[("raw: 原文（追記のみ）<br/>FTS5 trigram")]
+            RAW[("raw: 原文（追記のみ）")]
             ENTRIES[("entries: 記憶（self・shared）<br/>Gist・Summary・評価")]
             SOURCES[("sources: 記憶の根拠の原文")]
             LINKS[("links: 参照関係<br/>task・cause・depend")]
@@ -40,13 +39,11 @@ flowchart TD
         START --> SELECT --> HEAD --> API --> DECIDE
         DECIDE -->|"ツール"| SH
         DECIDE --> RECALL
-        DECIDE --> EDIT
         DECIDE --> DELEGATE
         DECIDE -->|"完了"| DONE
         SH --> RAW
         DELEGATE --> RAW
         RECALL --> RAW
-        RECALL --> ENTRIES
         SH --> COMPACT
         COMPACT -->|"はい"| APPLY --> API
         COMPACT -->|"いいえ"| API
@@ -169,17 +166,17 @@ flowchart TD
 
 ## 目標の図との違い
 
-| 目標の図の要素                                                                 | 実装                                                                                                                                                                                 |
-| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| A. 永続記憶（LCM 原文・DeLM 共有記憶と自己記憶・索引・参照グラフ・管轄の統合） | `agent/memory.ts`。原文・記憶・根拠・参照関係を `/state/memory.sqlite` に置く。管轄の分割・統合は、要旨の3文字組の一致率 0.6 以上で統合することだけで行う                            |
-| B. 文脈選択（VISTA・RECAP 代替）                                               | 全文検索の順位・参照のつながり・評価で並べる。埋め込みによる意味検索はない（隔離環境から埋め込みの API を呼ぶ経路がない）                                                            |
-| C. 作業文脈（CLM・TokenPilot）                                                 | 編集はモデルが提案し、検証して貯め、圧縮のときにまとめて反映する。作業メモは最初のメッセージに置く                                                                                   |
-| D. 推論・実行（子エージェント）                                                | `delegate` は親だけが使え、子は1段まで                                                                                                                                               |
-| E. オンライン RSI                                                              | 2つある。実行中は、課題の成否で記憶の評価を上下させ、3回失敗に関わった記憶を外す（`memory.judge`）。期ごとには、`node/ideas.ts` の経済のループが方針を検証用課題で測って採否を決める |
-| DeLM（目的分解・担当選択）                                                     | `delegate` による部分目的の切り出しだけ。複数の担当エージェントを選ぶ仕組みはない                                                                                                    |
-| ② A〜C                                                                         | 図のとおり。SpecForge は改善対象 `spec` と `agent/SPEC.md`、RRSI の批評は `filter`                                                                                                   |
-| ② META                                                                         | 自動では採用しない。改善役が `META.patch` を書くと提案として残り、画面か `approve` で承認すると PR になる                                                                            |
-| ② D 配備・復旧                                                                 | 図のとおり（`node/deploy.ts`）                                                                                                                                                       |
-| ③ Scheduler                                                                    | 中継の待ち行列が、接続中で実行権を持たないノードに先頭から割り当てる。1ノードに1つまで。計測の試行は `HYPH_TRIALS=relay` のときだけ中継に置く                                        |
-| ③ CAS・確定チェックポイント                                                    | R2 に内容のハッシュで置く。Git は候補のコミット（`refs/hypharness/`）に使う                                                                                                          |
-| ③ Agent State                                                                  | ノードの `~/.hyph/state/<セッション>` に置き、チェックポイントには入れない。別のノードで再開したタスクは、そのノードの状態で続ける                                                   |
+| 目標の図の要素                                                                 | 実装                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A. 永続記憶（LCM 原文・DeLM 共有記憶と自己記憶・索引・参照グラフ・管轄の統合） | `agent/memory.ts`。原文・記憶・根拠・参照関係を `/state/memory.sqlite` に置く。管轄の分割・統合は、要旨の3文字組の一致率 0.6 以上で統合することだけで行う                                                                   |
+| B. 文脈選択（VISTA・RECAP 代替）                                               | 全文検索の順位・参照のつながり・評価で並べる。埋め込みによる意味検索はない（隔離環境から埋め込みの API を呼ぶ経路がない）                                                                                                   |
+| C. 作業文脈（CLM・TokenPilot）                                                 | 入力が16,000トークンを超えたときに、古い出力をまとめて原文の参照に置き換える。モデルが文脈の編集を提案するツール（edit_context）と原文の検索のツール（recall）も作ったが、hibana2 の約90試行で一度も使われず、外した（#85） |
+| D. 推論・実行（子エージェント）                                                | `delegate` は親だけが使え、子は1段まで                                                                                                                                                                                      |
+| E. オンライン RSI                                                              | 2つある。実行中は、課題の成否で記憶の評価を上下させ、3回失敗に関わった記憶を外す（`memory.judge`）。期ごとには、`node/ideas.ts` の経済のループが方針を検証用課題で測って採否を決める                                        |
+| DeLM（目的分解・担当選択）                                                     | `delegate` による部分目的の切り出しだけ。複数の担当エージェントを選ぶ仕組みはない                                                                                                                                           |
+| ② A〜C                                                                         | 図のとおり。SpecForge は改善対象 `spec` と `agent/SPEC.md`、RRSI の批評は `filter`                                                                                                                                          |
+| ② META                                                                         | 自動では採用しない。改善役が `META.patch` を書くと提案として残り、画面か `approve` で承認すると PR になる                                                                                                                   |
+| ② D 配備・復旧                                                                 | 図のとおり（`node/deploy.ts`）                                                                                                                                                                                              |
+| ③ Scheduler                                                                    | 中継の待ち行列が、接続中で実行権を持たないノードに先頭から割り当てる。1ノードに1つまで。計測の試行は `HYPH_TRIALS=relay` のときだけ中継に置く                                                                               |
+| ③ CAS・確定チェックポイント                                                    | R2 に内容のハッシュで置く。Git は候補のコミット（`refs/hypharness/`）に使う                                                                                                                                                 |
+| ③ Agent State                                                                  | ノードの `~/.hyph/state/<セッション>` に置き、チェックポイントには入れない。別のノードで再開したタスクは、そのノードの状態で続ける                                                                                          |

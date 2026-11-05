@@ -1,16 +1,6 @@
 import { expect, test } from 'bun:test'
 import type { Message } from '@earendil-works/pi-ai'
-import { applyEdits, checkEdits, compact, openMemory } from './memory'
-
-test('原文は日本語の3文字以上でも2文字でも検索でき、番号で本文に戻せる', () => {
-  const m = openMemory()
-  const a = m.add('sh', '字句解析の位置がずれる')
-  m.add('sh', 'cargo test: ok')
-  expect(m.search('解析の').map((h) => h.id)).toEqual([a])
-  expect(m.search('位置').map((h) => h.id)).toEqual([a])
-  expect(m.search('"ok')).toEqual([])
-  expect(m.get(a)?.text).toBe('字句解析の位置がずれる')
-})
+import { compact, openMemory } from './memory'
 
 test('記憶は原文に含まれる引用がないと残せず、ほぼ同じ要旨は統合し、参照をたどって想起する', () => {
   const m = openMemory()
@@ -94,36 +84,4 @@ test('圧縮は直近の結果を残し、古い結果だけを原文の番号�
   expect(JSON.stringify(messages[1])).toContain('新しい出力')
   // 置き換えた結果は2度置き換えない
   expect(compact(messages, refs, 1)).toBe(0)
-})
-
-test('文脈の編集は、原文のない結果を消す提案と不正な提案を断り、受け付けた編集をまとめて反映する', () => {
-  const messages = [result('a', '原文あり'), result('b', '原文なし')]
-  const refs = new Map([['a', 1]])
-  const notes = new Map<string, string>()
-  expect(() =>
-    checkEdits([{ op: 'drop', call: 'b' }], messages, refs, notes),
-  ).toThrow('戻せません')
-  expect(() =>
-    checkEdits([{ op: 'unnote', key: 'x' }], messages, refs, notes),
-  ).toThrow('ありません')
-  expect(() => checkEdits({}, messages, refs, notes)).toThrow('配列')
-  const edits = checkEdits(
-    [
-      { op: 'drop', call: 'a' },
-      { op: 'note', key: '方針', text: '先に lexer を読む' },
-      { op: 'note', key: '残り', text: 'C 版' },
-    ],
-    messages,
-    refs,
-    notes,
-  )
-  applyEdits(edits, messages, refs, notes)
-  expect(JSON.stringify(messages[0])).toContain('原文 #1')
-  applyEdits(
-    checkEdits([{ op: 'move', key: '残り', to: 0 }], messages, refs, notes),
-    messages,
-    refs,
-    notes,
-  )
-  expect([...notes.keys()]).toEqual(['残り', '方針'])
 })

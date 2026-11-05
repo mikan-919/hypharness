@@ -10,20 +10,12 @@ import type {
   ToolCall,
   ToolResultMessage,
 } from '@earendil-works/pi-ai'
-import {
-  applyEdits,
-  checkEdits,
-  compact,
-  type Edit,
-  type LinkKind,
-  openMemory,
-  type Scope,
-} from './memory'
+import { compact, type LinkKind, openMemory, type Scope } from './memory'
 
 const INSTRUCTIONS =
   'あなたは課題を解くエージェントです。作業用ディレクトリ /work で、sh ツールでコマンドを実行して課題を解いてください。ネットワークには接続できません。' +
-  '古いコマンドの出力は、文脈が長くなると原文の番号つきの参照に置き換わります。必要なら expand で戻し、recall で過去の出力と記憶を検索してください。' +
-  '不要になった出力の削除や作業メモは edit_context で提案できます。調査や修正の一部を切り出せるときは delegate で子のエージェントに任せると、文脈を短く保てます。' +
+  '古いコマンドの出力は、文脈が長くなると原文の番号つきの参照に置き換わります。必要なら expand で戻してください。' +
+  '調査や修正の一部を切り出せるときは delegate で子のエージェントに任せると、文脈を短く保てます。' +
   '解き終えたら finish を呼んでください。'
 const CHILD_INSTRUCTIONS =
   'あなたは親のエージェントから部分目的を任された子のエージェントです。/work で sh ツールを使って部分目的だけを行い、終えたら finish の summary に、分かったことと変えたファイルを親が次に使える形で書いてください。'
@@ -62,26 +54,11 @@ const shTool = {
     '/work で sh -c を実行し、終了コードと出力（標準出力と標準エラー）を返す',
   parameters: object({ command: { type: 'string' } }, ['command']),
 }
-const recallTool = {
-  name: 'recall',
-  description:
-    'これまでのコマンドと出力の原文、および過去の課題から残した記憶を文字列で検索する',
-  parameters: object({ query: { type: 'string' } }, ['query']),
-}
 const expandTool = {
   name: 'expand',
   description: '原文の番号の本文を、offset 文字目から返す',
   parameters: object({ id: { type: 'number' }, offset: { type: 'number' } }, [
     'id',
-  ]),
-}
-const editTool = {
-  name: 'edit_context',
-  description:
-    '作業文脈の編集を提案する。edits は {op:"drop",call:ツール呼び出しの id}（原文を保存した出力を参照に置き換える）、' +
-    '{op:"note",key,text}（作業メモの追加・置換）、{op:"unnote",key}、{op:"move",key,to} の配列。編集は確かめてから、文脈を圧縮するときにまとめて反映する',
-  parameters: object({ edits: { type: 'array', items: { type: 'object' } } }, [
-    'edits',
   ]),
 }
 const delegateTool = {
@@ -178,13 +155,10 @@ const showEntries = (es: ReturnType<typeof memory.entries>) =>
     )
     .join('\n---\n')
 
-// 1つの行動ループの作業文脈。notes は作業メモ、pending は反映を待つ編集
+// 1つの行動ループの作業文脈。refs はツールの呼び出しの id から、結果の原文の番号へ（圧縮で参照に置き換えられる結果だけ）
 type Work = {
   context: Context
-  goal: string
   refs: Map<string, number>
-  notes: Map<string, string>
-  pending: Edit[]
   depth: number
 }
 
@@ -199,32 +173,10 @@ async function tool(call: ToolCall, w: Work) {
       id,
     }
   }
-  if (call.name === 'recall') {
-    if (typeof a.query !== 'string') throw new Error('query は文字列です')
-    const hits = memory.search(a.query)
-    const entries = memory.entries(a.query)
-    touched.push(...entries.map((e) => e.id))
-    const text = [
-      showEntries(entries),
-      hits
-        .map((h) => `原文 #${h.id}（${h.kind}）: ${h.excerpt}`)
-        .join('\n---\n'),
-    ]
-      .filter(Boolean)
-      .join('\n===\n')
-    return { text: text || '見つかりません' }
-  }
   if (call.name === 'expand') {
     const row = memory.get(Number(a.id))
     if (!row) throw new Error(`原文 #${a.id} はありません`)
     return { text: page(row.text, Number(a.offset) || 0) }
-  }
-  if (call.name === 'edit_context') {
-    const edits = checkEdits(a.edits, w.context.messages, w.refs, w.notes)
-    w.pending.push(...edits)
-    return {
-      text: `${edits.length} 件の編集を受け付けました。次に文脈を圧縮するときに反映します`,
-    }
   }
   if (call.name === 'delegate' && w.depth === 0) {
     if (typeof a.goal !== 'string') throw new Error('goal は文字列です')
@@ -260,18 +212,6 @@ async function tool(call: ToolCall, w: Work) {
   throw new Error(`未知のツールです: ${call.name}`)
 }
 
-// 最初のメッセージ（目的・関連する記憶・作業メモ）を組み立てる
-function head(w: Work, recalled: string) {
-  const notes = [...w.notes].map(([k, v]) => `- ${k}: ${v}`).join('\n')
-  return [
-    w.goal,
-    recalled && `## 過去の課題から残した記憶\n${recalled}`,
-    notes && `## 作業メモ\n${notes}`,
-  ]
-    .filter(Boolean)
-    .join('\n\n')
-}
-
 // 目的を解く行動ループ。depth 0 が課題を受け取ったエージェント、1 が delegate の子。
 // depth 0 では、作業の後に振り返りで記憶を残させる。終えたときの要約を返す
 async function loop(target: string, depth: number): Promise<string> {
@@ -282,38 +222,23 @@ async function loop(target: string, depth: number): Promise<string> {
   const w: Work = {
     context: {
       systemPrompt: depth === 0 ? INSTRUCTIONS : CHILD_INSTRUCTIONS,
-      messages: [],
+      messages: [
+        {
+          role: 'user',
+          content: shown
+            ? `${target}\n\n## 過去の課題から残した記憶\n${shown}`
+            : target,
+          timestamp: Date.now(),
+        },
+      ],
       tools: (depth === 0
-        ? [shTool, recallTool, expandTool, editTool, delegateTool, finishTool]
-        : [
-            shTool,
-            recallTool,
-            expandTool,
-            editTool,
-            finishTool,
-          ]) as unknown as Tool[],
+        ? [shTool, expandTool, delegateTool, finishTool]
+        : [shTool, expandTool, finishTool]) as unknown as Tool[],
     },
-    goal: target,
     refs: new Map(),
-    notes: new Map(),
-    pending: [],
     depth,
   }
-  w.context.messages.push({
-    role: 'user',
-    content: head(w, shown),
-    timestamp: Date.now(),
-  })
-  const summary = await act(w, depth === 0 ? MAX_STEPS : CHILD_STEPS, () => {
-    // 圧縮のときに、貯めた編集をまとめて反映し、作業メモを最初のメッセージに入れ直す
-    applyEdits(w.pending, w.context.messages, w.refs, w.notes)
-    w.pending = []
-    w.context.messages[0] = {
-      role: 'user',
-      content: head(w, shown),
-      timestamp: Date.now(),
-    }
-  })
+  const summary = await act(w, depth === 0 ? MAX_STEPS : CHILD_STEPS)
   if (depth === 0 && STATE) {
     // 振り返り（通常の記憶更新）。同じ文脈のまま、記憶を残すツールだけを渡す
     w.context.messages.push({
@@ -322,13 +247,13 @@ async function loop(target: string, depth: number): Promise<string> {
       timestamp: Date.now(),
     })
     w.context.tools = [rememberTool, finishTool] as unknown as Tool[]
-    await act(w, REFLECT_STEPS, () => {})
+    await act(w, REFLECT_STEPS)
   }
   return summary
 }
 
 // モデルを呼び、ツールを実行するのを、finish かツールを呼ばない応答まで繰り返す
-async function act(w: Work, limit: number, onCompact: () => void) {
+async function act(w: Work, limit: number) {
   const messages: Message[] = w.context.messages
   for (let own = 0; own < limit; own++) {
     if (steps >= MAX_STEPS) break
@@ -388,10 +313,7 @@ async function act(w: Work, limit: number, onCompact: () => void) {
     }
     if (finish) return String(finish.arguments.summary ?? said)
     const used = reply.usage.input + reply.usage.cacheRead + reply.usage.output
-    if (used > CONTEXT_BUDGET) {
-      onCompact()
-      compact(messages, w.refs, KEEP_RESULTS)
-    }
+    if (used > CONTEXT_BUDGET) compact(messages, w.refs, KEEP_RESULTS)
   }
   console.error(`モデルの呼び出しが上限に達しました（${steps} 回）`)
   return '（呼び出しの上限に達したため、途中で止めました）'
