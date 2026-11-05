@@ -13,6 +13,7 @@
 //   bun run measure <セッション> ideas-check [回数]
 //   bun run measure <セッション> harden [val|test] [生成する数]
 //   bun run measure <セッション> flag <課題の番号>
+//   bun run measure <セッション> state-check <コミット> [回数]
 //   bun run measure <セッション> proposals
 //   bun run measure <セッション> approve|reject <提案の番号>
 import { Database } from 'bun:sqlite'
@@ -387,6 +388,21 @@ export async function attempt(
   }
 }
 
+// 状態のディレクトリの複製を作って f に渡し、終わったら消す。dir がなければ f に何も渡さない（試行ごとに空の状態）
+async function withState<T>(
+  dir: string | undefined,
+  f: (copy?: string) => Promise<T>,
+) {
+  if (!dir) return f()
+  const copy = await mkdtemp(join(tmpdir(), 'hyph-state-'))
+  try {
+    await Bun.$`cp -a ${dir}/. ${copy}`.quiet()
+    return await f(copy)
+  } finally {
+    await rm(copy, { recursive: true, force: true })
+  }
+}
+
 // 1回の計測。課題ごとに予算を分け、課題の順番や並列の具合で予算の切れ方が変わらないようにする
 // 記憶（方針の文章）を課題文の前に置く。記憶がなければ課題文だけ
 export const withMemory = (memory: string, statement: string) =>
@@ -400,14 +416,27 @@ export async function measure(
   split: Split,
   complete: Complete,
   memory = '',
+  // 課題をまたいで持ち越したエージェントの状態のディレクトリ。各課題はその複製から始め、課題の間では持ち越さない。
+  // 記憶ありの計測と同じく、オフライン RSI の比較には混ぜない（measurements の memory に印を残す）
+  state?: { dir: string; label: string },
 ) {
+  if (state && REMOTE) {
+    throw new Error(
+      '状態を持ち越す計測は、中継に配る計測（HYPH_TRIALS=relay）では行えません',
+    )
+  }
   const tasks = m.tasks(split)
   if (!tasks.length) throw new Error(`${split} の課題がありません`)
   const base = m.meta(`budget:${split}`)
   const limit =
     base === null ? null : (Number(base) / tasks.length) * BUDGET_MARGIN
   const agent = await checkout(commit)
-  const id = m.startMeasurement(commit, split, limit, memory)
+  const id = m.startMeasurement(
+    commit,
+    split,
+    limit,
+    state ? `（状態 ${state.label}）${memory}` : memory,
+  )
   await mkdir(join(DIR, 'logs'), { recursive: true })
   // 1課題の試行は数分かかるため、計測と課題の始まりも出して、どこまで進んだかをわかるようにする。
   // 計測を並べると出力がまざるため、行の頭に計測の番号を付ける
@@ -428,13 +457,16 @@ export async function measure(
           calls = r.calls
           return r
         })()
-      : await attempt(
-          solve,
-          agent,
-          complete,
-          budget,
-          (call) => calls.push(call),
-          join(DIR, 'logs', `measure-${id}-${task.id}.log`),
+      : await withState(state?.dir, (dir) =>
+          attempt(
+            solve,
+            agent,
+            complete,
+            budget,
+            (call) => calls.push(call),
+            join(DIR, 'logs', `measure-${id}-${task.id}.log`),
+            { state: dir },
+          ),
         )
     const run = m.addRun(id, task.id, ok, budget.spent, code, patch)
     for (const c of calls)
@@ -457,6 +489,86 @@ export async function measure(
 // HYPH_TRIALS=relay のとき、計測の試行を ~/.hyph/node.json の中継に置き、接続中のノードに解かせる（図の実験配置）。
 // 既定は手元で解く。中継とペアリング済みのノードが要るため、既定にはしない
 const REMOTE = process.env.HYPH_TRIALS === 'relay'
+
+// 記憶の持ち越しの効果を測る。成績用課題を順に解かせて状態（記憶と各課題の成否）を貯め、その状態から検証用課題を測り、
+// 状態なしの検証用の計測と比べる。成績用で学んだ記憶を、別の課題である検証用で使えるかを見る。
+// 検証用で学ぶと、同じ課題の答えを覚えて測ることになるため、学ぶのは成績用だけにする
+export async function stateCheck(
+  m: Measure,
+  commit: string,
+  complete: Complete,
+  times: number,
+) {
+  const agent = await checkout(commit)
+  const base = m.meta('budget:test')
+  const limit =
+    base === null
+      ? null
+      : (Number(base) / m.tasks('test').length) * BUDGET_MARGIN
+  const learn = async (k: number) => {
+    const dir = await mkdtemp(join(tmpdir(), 'hyph-learn-'))
+    for (const task of m.tasks('test')) {
+      const budget: Budget = { limit, spent: 0 }
+      const { ok } = await slot(() =>
+        attempt(
+          task,
+          agent,
+          complete,
+          budget,
+          () => {},
+          join(
+            DIR,
+            'logs',
+            `state-check-${commit.slice(0, 7)}-${k}-${task.id}.log`,
+          ),
+          { state: dir },
+        ),
+      )
+      // ノードと同じく、判定の成否を状態に置く。エージェントは次の課題の初めに記憶の評価へ反映する
+      await Bun.write(
+        join(dir, 'outcome.json'),
+        JSON.stringify({ ok, cost: budget.spent, limit }),
+      )
+      console.log(`学習 ${k}: 成績用 課題 ${task.id} ${ok ? '成功' : '失敗'}`)
+    }
+    return dir
+  }
+  const rates = await Promise.all(
+    Array.from({ length: times }, async (_, k) => {
+      const dir = await learn(k + 1)
+      try {
+        const r = await measure(m, commit, 'val', complete, '', {
+          dir,
+          label: '成績用課題で学習',
+        })
+        return r.ok / r.total
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
+    }),
+  )
+  const without = m.db
+    .query<{ r: number }, [string, string]>(
+      "SELECT CAST(ok AS REAL) / total AS r FROM measurements WHERE commit_id = ? AND split = 'val' AND conditions = ? AND memory = '' AND total IS NOT NULL",
+    )
+    .all(commit, m.conditions('val'))
+    .map((x) => x.r)
+  console.log(
+    `状態あり: 検証用の成功率 平均 ${summary(rates).mean.toFixed(3)}（${rates.length} 回）`,
+  )
+  if (!without.length) {
+    console.log(
+      '状態なしの検証用の計測がないため、比べられません。run で測ってください',
+    )
+    return
+  }
+  const { compare } = await import('./evolve')
+  const c = compare(without, rates, m.tasks('val').length)
+  console.log(
+    `状態なし: 平均 ${summary(without).mean.toFixed(3)}（${without.length} 回）、差 ${c.delta.toFixed(3)}（基準 ${c.margin.toFixed(3)}）`,
+  )
+  return { rates, without, ...c }
+}
 
 export const summary = (rates: number[]) => {
   const mean = rates.reduce((a, b) => a + b, 0) / rates.length
@@ -757,6 +869,13 @@ if (import.meta.main) {
     if (exhausted()) process.exit(0)
     const adopted = await promote(m, solver, Number(top), Number(repeats))
     if (adopted) ledger.improved('self', adopted.delta, adopted.commit)
+  } else if (command === 'state-check') {
+    const [rev = '', times = '3'] = args
+    if (!rev) throw new Error('コミットを指定してください')
+    if (!/^[1-9]\d*$/.test(times)) throw new Error('回数は正の整数です')
+    const commit = (await Bun.$`git -C ${REPO} rev-parse ${rev}`.text()).trim()
+    const { solver } = await models(charge)
+    await stateCheck(m, commit, solver, Number(times))
   } else if (command === 'proposals') {
     const { openProposals } = await import('./evolve')
     const pending = openProposals(m).pending()
