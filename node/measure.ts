@@ -695,16 +695,26 @@ if (import.meta.main) {
     if (policy !== 'simple' && policy !== 'explore') {
       throw new Error('方式は simple か explore です')
     }
-    const { evolve } = await import('./evolve')
+    const { evolve, rate } = await import('./evolve')
     const commit = (
       await Bun.$`git -C ${REPO} rev-parse ${start}`.text()
     ).trim()
     const { solver, generator } = await models(charge)
-    for (let i = 1; i <= Number(times); i++) {
-      if (exhausted()) break
+    const round = async (i: number) => {
+      if (exhausted()) return
       console.log(`周回 ${i}/${times}（${policy}）`)
       await evolve(m, commit, solver, generator, policy)
     }
+    // 周回は互いに独立なので並べて回す。基準版をまだ測っていなければ、最初の周回だけ先に回して基準版と予算の基準を決める
+    // ponytail: 並べた周回は同じ系統の記録から親と改善対象を選ぶため、UCB1 の選択が重なりうる。重なりが探索を偏らせたら、周回ごとに選んでから並べる
+    const base = m.meta('base')
+    let first = 1
+    if (!base || rate(m, base, 'val') === null) await round(first++)
+    await Promise.all(
+      Array.from({ length: Number(times) - first + 1 }, (_, k) =>
+        round(first + k),
+      ),
+    )
   } else if (command === 'ideas' || command === 'ideas-check') {
     const [n = command === 'ideas' ? '1' : '3'] = args
     if (!/^[1-9]\d*$/.test(n)) throw new Error('回数は正の整数です')
