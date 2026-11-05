@@ -9,6 +9,7 @@ import {
   filter,
   gate,
   openProposals,
+  paired,
   rate,
   ucb,
 } from './evolve'
@@ -224,4 +225,25 @@ test('固定部の変更の提案は承認を待つ状態で残り、棄却す�
   p.set(id, 'rejected')
   expect(p.pending()).toEqual([])
   expect(p.get(id)?.status).toBe('rejected')
+})
+
+test('課題ごとに対にした検定は、毎回同じ課題で差が出れば、少ない課題数でも偶然でないとみなす', () => {
+  const of = (oks: number[]) =>
+    new Map(oks.map((ok, i) => [i, { ok, n: 5 }] as const))
+  // 7課題で、解けなかった1課題を5回とも解く（差 1/7）。試行を独立とみなす compare では基準 0.2 を超えない
+  const one = paired(of([5, 5, 5, 0, 0, 0, 0]), of([5, 5, 5, 5, 0, 0, 0]))
+  expect(one.delta).toBeCloseTo(1 / 7)
+  expect(one.delta).toBeGreaterThan(one.margin)
+  expect(
+    compare(
+      [3 / 7, 3 / 7, 3 / 7, 3 / 7, 3 / 7],
+      [4 / 7, 4 / 7, 4 / 7, 4 / 7, 4 / 7],
+      7,
+    ).margin,
+  ).toBeGreaterThan(1 / 7)
+  // 5回のうち2回だけ解いた差は偶然とみなす
+  const some = paired(of([5, 5, 5, 0, 0, 0, 0]), of([5, 5, 5, 2, 0, 0, 0]))
+  expect(some.delta).toBeLessThan(some.margin)
+  // 共通の課題がなければ比べない
+  expect(paired(of([5]), new Map()).margin).toBe(Number.POSITIVE_INFINITY)
 })

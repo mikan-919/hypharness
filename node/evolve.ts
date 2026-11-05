@@ -137,6 +137,58 @@ const rates = (m: Measure, commit: string, split: Split) =>
     .all(commit, split, m.conditions(split))
     .map((x) => x.r)
 
+// 課題ごとの成功数と試行数。今と同じ条件で、memory の印が同じ計測のうち、古い順に skip 件を除いたものを数える
+export type Counts = Map<number, { ok: number; n: number }>
+export function counts(
+  m: Measure,
+  commit: string,
+  split: Split,
+  memory = '',
+  skip = 0,
+): Counts {
+  const ids = m.db
+    .query<{ id: number }, [string, string, string, string]>(
+      'SELECT id FROM measurements WHERE commit_id = ? AND split = ? AND conditions = ? AND memory = ? AND total IS NOT NULL ORDER BY id',
+    )
+    .all(commit, split, m.conditions(split), memory)
+    .slice(skip)
+    .map((x) => x.id)
+  const result: Counts = new Map()
+  if (!ids.length) return result
+  for (const row of m.db
+    .query<{ task: number; ok: number; n: number }, number[]>(
+      `SELECT task_id AS task, SUM(ok) AS ok, COUNT(*) AS n FROM runs WHERE measurement_id IN (${ids.map(() => '?').join(',')}) GROUP BY task_id`,
+    )
+    .all(...ids)) {
+    result.set(row.task, { ok: row.ok, n: row.n })
+  }
+  return result
+}
+
+// 課題ごとに対にした成功率の差の検定。課題ごとに候補と基準版の成功率の差を取り、その平均を delta にする。
+// ばらつきは課題ごとの繰り返しのぶれだけから求める。課題ごとの成否はほぼ決まっていることが多く、
+// 試行を課題によらず同じ確率の当たり外れとみなす compare より、同じ回数で小さな差を見分けられる。
+// 5回すべて成功（失敗）した課題でもばらつきを0にしないよう、ばらつきに使う成功率は (成功+0.5)/(試行+1) で見積もる。
+// ponytail: (成功+1)/(試行+2) にすると、7課題×5回で毎回同じ1課題の差（1/7）も偶然とみなすほど控えめになる。見積もりの妥当さは、基準版どうしを比べて誤って採用する割合で確かめる
+export function paired(base: Counts, candidate: Counts) {
+  const tasks = [...base.keys()].filter((t) => candidate.has(t))
+  if (!tasks.length) return { delta: 0, margin: Number.POSITIVE_INFINITY }
+  let delta = 0
+  let variance = 0
+  for (const t of tasks) {
+    const b = base.get(t) as { ok: number; n: number }
+    const c = candidate.get(t) as { ok: number; n: number }
+    delta += c.ok / c.n - b.ok / b.n
+    const pb = (b.ok + 0.5) / (b.n + 1)
+    const pc = (c.ok + 0.5) / (c.n + 1)
+    variance += (pb * (1 - pb)) / b.n + (pc * (1 - pc)) / c.n
+  }
+  return {
+    delta: delta / tasks.length,
+    margin: (2 * Math.sqrt(variance)) / tasks.length,
+  }
+}
+
 // 2つの成功率の差の検定。各計測を課題数 tasks 回の試行とみなし、二項分布のばらつきから差のばらつきを求める。
 // 返す margin は差のばらつきの2倍で、delta がこれを超えれば偶然ではないとみなす
 export function compare(base: number[], candidate: number[], tasks: number) {
@@ -599,24 +651,28 @@ export async function promote(
     return [...known, ...(await again(commit, split, rest))]
   }
   // 候補の成績用は、検証用で基準版を上回ったときだけ測る
-  const [baseVal, baseTest, ...vals] = await Promise.all([
+  await Promise.all([
     pad(base, 'val'),
     pad(base, 'test'),
     ...candidates.map(({ c }) => pad(c.commit_id, 'val', 1)),
   ])
   const passed = await Promise.all(
-    candidates.map(async ({ c }, i) => {
+    candidates.map(async ({ c }) => {
       const id = c.commit_id.slice(0, 7)
-      const val = compare(baseVal, vals[i], m.tasks('val').length)
+      // 進化の周回で選ぶのに使った最初の1回は除く
+      const val = paired(
+        counts(m, base, 'val'),
+        counts(m, c.commit_id, 'val', '', 1),
+      )
       const line = `検証用 差 ${val.delta.toFixed(3)}（基準 ${val.margin.toFixed(3)}）`
       if (val.delta <= val.margin) {
         console.log(`${id}: 見送り、${line}`)
         return null
       }
-      const test = compare(
-        baseTest,
-        await pad(c.commit_id, 'test'),
-        m.tasks('test').length,
+      await pad(c.commit_id, 'test')
+      const test = paired(
+        counts(m, base, 'test'),
+        counts(m, c.commit_id, 'test'),
       )
       if (-test.delta > test.margin) {
         console.log(

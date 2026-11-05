@@ -562,8 +562,11 @@ export async function stateCheck(
     )
     return
   }
-  const { compare } = await import('./evolve')
-  const c = compare(without, rates, m.tasks('val').length)
+  const { counts, paired } = await import('./evolve')
+  const c = paired(
+    counts(m, commit, 'val'),
+    counts(m, commit, 'val', '（状態 成績用課題で学習）'),
+  )
   console.log(
     `状態なし: 平均 ${summary(without).mean.toFixed(3)}（${without.length} 回）、差 ${c.delta.toFixed(3)}（基準 ${c.margin.toFixed(3)}）`,
   )
