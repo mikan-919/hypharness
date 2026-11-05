@@ -666,7 +666,9 @@ if (import.meta.main) {
     // 基準を決める最初の1回を先に測る（並べると、どの計測も上限なしで動き、基準が最後に終わった計測で決まる）
     const one = async (split: Split) => {
       const r = await measure(m, commit, split, complete)
-      console.log(`${split}: 成功 ${r.ok}/${r.total}、費用 $${r.cost.toFixed(4)}`)
+      console.log(
+        `${split}: 成功 ${r.ok}/${r.total}、費用 $${r.cost.toFixed(4)}`,
+      )
       return r.ok / r.total
     }
     await Promise.all(
@@ -678,7 +680,9 @@ if (import.meta.main) {
           rest--
         }
         rates.push(
-          ...(await Promise.all(Array.from({ length: rest }, () => one(split)))),
+          ...(await Promise.all(
+            Array.from({ length: rest }, () => one(split)),
+          )),
         )
         const { mean, std } = summary(rates)
         console.log(
