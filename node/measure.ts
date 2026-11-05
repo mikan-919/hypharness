@@ -3,7 +3,7 @@
 // 使い方:
 //   bun run measure <セッション> generate <最終目的のファイル> [検証用の数] [成績用の数]
 //   bun run measure <セッション> review [件数]
-//   bun run measure <セッション> run <コミット> [回数] [val|test]
+//   bun run measure <セッション> run <コミット> [回数] [val|test|both]
 //   bun run measure <セッション> evolve [周回数] [最初の基準版のコミット] [simple|explore]
 //   bun run measure <セッション> promote [候補の数] [測り直す回数]
 //   bun run measure <セッション> deploy <コミット>
@@ -653,26 +653,38 @@ if (import.meta.main) {
     )
     console.log(`抽出確認で関係なしとされた割合: ${r.flagged ?? '未確認'}`)
   } else if (command === 'run') {
-    const [rev, times = '1', split = 'val'] = args
+    const [rev, times = '1', which = 'val'] = args
     if (!rev) throw new Error('コミットを指定してください')
-    if (split !== 'val' && split !== 'test') {
-      throw new Error('分割は val か test です')
+    if (which !== 'val' && which !== 'test' && which !== 'both') {
+      throw new Error('分割は val・test・both のどれかです')
     }
+    if (!/^[1-9]\d*$/.test(times)) throw new Error('回数は正の整数です')
     const commit = (await Bun.$`git -C ${REPO} rev-parse ${rev}`.text()).trim()
     const { solver: complete } = await models(charge)
-    const rates: number[] = []
-    for (let i = 1; i <= Number(times); i++) {
-      console.log(`${commit.slice(0, 7)} の計測 ${i}/${times}`)
+    const splits: Split[] = which === 'both' ? ['val', 'test'] : [which]
+    // 計測はすべて並べ、同時に動く試行の数は slot の上限に任せる。予算の基準がまだない分割は、
+    // 基準を決める最初の1回を先に測る（並べると、どの計測も上限なしで動き、基準が最後に終わった計測で決まる）
+    const one = async (split: Split) => {
       const r = await measure(m, commit, split, complete)
-      rates.push(r.ok / r.total)
-      console.log(`成功 ${r.ok}/${r.total}、費用 $${r.cost.toFixed(4)}`)
+      console.log(`${split}: 成功 ${r.ok}/${r.total}、費用 $${r.cost.toFixed(4)}`)
+      return r.ok / r.total
     }
-    const { mean, std } = summary(rates)
-    console.log(
-      `成功率 平均 ${mean.toFixed(3)}、標準偏差 ${std.toFixed(3)}（${rates.length} 回）`,
-    )
-    console.log(
-      `予算の基準（${split} 1回分）: $${Number(m.meta(`budget:${split}`)).toFixed(4)}`,
+    await Promise.all(
+      splits.map(async (split) => {
+        const rates: number[] = []
+        let rest = Number(times)
+        if (m.meta(`budget:${split}`) === null) {
+          rates.push(await one(split))
+          rest--
+        }
+        rates.push(
+          ...(await Promise.all(Array.from({ length: rest }, () => one(split)))),
+        )
+        const { mean, std } = summary(rates)
+        console.log(
+          `${split}: 成功率 平均 ${mean.toFixed(3)}、標準偏差 ${std.toFixed(3)}（${rates.length} 回）、予算の基準（1回分） $${Number(m.meta(`budget:${split}`)).toFixed(4)}`,
+        )
+      }),
     )
   } else if (command === 'evolve') {
     const [times = '1', start = 'HEAD', policy = 'simple'] = args

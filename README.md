@@ -31,7 +31,7 @@ bun run node <セッション>  # ノードを起動する。別の URL に接�
 ```sh
 bun run measure <セッション> generate <最終目的のファイル> [検証用の数] [成績用の数]  # 課題を生成して選別する
 bun run measure <セッション> review [件数]                                           # 課題を無作為に選んで表示する
-bun run measure <セッション> run <コミット> [回数] [val|test]                         # 候補の成功率と費用を測る
+bun run measure <セッション> run <コミット> [回数] [val|test|both]                      # 候補の成功率と費用を測る
 bun run measure <セッション> evolve [周回数] [最初の基準版のコミット] [simple|explore]  # オフライン RSI を回す
 bun run measure <セッション> promote [候補の数] [測り直す回数]  # 配る版（基準版）を決め、試験版にする
 bun run measure <セッション> deploy <コミット>  # 指定したコミットを試験版にする
