@@ -49,6 +49,7 @@ export default function Home({ user, status }: PageProps<'Home'>) {
         <Pairing />
       </section>
       <Ledger rows={status.ledger} />
+      <Evolution sessions={status.evolution} />
       <section className='flex flex-col gap-2 text-sm'>
         <h2 className='text-lg font-bold'>タスク</h2>
         <NewTask />
@@ -72,7 +73,9 @@ export default function Home({ user, status }: PageProps<'Home'>) {
                     <History id={t.id} />
                   </td>
                   <td className='break-all whitespace-pre-wrap'>
-                    {t.statement}
+                    {t.kind === 'trial'
+                      ? '（計測の試行。中身は暗号化してノードだけが読む）'
+                      : t.statement}
                     {t.check_command && (
                       <span className='block font-mono text-muted-foreground'>
                         判定: {t.check_command}
@@ -255,6 +258,102 @@ function Ledger({ rows }: { rows: PageProps<'Home'>['status']['ledger'] }) {
         </div>
       ) : (
         <p>ノードからの内訳はまだありません。</p>
+      )}
+    </section>
+  )
+}
+
+const STATUS_NAMES: Record<string, string> = {
+  base: '最初の基準版',
+  adopted: '採用',
+  measured: '計測済み',
+  rejected: '不採用',
+  pending: '承認待ち',
+  requested: '承認済み（ノードの処理待ち）',
+  approved: 'PR 作成済み',
+}
+
+// オフライン RSI の系統と、固定部の変更の提案。提案は承認すると、そのセッションのノードが hypharness に PR を作る
+function Evolution({
+  sessions,
+}: {
+  sessions: PageProps<'Home'>['status']['evolution']
+}) {
+  const [error, setError] = useState('')
+  const approve = async (session: string, id: number) => {
+    setError('')
+    try {
+      await post('/proposals/approve', { session, id })
+      router.reload({ only: ['status'] })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+  return (
+    <section className='flex flex-col gap-2 text-sm'>
+      <h2 className='text-lg font-bold'>進化</h2>
+      {error && <p className='text-destructive'>{error}</p>}
+      {sessions.length ? (
+        sessions.map((e) => (
+          <div key={e.session} className='flex flex-col gap-2'>
+            <h3 className='font-bold'>
+              {e.session}（{new Date(e.at).toLocaleTimeString('ja-JP')} 時点）
+            </h3>
+            <div className='overflow-x-auto'>
+              <table className='w-full text-left'>
+                <thead>
+                  <tr>
+                    <th>候補</th>
+                    <th>親</th>
+                    <th>状態</th>
+                    <th>検証用の成功率</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {e.lineage.map((c) => (
+                    <tr key={c.commit} className='font-mono'>
+                      <td>{c.commit.slice(0, 7)}</td>
+                      <td>{c.parent?.slice(0, 7) ?? ''}</td>
+                      <td className='font-sans'>
+                        {STATUS_NAMES[c.status] ?? c.status}
+                      </td>
+                      <td>{c.val === null ? '' : c.val.toFixed(3)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {e.proposals.length > 0 && (
+              <ul className='flex flex-col gap-1'>
+                {e.proposals.map((p) => (
+                  <li key={p.id} className='flex flex-wrap items-center gap-2'>
+                    <span>
+                      提案 #{p.id}（候補 {p.parent.slice(0, 7)}、{p.lines} 行）:{' '}
+                      <span className='font-mono'>{p.files.join(', ')}</span>{' '}
+                      {STATUS_NAMES[p.status]}
+                    </span>
+                    {p.status === 'pending' && (
+                      <Button
+                        variant='outline'
+                        size='sm'
+                        onClick={() => approve(e.session, p.id)}
+                      >
+                        承認して PR にする
+                      </Button>
+                    )}
+                    {p.pr && (
+                      <a className='underline' href={p.pr}>
+                        PR
+                      </a>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ))
+      ) : (
+        <p>ノードからの系統はまだありません。</p>
       )}
     </section>
   )

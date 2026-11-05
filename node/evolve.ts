@@ -27,12 +27,13 @@ const MAX_CHANGED_LINES = 120
 
 // simple は段階1の方式。explore は段階2bの方式で、弱点の抽出・改善対象の選択・変更量の上限を加える
 export type Policy = 'simple' | 'explore'
-// 改善対象。指示文は GEPA、1つの機能は ModularRSI、コード全体は SICA/DGM にあたる
+// 改善対象。指示文は GEPA、1つの機能は ModularRSI、仕様は SpecForge、コード全体は SICA/DGM にあたる
 export const ARMS = {
   prompt:
     '変えてよいのは、モデルに渡す文章（INSTRUCTIONS やツールの説明）だけです。コードの動きは変えないでください',
   module:
     '変えてよいのは、ツール1つか関数1つだけです。ほかの部分は変えないでください',
+  spec: '先に /work/agent/SPEC.md（各部の責務・依存の順・失敗の扱い）を、実行記録の失敗が起きないように直し、その仕様に合わせてコードを直してください。仕様に書いていない動きは足さないでください',
   code: '制御の流れを含め、/work/agent のどこを変えてもかまいません',
 } as const
 export type Arm = keyof typeof ARMS
@@ -278,6 +279,8 @@ async function improve(
   try {
     const agent = await checkout(parent)
     await Bun.$`cp -a ${agent} ${join(work, 'agent')}`.quiet()
+    // 固定部（中継・ノード・評価器）も参照用に置く。改善役が固定部の変更を提案するときに読む
+    await Bun.$`mkdir -p ${join(work, 'fixed')} && git -C ${REPO} archive ${parent} node src package.json | tar -x -C ${join(work, 'fixed')}`.quiet()
     const runs = m.db
       .query<
         { task_id: number; ok: number; cost: number; run: number },
@@ -311,7 +314,8 @@ async function improve(
 /work/runs に、検証用課題での実行記録があります。記録から失敗の原因や無駄な費用を見つけ、成功率を上げるか、成功率を保ったまま費用を下げるように /work/agent を変更してください。
 - 変更は /work/agent の中だけにしてください。それ以外は採用されません
 - /task.md・/work・/model.sock を使う動き方は変えないでください
-- 最後に、変更内容を1〜3行で /work/CHANGE.md に書いてください${focus && `\n${focus}`}`,
+- 最後に、変更内容を1〜3行で /work/CHANGE.md に書いてください
+- 失敗の原因が固定部（/work/fixed の中継・ノード・評価器・モデル中継）にあり、agent/ では直せないときは、固定部の変更を /work/fixed からの相対パスの unified diff で /work/META.patch に書いてください。固定部の変更は自動では採用されず、利用者の承認を待ちます${focus && `\n${focus}`}`,
       complete,
       budget,
       () => {},
@@ -329,6 +333,17 @@ async function improve(
       join(work, 'agent'),
       description.slice(0, 2000),
     )
+    const patch = (
+      await Bun.file(join(work, 'META.patch'))
+        .text()
+        .catch(() => '')
+    ).trim()
+    if (patch) {
+      const id = openProposals(m).add(parent, description, `${patch}\n`)
+      console.log(
+        `固定部の変更の提案 #${id} を残しました。承認は画面か approve で行います`,
+      )
+    }
     return { commit, description }
   } finally {
     await rm(work, { recursive: true, force: true })
@@ -478,12 +493,61 @@ ${await weakness(m, parent.commit_id, generator)}`
   )
   console.log(`自己編集の確認の費用: $${editBudget.spent.toFixed(4)}`)
   if (reason) return reject(reason)
+  // 批評役（RRSI）に不要な変更を指摘させ、除いた候補が門番を通れば、そちらを測る
+  const kept = await filter(
+    REPO,
+    parent.commit_id,
+    commit,
+    description,
+    generator,
+  )
+  if (kept) {
+    const again = await gate(
+      REPO,
+      parent.commit_id,
+      kept,
+      (agent) => selfEdit(agent, complete, editBudget),
+      arm ? MAX_CHANGED_LINES : undefined,
+    )
+    if (again) {
+      console.log(
+        `不要な変更を除いた候補は門番を通らないため、元の候補を測ります: ${again.split('\n')[0]}`,
+      )
+    } else {
+      lineage.set(
+        commit,
+        'rejected',
+        `不要な変更を除いた候補 ${kept.slice(0, 7)} に置き換えました`,
+      )
+      lineage.add({
+        commit_id: kept,
+        parent: parent.commit_id,
+        description,
+        status: 'measured',
+        reason: null,
+      })
+      console.log(
+        `候補: ${kept.slice(0, 7)}（${commit.slice(0, 7)} から不要な変更を除いたもの）`,
+      )
+      return measureCandidate(m, lineage, parent.commit_id, kept, arm, complete)
+    }
+  }
+  return measureCandidate(m, lineage, parent.commit_id, commit, arm, complete)
+}
 
+async function measureCandidate(
+  m: Measure,
+  lineage: ReturnType<typeof openLineage>,
+  parent: string,
+  commit: string,
+  arm: Arm | null,
+  complete: Complete,
+) {
   const childVal = (await measure(m, commit, 'val', complete)).ok
   const total = m.tasks('val').length
   // UCB1 の報酬は、候補が親を検証用で上回ったか
   if (arm) {
-    const parentVal = rate(m, parent.commit_id, 'val') ?? 0
+    const parentVal = rate(m, parent, 'val') ?? 0
     lineage.setArm(commit, arm, childVal / total > parentVal ? 1 : 0)
   }
   lineage.set(commit, 'measured', `検証用 ${childVal}/${total}`)
@@ -573,4 +637,215 @@ export async function promote(
     `採用: ${best.commit.slice(0, 7)} を基準版にし、試験版として配りました`,
   )
   return best
+}
+
+// 固定部の変更の提案（図の META）。自動では採用せず、利用者が承認したときだけ hypharness への PR にする
+type ProposalStatus = 'pending' | 'approved' | 'rejected'
+export type Proposal = {
+  id: number
+  parent: string
+  description: string
+  patch: string
+  status: ProposalStatus
+  pr: string | null
+}
+export function openProposals(m: Measure) {
+  m.db.run(`CREATE TABLE IF NOT EXISTS proposals (
+    id INTEGER PRIMARY KEY,
+    parent TEXT NOT NULL,
+    description TEXT NOT NULL,
+    patch TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    pr TEXT,
+    created_at INTEGER NOT NULL
+  )`)
+  return {
+    add: (parent: string, description: string, patch: string) =>
+      Number(
+        m.db
+          .query(
+            'INSERT INTO proposals (parent, description, patch, created_at) VALUES (?, ?, ?, ?)',
+          )
+          .run(parent, description, patch, Date.now()).lastInsertRowid,
+      ),
+    get: (id: number) =>
+      m.db
+        .query<Proposal, [number]>(
+          'SELECT id, parent, description, patch, status, pr FROM proposals WHERE id = ?',
+        )
+        .get(id),
+    all: () =>
+      m.db
+        .query<Proposal, []>(
+          'SELECT id, parent, description, patch, status, pr FROM proposals ORDER BY id',
+        )
+        .all(),
+    pending: () =>
+      m.db
+        .query<Proposal, []>(
+          "SELECT id, parent, description, patch, status, pr FROM proposals WHERE status = 'pending' ORDER BY id",
+        )
+        .all(),
+    set: (id: number, status: ProposalStatus, pr: string | null = null) =>
+      m.db.run('UPDATE proposals SET status = ?, pr = ? WHERE id = ?', [
+        status,
+        pr,
+        id,
+      ]),
+  }
+}
+
+// 承認した提案を、hypharness の既定のブランチから切ったブランチに当てて PR にする。main には直接入れない
+export async function approve(m: Measure, id: number, repo = REPO) {
+  const proposals = openProposals(m)
+  const p = proposals.get(id)
+  if (!p) throw new Error(`提案 #${id} はありません`)
+  if (p.status !== 'pending') throw new Error(`提案 #${id} は ${p.status} です`)
+  const remote = (
+    await Bun.$`git -C ${repo} remote get-url origin`.text()
+  ).trim()
+  const { repoName } = await import('./pr')
+  const name = repoName(remote)
+  const base = (
+    await Bun.$`gh repo view ${name} --json defaultBranchRef -q .defaultBranchRef.name`.text()
+  ).trim()
+  const branch = `hyph/meta-${id}`
+  const dir = await mkdtemp(join(tmpdir(), 'hyph-meta-'))
+  try {
+    await Bun.$`git clone -q ${remote} ${dir}`.quiet()
+    await Bun.$`git -C ${dir} checkout -q -b ${branch} origin/${base}`.quiet()
+    const file = join(dir, '.git', 'meta.patch')
+    await Bun.write(file, p.patch)
+    // 改善役が a/ b/ の接頭辞を付けずに書いた差分も当てられるようにする
+    const applied =
+      (await Bun.$`git -C ${dir} apply --index ${file}`.quiet().nothrow())
+        .exitCode === 0 ||
+      (await Bun.$`git -C ${dir} apply --index -p0 ${file}`.quiet().nothrow())
+        .exitCode === 0
+    if (!applied)
+      throw new Error(`提案 #${id} の差分を ${base} に当てられません`)
+    const title = `固定部の変更の提案 #${id}: ${p.description.split('\n')[0].slice(0, 60)}`
+    await Bun.$`git -C ${dir} commit -q -m ${title}`.quiet()
+    await Bun.$`git -C ${dir} push -q origin ${branch}`.quiet()
+    const url = (
+      await Bun.$`gh pr create -R ${name} --base ${base} --head ${branch} --title ${title} --body ${`${p.description}\n\n---\nオフライン RSI の改善役が、候補 ${p.parent.slice(0, 7)} の改善の途中で出した固定部の変更の提案です。利用者が承認したため PR にしました。`}`
+        .cwd(dir)
+        .text()
+    ).trim()
+    proposals.set(id, 'approved', url)
+    return url
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+// 不要な変更の除去（RRSI の批評）。候補の差分を生成役のモデル（固定部）に見せ、説明した改善に要らないファイルの変更を挙げさせる。
+// 挙げられたファイルを親の版に戻した候補をコミットして返す。除くものがなければ null
+export async function filter(
+  repo: string,
+  parent: string,
+  commit: string,
+  description: string,
+  critic: Complete,
+) {
+  const files = (
+    await Bun.$`git -C ${repo} diff --name-only ${parent} ${commit} -- agent`.text()
+  )
+    .split('\n')
+    .filter(Boolean)
+  // 1ファイルだけの変更は、除くと何も残らない
+  if (files.length < 2) return null
+  const patch =
+    await Bun.$`git -C ${repo} diff ${parent} ${commit} -- agent`.text()
+  const reply = await critic({
+    systemPrompt:
+      'あなたは AI エージェントのコードの変更を批評する役です。指示された形式だけで答えてください。',
+    messages: [
+      {
+        role: 'user',
+        content: `次の変更の説明と差分です。説明した改善に必要のない変更（無関係な整形・使われない追加・説明と関係のない機能）だけを含むファイルを、JSON の文字列の配列で答えてください。すべて必要なら [] と答えてください。
+
+## 説明
+${description}
+
+## 差分
+${patch.slice(0, 30_000)}`,
+        timestamp: Date.now(),
+      },
+    ],
+  })
+  const text = reply.content
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('')
+  const listed = (() => {
+    try {
+      const v = JSON.parse(
+        text.slice(text.indexOf('['), text.lastIndexOf(']') + 1),
+      )
+      return Array.isArray(v) ? v : []
+    } catch {
+      console.log(
+        `批評役の答えを読めないため、除去をしません: ${text.slice(0, 200)}`,
+      )
+      return []
+    }
+  })()
+  const revert = files.filter((f) => listed.includes(f))
+  if (!revert.length || revert.length === files.length) return null
+  console.log(`批評役が不要とした変更: ${revert.join(', ')}`)
+  const dir = await mkdtemp(join(tmpdir(), 'hyph-filter-'))
+  try {
+    await Bun.$`git -C ${repo} archive ${commit} agent | tar -x -C ${dir}`.quiet()
+    for (const f of revert) {
+      const old = await Bun.$`git -C ${repo} show ${parent}:${f}`
+        .quiet()
+        .nothrow()
+      if (old.exitCode === 0) await Bun.write(join(dir, f), old.stdout)
+      else await rm(join(dir, f), { force: true })
+    }
+    return await commitAgent(
+      repo,
+      parent,
+      join(dir, 'agent'),
+      `${description}\n\n（批評役が不要とした ${revert.join(', ')} の変更を除いたもの）`,
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+// 中継と画面に送る系統と提案。中継に置くのはコミット・状態・数値と、提案の変えるファイルの名前と行数だけ
+export function evolutionSummary(m: Measure) {
+  const lineage = openLineage(m)
+    .all()
+    .slice(-500)
+    .map((c) => ({
+      commit: c.commit_id,
+      parent: c.parent,
+      status: c.status,
+      val: rate(m, c.commit_id, 'val'),
+    }))
+  const proposals = openProposals(m)
+    .all()
+    .slice(-500)
+    .map((p) => {
+      const lines = p.patch.split('\n')
+      return {
+        id: p.id,
+        parent: p.parent,
+        files: [
+          ...new Set(
+            lines
+              .filter((l) => l.startsWith('+++ ') && !l.endsWith('/dev/null'))
+              .map((l) => l.slice(4).replace(/^b\//, '').slice(0, 200)),
+          ),
+        ].slice(0, 50),
+        lines: lines.filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l))
+          .length,
+        status: p.status,
+        pr: p.pr,
+      }
+    })
+  return { lineage, proposals }
 }

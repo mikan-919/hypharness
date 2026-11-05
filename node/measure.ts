@@ -3,7 +3,7 @@
 // 使い方:
 //   bun run measure <セッション> generate <最終目的のファイル> [検証用の数] [成績用の数]
 //   bun run measure <セッション> review [件数]
-//   bun run measure <セッション> run <コミット> [回数] [val|test]
+//   bun run measure <セッション> run <コミット> [回数] [val|test|both]
 //   bun run measure <セッション> evolve [周回数] [最初の基準版のコミット] [simple|explore]
 //   bun run measure <セッション> promote [候補の数] [測り直す回数]
 //   bun run measure <セッション> deploy <コミット>
@@ -13,6 +13,8 @@
 //   bun run measure <セッション> ideas-check [回数]
 //   bun run measure <セッション> harden [val|test] [生成する数]
 //   bun run measure <セッション> flag <課題の番号>
+//   bun run measure <セッション> proposals
+//   bun run measure <セッション> approve|reject <提案の番号>
 import { Database } from 'bun:sqlite'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
@@ -295,7 +297,8 @@ export async function checkout(commit: string) {
 }
 
 // 候補のエージェントを、作業用ディレクトリ work で動かす。隔離環境に見せるのは、作業用ディレクトリ・課題文・
-// 候補のコード・モデル中継のソケットだけ。終了コードを返す
+// 候補のコード・モデル中継のソケット・エージェントの状態（/state）だけ。終了コードを返す。
+// state はタスクをまたいで持ち越す状態のディレクトリ。渡さなければ空のディレクトリを使い、終わったら消す（計測では課題の間で答えが漏れないようにする）
 export async function runAgent(
   agent: string,
   work: string,
@@ -307,8 +310,11 @@ export async function runAgent(
   signal?: AbortSignal,
   // 作業領域の課題では、その開発環境の設定と、読み取り専用のディレクトリを隔離環境に渡す
   workspace?: Workspace,
+  state?: string,
 ) {
   const root = await mkdtemp(join(tmpdir(), 'hyph-agent-'))
+  const dir = state ?? join(root, 'state')
+  await mkdir(dir, { recursive: true })
   const socket = join(root, 'model.sock')
   await Bun.write(join(root, 'task.md'), statement)
   const server = serveModel(socket, complete, budget, onCall)
@@ -318,6 +324,7 @@ export async function runAgent(
         [agent, '/agent'],
         [join(root, 'task.md'), '/task.md'],
         [socket, '/model.sock', 'rw'],
+        [dir, '/state', 'rw'],
       ]),
       {
         stdout: Bun.file(log),
@@ -346,9 +353,10 @@ export async function attempt(
     signal?: AbortSignal
     restore?: Uint8Array
     onWork?: (work: string) => void
+    state?: string
   } = {},
 ) {
-  const { signal, restore, onWork } = options
+  const { signal, restore, onWork, state } = options
   const work = await mkdtemp(join(tmpdir(), 'hyph-work-'))
   try {
     await prepare(work, task)
@@ -364,6 +372,7 @@ export async function attempt(
       log,
       signal,
       task.workspace,
+      state,
     )
     // 障害で解けなかった試行は候補の失敗ではないため記録させず、計測を中断する
     if (budget.outage) {
@@ -409,15 +418,24 @@ export async function measure(
     const budget: Budget = { limit, spent: 0 }
     const started = Date.now()
     console.log(`${tag} 課題 ${task.id}: 開始`)
-    const calls: Parameters<Parameters<typeof serveModel>[3]>[0][] = []
-    const { ok, code, patch } = await attempt(
-      { ...task, statement: withMemory(memory, task.statement) },
-      agent,
-      complete,
-      budget,
-      (call) => calls.push(call),
-      join(DIR, 'logs', `measure-${id}-${task.id}.log`),
-    )
+    let calls: Parameters<Parameters<typeof serveModel>[3]>[0][] = []
+    const solve = { ...task, statement: withMemory(memory, task.statement) }
+    const { ok, code, patch } = REMOTE
+      ? await (async () => {
+          const { remoteAttempt } = await import('./trials')
+          const r = await remoteAttempt(solve, agent, commit, limit)
+          budget.spent = r.cost
+          calls = r.calls
+          return r
+        })()
+      : await attempt(
+          solve,
+          agent,
+          complete,
+          budget,
+          (call) => calls.push(call),
+          join(DIR, 'logs', `measure-${id}-${task.id}.log`),
+        )
     const run = m.addRun(id, task.id, ok, budget.spent, code, patch)
     for (const c of calls)
       m.addCall(run, c.context, c.reply, c.reply.usage.cost.total)
@@ -425,13 +443,20 @@ export async function measure(
       `${tag} 課題 ${task.id}: ${ok ? '成功' : '失敗'}（$${budget.spent.toFixed(4)}、${Math.round((Date.now() - started) / 1000)}秒、${++done}/${tasks.length}）`,
     )
   }
-  await Promise.all(tasks.map((task) => slot(() => one(task))))
+  // 中継に配るときは、同時に動く数を中継の割り当て（1ノードに1つ）が決めるため、手元の上限をかけない
+  await Promise.all(
+    tasks.map((task) => (REMOTE ? one(task) : slot(() => one(task)))),
+  )
   const result = m.finishMeasurement(id)
   // 最初の計測の費用を、その分割の予算の基準にする
   if (base === null && !memory)
     m.setMeta(`budget:${split}`, String(result.cost))
   return result
 }
+
+// HYPH_TRIALS=relay のとき、計測の試行を ~/.hyph/node.json の中継に置き、接続中のノードに解かせる（図の実験配置）。
+// 既定は手元で解く。中継とペアリング済みのノードが要るため、既定にはしない
+const REMOTE = process.env.HYPH_TRIALS === 'relay'
 
 export const summary = (rates: number[]) => {
   const mean = rates.reduce((a, b) => a + b, 0) / rates.length
@@ -628,26 +653,42 @@ if (import.meta.main) {
     )
     console.log(`抽出確認で関係なしとされた割合: ${r.flagged ?? '未確認'}`)
   } else if (command === 'run') {
-    const [rev, times = '1', split = 'val'] = args
+    const [rev, times = '1', which = 'val'] = args
     if (!rev) throw new Error('コミットを指定してください')
-    if (split !== 'val' && split !== 'test') {
-      throw new Error('分割は val か test です')
+    if (which !== 'val' && which !== 'test' && which !== 'both') {
+      throw new Error('分割は val・test・both のどれかです')
     }
+    if (!/^[1-9]\d*$/.test(times)) throw new Error('回数は正の整数です')
     const commit = (await Bun.$`git -C ${REPO} rev-parse ${rev}`.text()).trim()
     const { solver: complete } = await models(charge)
-    const rates: number[] = []
-    for (let i = 1; i <= Number(times); i++) {
-      console.log(`${commit.slice(0, 7)} の計測 ${i}/${times}`)
+    const splits: Split[] = which === 'both' ? ['val', 'test'] : [which]
+    // 計測はすべて並べ、同時に動く試行の数は slot の上限に任せる。予算の基準がまだない分割は、
+    // 基準を決める最初の1回を先に測る（並べると、どの計測も上限なしで動き、基準が最後に終わった計測で決まる）
+    const one = async (split: Split) => {
       const r = await measure(m, commit, split, complete)
-      rates.push(r.ok / r.total)
-      console.log(`成功 ${r.ok}/${r.total}、費用 $${r.cost.toFixed(4)}`)
+      console.log(
+        `${split}: 成功 ${r.ok}/${r.total}、費用 $${r.cost.toFixed(4)}`,
+      )
+      return r.ok / r.total
     }
-    const { mean, std } = summary(rates)
-    console.log(
-      `成功率 平均 ${mean.toFixed(3)}、標準偏差 ${std.toFixed(3)}（${rates.length} 回）`,
-    )
-    console.log(
-      `予算の基準（${split} 1回分）: $${Number(m.meta(`budget:${split}`)).toFixed(4)}`,
+    await Promise.all(
+      splits.map(async (split) => {
+        const rates: number[] = []
+        let rest = Number(times)
+        if (m.meta(`budget:${split}`) === null) {
+          rates.push(await one(split))
+          rest--
+        }
+        rates.push(
+          ...(await Promise.all(
+            Array.from({ length: rest }, () => one(split)),
+          )),
+        )
+        const { mean, std } = summary(rates)
+        console.log(
+          `${split}: 成功率 平均 ${mean.toFixed(3)}、標準偏差 ${std.toFixed(3)}（${rates.length} 回）、予算の基準（1回分） $${Number(m.meta(`budget:${split}`)).toFixed(4)}`,
+        )
+      }),
     )
   } else if (command === 'evolve') {
     const [times = '1', start = 'HEAD', policy = 'simple'] = args
@@ -706,9 +747,30 @@ if (import.meta.main) {
     if (exhausted()) process.exit(0)
     const adopted = await promote(m, solver, Number(top), Number(repeats))
     if (adopted) ledger.improved('self', adopted.delta, adopted.commit)
+  } else if (command === 'proposals') {
+    const { openProposals } = await import('./evolve')
+    const pending = openProposals(m).pending()
+    if (!pending.length) console.log('承認を待つ固定部の変更の提案はありません')
+    for (const p of pending) {
+      console.log(
+        `## 提案 #${p.id}（候補 ${p.parent.slice(0, 7)} の改善から）\n${p.description}\n\n${p.patch}`,
+      )
+    }
+  } else if (command === 'approve' || command === 'reject') {
+    const [id = ''] = args
+    if (!/^[1-9]\d*$/.test(id)) throw new Error('提案の番号は正の整数です')
+    const { approve, openProposals } = await import('./evolve')
+    if (command === 'approve') console.log(await approve(m, Number(id)))
+    else {
+      const p = openProposals(m).get(Number(id))
+      if (p?.status !== 'pending')
+        throw new Error(`承認を待つ提案 #${id} はありません`)
+      openProposals(m).set(Number(id), 'rejected')
+      console.log(`提案 #${id} を棄却しました`)
+    }
   } else {
     console.log(
-      '使い方: bun run measure <セッション> generate|review|run|evolve|promote|deploy|ideas|ideas-check|budget|ledger|harden|flag',
+      '使い方: bun run measure <セッション> generate|review|run|evolve|promote|deploy|ideas|ideas-check|budget|ledger|harden|flag|proposals|approve|reject',
     )
   }
 }
