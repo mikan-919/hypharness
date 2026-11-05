@@ -551,3 +551,51 @@ test('状態を渡した計測は、各課題を状態の複製から始め、�
       ?.memory,
   ).toBe('（状態 テスト）')
 }, 120_000)
+
+test('種の差分を当てた /work から始めた生成では、差分がそのまま模範解答になり、提出のあとも差分を当て直す', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hyph-test-'))
+  const repo = join(dir, 'repo')
+  await Bun.write(join(repo, 'a.txt'), 'old\n')
+  await Bun.$`git -C ${repo} init -q && git -C ${repo} add -A && git -C ${repo} -c user.name=t -c user.email=t@localhost commit -qm a`.quiet()
+  const commit = (await Bun.$`git -C ${repo} rev-parse HEAD`.text()).trim()
+  await Bun.write(join(dir, 'prelude.sh'), '')
+  const seed =
+    'diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n'
+  const submit = {
+    name: 'submit_task',
+    arguments: {
+      statement: 'a.txt を new にしてください',
+      files: {},
+      check: 'grep -q new a.txt',
+      check_files: {},
+    },
+  }
+  // 1回目は除外される。2回目の前に /work を見ると、差分が当て直されている
+  const steps: Pick<ToolCall, 'name' | 'arguments'>[] = [
+    submit,
+    { name: 'sh', arguments: { command: 'cat a.txt' } },
+    submit,
+  ]
+  const contexts: Context[] = []
+  const complete: Complete = async (context) => {
+    contexts.push(structuredClone(context))
+    const step = steps[contexts.length - 1]
+    return reply([{ type: 'toolCall', id: String(contexts.length), ...step }])
+  }
+  const solutions: EvalTask['solution'][] = []
+  const result = await generate(
+    '目的',
+    1,
+    complete,
+    async (t) => {
+      solutions.push(t.solution)
+      return solutions.length === 1 ? '1回目は除外する' : null
+    },
+    '',
+    { repo, commit, prelude: join(dir, 'prelude.sh'), mounts: [] },
+    seed,
+  )
+  expect(result).toEqual({ submitted: 2, accepted: 1 })
+  expect(solutions).toEqual([{ 'a.txt': 'new\n' }, { 'a.txt': 'new\n' }])
+  expect(JSON.stringify(contexts[2].messages.at(-1))).toContain('new')
+})

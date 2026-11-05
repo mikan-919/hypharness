@@ -277,6 +277,9 @@ export async function generate(
   guidance = '',
   // 作業領域。あれば課題をこのリポジトリのコミットの上に作り、生成役は /work の複製でシェルを使える
   workspace?: Workspace,
+  // 作業領域の課題で、生成役が始める前に /work に当てる差分（過去のコミットの変更）。提出時の /work の変更が模範解答になるため、
+  // 生成役が変えなければ、この差分がそのまま模範解答になる
+  seed?: string,
 ) {
   const environment = workspace
     ? `- 解答役は課題文を見て、ネットワークのない Linux の隔離環境で解きます。/work には、最終目的のリポジトリのコミットの中身（git の1コミット）に files を重ねたものがあります
@@ -310,6 +313,15 @@ ${environment}${guidance && `\n\n${guidance}`}`,
     ? await mkdtemp(join(tmpdir(), 'hyph-generate-'))
     : null
   if (work) await prepare(work, { files: {}, workspace })
+  const reset = async () => {
+    if (!work) return
+    await Bun.$`git -C ${work} reset -q --hard && git -C ${work} clean -fdq`.quiet()
+    if (!seed) return
+    const file = join(work, '.git', 'seed.patch')
+    await Bun.write(file, seed)
+    await Bun.$`git -C ${work} apply ${file}`.quiet()
+  }
+  await reset()
   try {
     return await rounds(
       context,
@@ -319,6 +331,7 @@ ${environment}${guidance && `\n\n${guidance}`}`,
       submit,
       workspace,
       work,
+      reset,
     )
   } finally {
     if (work) await rm(work, { recursive: true, force: true })
@@ -333,6 +346,8 @@ async function rounds(
   submit: Tool,
   workspace: Workspace | undefined,
   work: string | null,
+  // 提出のあと /work を元に戻す（seed があれば当て直す）
+  reset: () => Promise<void>,
 ) {
   let submitted = 0
   let accepted = 0
@@ -362,7 +377,7 @@ async function rounds(
       const args = { ...call.arguments }
       if (workspace && work && isFiles(args.check_files)) {
         args.solution = await changed(work, args.check_files)
-        await Bun.$`git -C ${work} reset -q --hard && git -C ${work} clean -fdq`.quiet()
+        await reset()
       }
       const task = call.name === submit.name ? asTask(args, workspace) : null
       // 不正なファイル名は、生成全体を止めずに除外の理由として返す
