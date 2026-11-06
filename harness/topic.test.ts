@@ -243,3 +243,24 @@ test('待つエージェントがいなくても答えを保存し、続きか�
   expect(second.snapshot().topics[0].ready).toBe(true)
   expect(JSON.stringify(seen[0])).toContain('利用者の答え: ファイル')
 })
+
+test('検索が成功したときだけ、費用を中継へ知らせる', async () => {
+  await withSearch(ok([{ title: 'T', url: 'https://a.example', excerpts: ['e'] }]), async () => {
+    const store = setup()
+    const charged: unknown[] = []
+    const { call } = script(reply('web_search', { objective: '調べる' }), adr, reply('ready', {}))
+    await runTopic(store, call, 'goal', mkdtempSync(join(tmpdir(), 'hyph-')), async (body) => void charged.push(body))
+    expect(charged).toEqual([{ topicId: 'goal', taskId: 'dialog', costUsd: 0.005 }])
+  })
+})
+
+test('検索が失敗したときは費用を中継へ知らせない', async () => {
+  await withSearch(() => new Response('{"error":"boom"}', { status: 500 }), async () => {
+    const store = setup()
+    const charged: unknown[] = []
+    const { call } = script(reply('web_search', { objective: '調べる' }), adr, reply('ready', {}))
+    await runTopic(store, call, 'goal', mkdtempSync(join(tmpdir(), 'hyph-')), async (body) => void charged.push(body))
+    expect(charged).toEqual([])
+    expect(searchResult(store).isError).toBe(true)
+  })
+})

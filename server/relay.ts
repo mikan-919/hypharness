@@ -5,6 +5,7 @@ import type { Usage } from '../shared/dialog.ts'
 
 export type Stream = (context: Context) => AsyncIterable<AssistantMessageEvent>
 export type Call = { topicId: string; taskId: string; context: Context }
+export type Cost = { topicId?: string; taskId: string; costUsd: number }
 
 // ストリーミング中の出力トークン数の見積もり。DeepSeek V4.1 Flash の応答で測った値（2026-11-06）で、
 // ASCII は1文字 0.23、それ以外（日本語など）は1文字 1.1 トークン。応答が終わったら実際の数に置き換える
@@ -38,6 +39,18 @@ export function createRelay(stream: Stream, limitUsd: number) {
   const publish = () => {
     const snapshot = totals()
     for (const listener of listeners) listener(snapshot)
+  }
+
+  // モデルの利用料以外（検索など）の費用を、モデルの利用料と同じ上限で数える
+  function cost(taskId: string, costUsd: number, topicId?: string) {
+    const total = (spent.get(taskId) ?? 0) + costUsd
+    spent.set(taskId, total)
+    if (topicId) {
+      const sum = confirmed.get(topicId) ?? zero(topicId)
+      confirmed.set(topicId, { ...sum, costUsd: sum.costUsd + costUsd })
+      publish()
+    }
+    if (total >= limitUsd) halted = `課題 ${taskId} が費用の上限 ${limitUsd} に達しました`
   }
 
   async function* call({ topicId, taskId, context }: Call) {
@@ -77,6 +90,15 @@ export function createRelay(stream: Stream, limitUsd: number) {
   async function handle(request: Request) {
     if (request.method !== 'POST') return Response.json({ error: 'POST で送ってください' }, { status: 405 })
     if (halted) return Response.json({ error: `停止中です: ${halted}` }, { status: 423 })
+    const path = new URL(request.url).pathname
+    if (path === '/cost') {
+      const body = (await request.json().catch(() => null)) as Cost | null
+      if (typeof body?.taskId !== 'string' || typeof body.costUsd !== 'number' || !(body.costUsd >= 0)) {
+        return Response.json({ error: 'taskId と 0 以上の costUsd を送ってください' }, { status: 400 })
+      }
+      cost(body.taskId, body.costUsd, typeof body.topicId === 'string' ? body.topicId : undefined)
+      return Response.json({ ok: true })
+    }
     const body = (await request.json().catch(() => null)) as Call | null
     if (!body?.topicId || !body?.taskId || !Array.isArray(body.context?.messages)) {
       return Response.json({ error: 'topicId・taskId と messages を持つ context を送ってください' }, { status: 400 })
@@ -105,6 +127,8 @@ export function createRelay(stream: Stream, limitUsd: number) {
     // 課題1つあたりに使った費用（ドル）。ハーネスは保留の理由に使う
     spent: (taskId: string) => spent.get(taskId) ?? 0,
     limitUsd,
+    // モデルの利用料以外の費用を足す。上限に達したら停止する
+    cost,
     // 停止を解く。開始の合図を受けたときに呼ぶ
     resume: () => {
       halted = ''

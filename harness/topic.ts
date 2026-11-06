@@ -7,6 +7,9 @@ import type { Store } from './store.ts'
 
 export type Call = (body: { topicId: string; taskId: string; context: Context }) => Promise<AssistantMessage>
 
+// モデルの利用料以外の費用を中継へ知らせる
+export type Charge = (body: { topicId: string; taskId: string; costUsd: number }) => Promise<void>
+
 // 中継が費用の上限に達してモデルの呼び出しを断った（ADR 0011、0012）
 export class CostLimitError extends Error {}
 
@@ -39,6 +42,20 @@ export const relayCall =
     if (last.type === 'error') throw new Error(last.error.errorMessage ?? 'モデルの呼び出しに失敗しました')
     return last.message
   }
+
+// 中継の /cost を呼び、モデルの利用料以外の費用を知らせる
+export const relayCharge =
+  (socket: string): Charge =>
+  async (body) => {
+    const response = await fetch('http://relay/cost', { unix: socket, method: 'POST', body: JSON.stringify(body) })
+    if (!response.ok) {
+      const error = ((await response.json()) as { error: string }).error
+      throw new Error(error)
+    }
+  }
+
+// 検索1回の費用（ドル）。見積もりで、Parallel の請求額とは一致しない
+export const SEARCH_COST = 0.005
 
 const SYSTEM = `あなたは hypharness の論点エージェントです。利用者と一緒に FINAL_GOAL.md（最終目的の本文）を書き換えて、課題に分けられるところまで具体的にします。
 
@@ -170,7 +187,7 @@ export async function webSearch(objective: string, maxResults?: number) {
 // 論点エージェントが書けるのは ADR と用語集だけ（読むだけの他のファイルは変えさせない）
 const WRITABLE = /^docs\/(adr\/[\w.-]+\.md|glossary\.md)$/
 
-async function run(store: Store, topicId: string, repo: string, call: ToolCall) {
+async function run(store: Store, topicId: string, repo: string, call: ToolCall, charge?: Charge) {
   const a = call.arguments as Record<string, any>
   if (call.name === 'ask') {
     const options = Array.isArray(a.options) ? a.options : []
@@ -203,12 +220,16 @@ async function run(store: Store, topicId: string, repo: string, call: ToolCall) 
   }
   if (call.name === 'web_search') {
     if (!a.objective) throw new Error('web_search には objective が要ります')
+    let found: string
     try {
-      return await webSearch(a.objective, a.max_results)
+      found = await webSearch(a.objective, a.max_results)
     } catch (e) {
       store.record({ topicId, kind: 'fail', text: (e as Error).message, evidence: 'Parallel の検索' })
       throw e
     }
+    // 検索が成功したときだけ費用を数える
+    await charge?.({ topicId, taskId: 'dialog', costUsd: SEARCH_COST })
+    return found
   }
   if (call.name === 'list_files') return listFiles(repo, a.path)
   if (call.name === 'read_file') return readFile(repo, a.path)
@@ -234,7 +255,7 @@ const wroteAdr = (messages: Message[]) =>
   )
 
 // 保存した会話があれば続きから始める。最後の応答のツールの呼び出しのうち、結果のないものから処理する
-export async function runTopic(store: Store, call: Call, topicId: string, repo: string) {
+export async function runTopic(store: Store, call: Call, topicId: string, repo: string, charge?: Charge) {
   const messages: Message[] = store.transcript(topicId) ?? [
     { role: 'user', content: 'FINAL_GOAL.md を利用者と一緒に書き換えて、課題に分けられるところまで具体的にしてください。', timestamp: Date.now() },
   ]
@@ -275,7 +296,7 @@ export async function runTopic(store: Store, call: Call, topicId: string, repo: 
         const result =
           toolCall.name === 'ready'
             ? { text: '決定を write_doc で ADR に書いてから ready を呼んでください', isError: true }
-            : await run(store, topicId, repo, toolCall).then(
+            : await run(store, topicId, repo, toolCall, charge).then(
                 (text) => ({ text, isError: false }),
                 (e: Error) => ({ text: e.message, isError: true }),
               )

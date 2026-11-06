@@ -65,3 +65,32 @@ test('形の違う要求は断る', async () => {
   const response = await relay.handle(new Request('http://relay/', { method: 'POST', body: '{}' }))
   expect(response.status).toBe(400)
 })
+
+const postCost = (relay: ReturnType<typeof createRelay>, body: unknown) =>
+  relay.handle(new Request('http://relay/cost', { method: 'POST', body: JSON.stringify(body) }))
+
+test('モデル以外の費用を /cost で受け取り、課題の費用に足す', async () => {
+  const relay = createRelay(fake(1, 0), 1)
+  expect((await postCost(relay, { taskId: 't1', costUsd: 0.005 })).status).toBe(200)
+  expect(relay.spent('t1')).toBe(0.005)
+  await postCost(relay, { taskId: 't1', costUsd: 0.005 })
+  expect(relay.spent('t1')).toBeCloseTo(0.01)
+})
+
+test('モデル以外の費用でも上限に達したら止め、モデルの呼び出しも断る', async () => {
+  const relay = createRelay(fake(1, 0), 1)
+  await postCost(relay, { taskId: 't1', costUsd: 0.6 })
+  expect(relay.halted()).toBe('')
+  await postCost(relay, { taskId: 't1', costUsd: 0.6 })
+  expect(relay.halted()).toContain('t1')
+  expect((await post(relay, 't1')).status).toBe(423)
+})
+
+test('費用の要求の形が違うときは断る', async () => {
+  const relay = createRelay(fake(1, 0), 1)
+  expect((await postCost(relay, { costUsd: 0.005 })).status).toBe(400)
+  expect((await postCost(relay, { taskId: 't1' })).status).toBe(400)
+  expect((await postCost(relay, { taskId: 't1', costUsd: -0.005 })).status).toBe(400)
+  expect((await postCost(relay, { taskId: 't1', costUsd: '0.005' })).status).toBe(400)
+  expect(relay.spent('t1')).toBe(0)
+})
