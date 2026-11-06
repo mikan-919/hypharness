@@ -1,23 +1,31 @@
 import { Readable } from 'node:stream'
 import { defineConfig } from 'vite-plus'
 import { irisoutHono } from 'irisout/hono/vite'
-import { app, listenRelay } from './server/app.ts'
+import { app, boot } from './server/app.ts'
 
-// irisoutHono は開発時にページの GET だけを Hono へ渡す。API は SSE を流し続けられるよう本文をそのまま中継する
+// irisoutHono は開発時にページの GET だけを Hono へ渡す。API は要求と応答の本文をそのまま中継し、SSE を流し続ける
 const honoDevelopment = {
   name: 'hono-development',
   configureServer(server) {
-    listenRelay()
+    boot()
     server.middlewares.use(async (request, response, next) => {
       if (!request.url?.startsWith('/api/')) return next()
       try {
-        const result = await app.fetch(new Request(new URL(request.url, 'http://localhost')))
+        const body = request.method === 'GET' ? undefined : (Readable.toWeb(request) as unknown as ReadableStream)
+        const result = await app.fetch(
+          new Request(new URL(request.url, 'http://localhost'), {
+            method: request.method,
+            headers: request.headers as Record<string, string>,
+            body,
+            duplex: 'half',
+          } as RequestInit),
+        )
         response.statusCode = result.status
         result.headers.forEach((value, name) => response.setHeader(name, value))
         if (!result.body) return response.end()
-        const body = Readable.fromWeb(result.body as any)
-        request.on('close', () => body.destroy())
-        body.pipe(response)
+        const stream = Readable.fromWeb(result.body as any)
+        request.on('close', () => stream.destroy())
+        stream.pipe(response)
       } catch (error) {
         next(error)
       }

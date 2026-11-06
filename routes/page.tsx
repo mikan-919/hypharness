@@ -12,21 +12,24 @@ const stateLabel = {
 const kindLabel = { fact: '事実', fail: '失敗', done: '完了' }
 
 export function DialogPage({ topics, queue, questions, entries, started }: Dialog) {
+  const topicList = signal(topics)
   const items = signal(questions)
   const pending = signal(queue)
-  const selected = signal(queue[0] ?? '')
+  const entryList = signal(entries)
+  const selected = signal('')
   const draft = signal('')
+  const sending = signal(false)
   const isStarted = signal(started)
   const usage = signal<Record<string, Usage>>({})
-  const head = derived(() => items().find((q) => q.id === pending()[0]))
-  const current = derived(() => items().find((q) => q.id === selected()))
-  const readyCount = derived(() => topics.filter((t) => t.ready).length)
-  const majority = derived(() => readyCount() * 2 > topics.length)
-  const totalOutput = derived(() =>
-    Object.values(usage()).reduce((sum, u) => sum + u.output, 0),
-  )
+  const head = derived(() => pending()[0] ?? '')
+  const current = derived(() => items().find((q) => q.id === (selected() || head())))
+  const readyCount = derived(() => topicList().filter((t) => t.ready).length)
+  const majority = derived(() => readyCount() * 2 > topicList().length)
+  const totalOutput = derived(() => Object.values(usage()).reduce((sum, u) => sum + u.output, 0))
   const totalCost = derived(() =>
-    Object.values(usage()).reduce((sum, u) => sum + u.costUsd, 0).toFixed(4),
+    Object.values(usage())
+      .reduce((sum, u) => sum + u.costUsd, 0)
+      .toFixed(4),
   )
 
   render(
@@ -34,7 +37,7 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
       <div class="shell">
         <aside class="threads">
           <h2>論点</h2>
-          {topics.map((topic) => (
+          {topicList().map((topic) => (
             <div key={topic.id} class={`thread ${topic.state}`}>
               <span class="avatar">{topic.title.slice(0, 1)}</span>
               <span class="name">{topic.title}</span>
@@ -44,7 +47,7 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
           ))}
           <div class="start">
             <p>
-              開始のツール {readyCount()} / {topics.length}
+              開始のツール {readyCount()} / {topicList().length}
             </p>
             <button type="button" disabled={isStarted()} onClick={start}>
               {isStarted() ? '開始の合図を出した' : '開始の合図'}
@@ -59,7 +62,7 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
               <button
                 key={q.id}
                 type="button"
-                class={`chip ${q.id === pending()[0] ? 'head' : ''} ${q.answer ? 'answered' : ''}`}
+                class={`chip ${q.id === head() ? 'head' : ''} ${q.answer ? 'answered' : ''}`}
                 data-id={q.id}
                 onClick={select}
               >
@@ -67,8 +70,8 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
               </button>
             ))}
           </nav>
-          {current() && (
-            <article class={`question ${current().id === head()?.id ? 'head' : ''}`}>
+          {current() ? (
+            <article class={`question ${current().id === head() ? 'head' : ''}`}>
               <h1>{current().text}</h1>
               <ul class="options">
                 {current().options.map((option) => (
@@ -78,19 +81,20 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
                   </li>
                 ))}
               </ul>
-              <p class="recommendation">推奨の理由: {current().recommendation}</p>
+              <p class="recommendation">{current().recommendation}</p>
               {current().answer ? (
-                <p class="answer">
-                  {current().held ? '保留中の答え: ' : '答え: '}
-                  {current().answer}
-                </p>
+                <p class="answer">答え: {current().answer}</p>
               ) : (
                 <form class="reply" onSubmit={answer}>
                   <textarea value={draft()} onInput={updateDraft} placeholder="答えを書く" />
-                  <button type="submit">送る</button>
+                  <button type="submit" disabled={sending()}>
+                    送る
+                  </button>
                 </form>
               )}
             </article>
+          ) : (
+            <p class="hint">論点エージェントが調べています。</p>
           )}
         </main>
 
@@ -102,7 +106,7 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
             <p>${totalCost()}</p>
           </section>
           <h2>共有文脈</h2>
-          {entries.map((entry) => (
+          {entryList().map((entry) => (
             <div key={entry.id} class={`entry ${entry.kind}`}>
               <span class="kind">{kindLabel[entry.kind]}</span>
               <p>{entry.text}</p>
@@ -115,14 +119,15 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
   )
 
   onMount(() => {
-    const source = new EventSource('/api/usage')
-    source.onmessage = (event) => {
+    const usageSource = new EventSource('/api/usage')
+    usageSource.onmessage = (event) => {
       const u = JSON.parse(event.data)
       usage((prev) => {
-        const old = prev[u.topicId] ?? { input: 0, output: 0, cacheRead: 0, costUsd: 0 }
+        const old = prev[u.topicId] ?? { topicId: u.topicId, input: 0, output: 0, cacheRead: 0, costUsd: 0 }
         return {
           ...prev,
           [u.topicId]: {
+            topicId: u.topicId,
             input: old.input + u.input,
             output: old.output + u.output,
             cacheRead: old.cacheRead + u.cacheRead,
@@ -131,7 +136,19 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
         }
       })
     }
-    return () => source.close()
+    const dialogSource = new EventSource('/api/dialog')
+    dialogSource.onmessage = (event) => {
+      const next = JSON.parse(event.data)
+      topicList(next.topics)
+      items(next.questions)
+      pending(next.queue)
+      entryList(next.entries)
+      isStarted(next.started)
+    }
+    return () => {
+      usageSource.close()
+      dialogSource.close()
+    }
   })
 
   function select(event) {
@@ -142,17 +159,21 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
     draft(event.currentTarget.value)
   }
 
-  // ponytail: 答えは画面の中だけに残す。ハーネスへの送信は論点エージェントができてから
-  function answer(event) {
+  async function answer(event) {
     event.preventDefault()
-    const id = selected()
-    const text = draft()
-    const isHead = id === pending()[0]
-    items((prev) => prev.map((q) => (q.id === id ? { ...q, answer: text, held: !isHead } : q)))
-    pending((prev) => prev.filter((q) => q !== id))
-    draft('')
+    sending(true)
+    const response = await fetch('/api/answer', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: current().id, text: draft() }),
+    })
+    sending(false)
+    // 答えた後は待ち行列の先頭を表示する。断られたら書いた答えを残す
+    draft(response.ok ? '' : draft())
+    selected(response.ok ? '' : selected())
   }
 
+  // ponytail: 開始の合図は表示を変えるだけ。分解役ができたら固定部へ送る
   function start() {
     isStarted(true)
   }

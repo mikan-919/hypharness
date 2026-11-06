@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { serveStatic } from 'hono/bun'
-import { app, listenRelay, RELAY_SOCKET } from './app.ts'
+import { app, boot } from './app.ts'
 
 const serverApp = new Hono()
 serverApp.on(['GET', 'HEAD'], '/irisout-client.js', serveStatic({ root: './dist' }))
@@ -15,6 +15,6 @@ const server = Bun.serve({
   idleTimeout: 0,
 })
 
-listenRelay()
+const socket = boot()
 console.log(`http://127.0.0.1:${server.port}`)
-console.log(`中継: ${RELAY_SOCKET}`)
+console.log(`中継: ${socket}`)
