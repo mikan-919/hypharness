@@ -86,6 +86,8 @@ export type Task = {
   reason: string
   // この課題で使った費用（ドル）
   spent: number
+  // 積んだコミットの差分。積んでいなければ空文字
+  diff: string
 }
 
 // エージェントの動き1つ分。agent は論点の id か 'decompose'・'solve'

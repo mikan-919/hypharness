@@ -61,6 +61,37 @@ test('課題を解いて検査が通ったら統合ブランチに積み、最�
   expect(log()).toBe('t1: out.txt に ok と書く\ninit')
 })
 
+test('積んだ課題の記録に差分を残し、保留にした課題の差分は空のままにする', async () => {
+  const { dir } = repo()
+  const store = createStore()
+  const wrong = () => [reply('write_file', { path: 'out.txt', content: 'ng' }), reply('done', { summary: '書いた' })]
+  // 検査に落ちて保留になった課題
+  await runPipeline(
+    store,
+    script({
+      decompose: [reply('submit_task', { statement: 'out.txt に ok と書く' })],
+      solve: [...wrong(), reply('done', { summary: 'もう一度' }), reply('done', { summary: 'もう一度' })],
+    }),
+    dir,
+    options(),
+  )
+  expect(store.snapshot().tasks[0]).toMatchObject({ state: 'held', diff: '' })
+
+  // 検査が通って積んだ課題
+  await runPipeline(
+    store,
+    script({
+      decompose: [reply('submit_task', { statement: 'out.txt に ok と書く' }), reply('finish', { reason: '満たした' })],
+      solve: [reply('write_file', { path: 'out.txt', content: 'ok' }), reply('done', { summary: '書いた' })],
+    }),
+    dir,
+    options(),
+  )
+  const committed = store.snapshot().tasks[1]
+  expect(committed.state).toBe('committed')
+  expect(committed.diff.split('\n')).toContain('+ok')
+})
+
 test('検査に3回落ちたら保留にして流れを止め、統合ブランチには積まない', async () => {
   const { dir, log } = repo()
   const store = createStore()

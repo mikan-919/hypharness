@@ -98,6 +98,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                   </span>
                   <p>{task.statement.split('\n')[0]}</p>
                   {task.state === 'held' && <p class="reason">{`${task.reason}（使った費用 ${task.spent} ドル）`}</p>}
+                  {task.state === 'committed' && task.diff && <pre class="diff">{task.diff}</pre>}
                 </div>
               ))}
             </section>

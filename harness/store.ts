@@ -151,6 +151,7 @@ export function createStore(file?: string, goalFile?: string) {
         commit: '',
         reason: '',
         spent: 0,
+        diff: '',
       }
       dialog.tasks = [...dialog.tasks, task]
       changed()

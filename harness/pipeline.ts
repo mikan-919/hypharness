@@ -11,6 +11,8 @@ import type { Call } from './topic.ts'
 export const BRANCH = 'hypharness/integration'
 // ADR 0010: 検査に落ちたら差し戻し、この回数落ちたら保留にして流れを止める
 const MAX_ATTEMPTS = 3
+// 課題の記録に残す差分の長さ。超える分は末尾を残して先頭を切る
+const MAX_DIFF = 8000
 
 function git(repo: string, ...args: string[]) {
   const result = Bun.spawnSync(['git', '-C', repo, ...args], { stdout: 'pipe', stderr: 'pipe' })
@@ -169,7 +171,6 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
     const summary = await solve(store, call, tree, taskId, next.statement, options)
     const commit = git(tree, 'rev-parse', 'HEAD')
     git(repo, 'branch', '-f', BRANCH, commit)
-    store.setTask(taskId, { state: 'committed', commit })
     store.record({
       topicId: 'solve',
       kind: 'fact',
@@ -233,6 +234,9 @@ async function solve(store: Store, call: Call, tree: string, taskId: string, sta
     if (!failure) {
       git(tree, '-c', 'user.name=hypharness', '-c', 'user.email=hypharness@localhost', 'commit', '-q', '-m', `${taskId}: ${statement.split('\n')[0]}`)
       store.act('solve', 'check', `${taskId} の検査が通った`)
+      const commit = git(tree, 'rev-parse', 'HEAD')
+      const patch = git(tree, 'show', '--format=', '--patch', commit)
+      store.setTask(taskId, { state: 'committed', commit, diff: patch.slice(-MAX_DIFF) })
       return summary
     }
     reason = failure.text
