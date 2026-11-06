@@ -1,3 +1,4 @@
+import { Database } from 'bun:sqlite'
 import { beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -454,4 +455,112 @@ test('70% 以下の状態では、edit_context の返り値に指示の行が入
   expect(ok).not.toContain(SHRINK_HINT)
   const ng = editContext('solve', '見つからない語', '置き換え後')
   expect(ng).not.toContain(SHRINK_HINT)
+})
+
+// ツールの結果のメッセージ
+const result = (toolCallId: string, text = '結果です'): Message =>
+  ({
+    role: 'toolResult',
+    toolCallId,
+    toolName: 'read_file',
+    content: [{ type: 'text', text }],
+    isError: false,
+    timestamp: 0,
+  }) as Message
+
+// dependencies 表の行をそのまま読む
+const dependencyRows = () =>
+  new Database(join(dir, 'solve.sqlite')).query('SELECT from_id, to_id FROM dependencies ORDER BY from_id, to_id').all()
+
+test('ツール結果と、その呼び出しを出したアシスタントメッセージの組が依存に1組だけ入る', () => {
+  const store = ctx('solve')
+  store.append(message('はじめての指示'))
+  store.append(reply('read_file', { path: 'a' }, 'c1'))
+  store.append(result('c1'))
+  expect(dependencyRows()).toEqual([{ from_id: 2, to_id: 3 }])
+  expect(store.dependenciesOf(2)).toEqual([3])
+  expect(store.dependenciesOf(3)).toEqual([2])
+})
+
+test('同じメッセージを2回追記しても依存が重複しない', () => {
+  const store = ctx('solve')
+  store.append(message('はじめての指示'))
+  store.append(reply('read_file', { path: 'a' }, 'c1'))
+  const tool = result('c1')
+  store.append(tool)
+  store.append(tool)
+  const rows = dependencyRows() as { from_id: number; to_id: number }[]
+  expect(rows).toEqual([
+    { from_id: 2, to_id: 3 },
+    { from_id: 2, to_id: 4 },
+  ])
+  // 同じ組は1度しか入らない
+  expect(new Set(rows.map((r) => `${r.from_id}-${r.to_id}`)).size).toBe(rows.length)
+})
+
+test('現在のリクエストの語を含む要約ノードが、含まない要約ノードより前に並ぶ', () => {
+  const store = ctx('solve')
+  store.append(message('はじめての指示'))
+  const unrelated = store.addSummary('ガンマの要約', [])
+  const matched = store.addSummary('アルファの要約', [])
+  const ids = (list: { kind: string; id: number }[]) => list.filter((b) => b.kind === '要約').map((b) => b.id)
+  expect(ids(store.blocks(8, 'アルファ'))).toEqual([matched, unrelated])
+  // リクエストを渡さないときは id 順
+  expect(ids(store.blocks(8))).toEqual([unrelated, matched])
+})
+
+test('直近の生メッセージと依存でつながる要約ノードが、つながらないものより前に並ぶ', () => {
+  const store = ctx('solve')
+  store.append(message('はじめての指示'))
+  store.append(reply('read_file', { path: 'a' }, 'z'))
+  store.append(message('古い本文 3'))
+  store.append(message('古い本文 4'))
+  store.append(result('z'))
+  for (let i = 6; i <= 11; i++) store.append(message(`本文 ${i}`))
+  // 直近の生メッセージは id 4 から 11。依存は 2 と 5 の間にある
+  const unrelated = store.addSummary('依存のない要約', [])
+  const linked = store.addSummary('依存のある要約', [2])
+  expect(store.blocks(8).map((b) => b.id)).toContain(5)
+  const ids = store.blocks(8, 'その他').filter((b) => b.kind === '要約').map((b) => b.id)
+  expect(ids).toEqual([linked, unrelated])
+})
+
+test('buildContextFile と contextStatus も同じ並びを使う', () => {
+  const store = ctx('solve')
+  store.append(message('はじめての指示'))
+  const unrelated = store.addSummary('ガンマの要約', [])
+  const matched = store.addSummary('アルファの要約', [])
+  store.buildContextFile(8, 'アルファ')
+  const text = contextText('solve')
+  expect(text.indexOf(`## 要約 ${matched}`)).toBeLessThan(text.indexOf(`## 要約 ${unrelated}`))
+  const lines = ctx('solve').contextStatus(8, 'アルファ')
+  expect(lines[0]).toContain(`id ${matched}`)
+  expect(lines[0]).toContain('種別 要約')
+})
+
+test('runAgent は直近の user のメッセージを現在のリクエストとして渡し、要約ノードを並べ替える', async () => {
+  const store = createStore()
+  const unrelated = ctx('solve').addSummary('ガンマの要約', [])
+  const matched = ctx('solve').addSummary('アルファの要約', [])
+  const systems: string[] = []
+  const call: Call = async (body) => {
+    systems.push(body.context.systemPrompt)
+    return reply('done', {}, 'c1')
+  }
+  const messages: Message[] = [message('はじめての指示'), message('アルファ の依頼')]
+  const summary = await runAgent<string>({
+    store,
+    call,
+    agent: 'solve',
+    taskId: 't1',
+    system: '',
+    tools: [],
+    messages,
+    run: async () => '結果です',
+    stop: (c) => (c.name === 'done' ? '終えた' : undefined),
+  })
+  expect(summary).toBe('終えた')
+  const summaryLines = systems[0].split('\n').filter((line) => line.includes('種別 要約'))
+  expect(summaryLines[0]).toContain(`id ${matched}`)
+  expect(summaryLines[0]).not.toContain(`id ${unrelated}`)
 })

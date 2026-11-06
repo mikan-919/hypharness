@@ -64,6 +64,10 @@ export function ctx(agent: string) {
     'CREATE TABLE IF NOT EXISTS block_refs(kind TEXT NOT NULL, block_id INTEGER NOT NULL, refs INTEGER NOT NULL, last_turn INTEGER NOT NULL, PRIMARY KEY(kind, block_id))',
   )
   db.run('CREATE TABLE IF NOT EXISTS turn_counter(id INTEGER PRIMARY KEY CHECK (id = 1), turn INTEGER NOT NULL)')
+  // メッセージ間の依存。from_id はアシスタントのメッセージの seq、to_id はその toolCall の結果の seq
+  db.run(
+    'CREATE TABLE IF NOT EXISTS dependencies(from_id INTEGER NOT NULL, to_id INTEGER NOT NULL, PRIMARY KEY(from_id, to_id))',
+  )
   db.query('INSERT OR IGNORE INTO turn_counter(id, turn) VALUES (1, 0)').run()
   const messagesWithIds = (): { id: number; message: Message }[] => {
     const rows = db.query('SELECT seq, message FROM messages ORDER BY seq').all() as { seq: number; message: string }[]
@@ -84,17 +88,59 @@ export function ctx(agent: string) {
       .get(text, JSON.stringify(messageIds)) as { id: number }
     return row.id
   }
-  // 文脈ファイルに入れるブロック。要約ノードの全部と、直近の生メッセージ（keep 件）。
+  // id と依存で直接つながる id の一覧（向きは問わない）
+  const dependenciesOf = (id: number): number[] => {
+    const rows = db
+      .query('SELECT from_id, to_id FROM dependencies WHERE from_id = ? OR to_id = ?')
+      .all(id, id) as { from_id: number; to_id: number }[]
+    const ids = new Set<number>()
+    for (const row of rows) ids.add(row.from_id === id ? row.to_id : row.from_id)
+    return [...ids].sort((a, b) => a - b)
+  }
+  // 追記したツール結果と、その toolCall を出したアシスタントメッセージの依存を記録する。既にある組は入れない
+  const recordDependency = (seq: number, message: Message) => {
+    if (message.role !== 'toolResult') return
+    const caller = messagesWithIds().find(
+      ({ id, message: stored }) =>
+        id !== seq &&
+        stored.role === 'assistant' &&
+        stored.content.some((part) => part.type === 'toolCall' && part.id === message.toolCallId),
+    )
+    if (caller) db.query('INSERT OR IGNORE INTO dependencies(from_id, to_id) VALUES (?, ?)').run(caller.id, seq)
+  }
+  // 先頭の課題文を除いた、直近 keep 件の生メッセージ
+  const recentRaw = (keep: number) => messagesWithIds().slice(1).slice(-Math.max(0, Math.floor(keep)))
+  // 要約ノードを重要度順に並べる。リクエストを渡されたときだけ並べ替え、渡されないときは id 順のまま。
+  // 点は、リクエストの語が本文に含まれる、直近の生メッセージと依存でつながる、参照回数が多い、の順に足す
+  const orderSummaries = (list: Summary[], keep: number, request?: string): Summary[] => {
+    if (request === undefined) return list
+    const words = request
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((w) => w.length > 0)
+    const linked = new Set(recentRaw(keep).flatMap((r) => dependenciesOf(r.id)))
+    const score = (s: Summary) => {
+      const text = s.text.toLowerCase()
+      const word = words.some((w) => text.includes(w)) ? 1 : 0
+      const edge = s.messageIds.some((id) => linked.has(id)) ? 1 : 0
+      const refs = lastTurnOf('要約', s.id)?.refs ?? 0
+      return word + edge + refs
+    }
+    return [...list].sort((a, b) => score(b) - score(a) || a.id - b.id)
+  }
+  // 文脈ファイルに入れるブロック。要約ノードと、直近の生メッセージ（keep 件）。
   // 最初の課題文（messages の先頭）は入れない
-  const blocks = (keep = CONTEXT_KEEP): Block[] => {
-    const list: Block[] = summaries().map((s) => ({ kind: '要約', id: s.id, text: s.text }))
-    const raw = messagesWithIds().slice(1).slice(-Math.max(0, Math.floor(keep)))
-    for (const { id, message } of raw) list.push({ kind: '生', id, text: messageText(message) })
+  const blocks = (keep = CONTEXT_KEEP, request?: string): Block[] => {
+    const list: Block[] = orderSummaries(summaries(), keep, request).map((s) => ({
+      kind: '要約',
+      id: s.id,
+      text: s.text,
+    }))
+    for (const { id, message } of recentRaw(keep)) list.push({ kind: '生', id, text: messageText(message) })
     return list
   }
   // 文脈ファイルのトークン数の見積もり。blocks() の本文を estimateTokens で数える
-  const contextTokens = (keep = CONTEXT_KEEP) =>
-    blocks(keep).reduce((n, b) => n + estimateTokens(b.text), 0)
+  const contextTokens = (keep = CONTEXT_KEEP) => blocks(keep).reduce((n, b) => n + estimateTokens(b.text), 0)
   // 文脈ファイルのトークン数が CONTEXT_WINDOW の 70% を超えたか
   const overLimit = (keep = CONTEXT_KEEP) => contextTokens(keep) > CONTEXT_WINDOW * CONTEXT_RATIO
   // ターンの番号。実行をまたいで数える
@@ -113,15 +159,15 @@ export function ctx(agent: string) {
     ).run(kind, id, turn)
   }
   // 文脈ファイルを組み立てて書き、そのパスを返す。中身は blocks() と同じ集合
-  const buildContextFile = (keep = CONTEXT_KEEP) => {
-    const written = blocks(keep).map((b) => `## ${b.kind} ${b.id}\n\n${b.text}`)
+  const buildContextFile = (keep = CONTEXT_KEEP, request?: string) => {
+    const written = blocks(keep, request).map((b) => `## ${b.kind} ${b.id}\n\n${b.text}`)
     mkdirSync(dir, { recursive: true })
     writeFileSync(filePath, written.length > 0 ? `${written.join('\n\n')}\n` : '')
     return filePath
   }
   // 文脈のブロックごとの1行を返す。直近に残した生のブロックはそのターンに参照したものとして数える
-  const contextStatus = (keep = CONTEXT_KEEP) => {
-    const list = blocks(keep)
+  const contextStatus = (keep = CONTEXT_KEEP, request?: string) => {
+    const list = blocks(keep, request)
     const turn = currentTurn()
     for (const b of list) if (b.kind === '生') markReferenced(b.kind, b.id)
     const tokens = list.reduce((n, b) => n + estimateTokens(b.text), 0)
@@ -148,8 +194,12 @@ export function ctx(agent: string) {
     overLimit,
     // ブロックを参照したものとして数える
     markReferenced,
+    // メッセージを1件追記し、ツール結果なら依存も記録する
     append(message: Message) {
-      db.query('INSERT INTO messages(message) VALUES (?)').run(JSON.stringify(message))
+      const row = db.query('INSERT INTO messages(message) VALUES (?) RETURNING seq').get(JSON.stringify(message)) as {
+        seq: number
+      }
+      recordDependency(row.seq, message)
     },
     messages(): Message[] {
       const rows = db.query('SELECT message FROM messages ORDER BY seq').all() as { message: string }[]
@@ -161,6 +211,8 @@ export function ctx(agent: string) {
     summaries,
     // 文脈ファイルに入れるブロック
     blocks,
+    // id と依存で直接つながる id の一覧
+    dependenciesOf,
     // 要約ノードを1件足し、その id を返す。元のメッセージは消さない
     addSummary,
     // まだどの要約ノードにも入っていないメッセージのうち、直近 keep 件より前のものを1つの要約ノードにまとめる。

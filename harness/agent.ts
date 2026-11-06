@@ -3,7 +3,7 @@ import { readdir } from 'node:fs/promises'
 import { relative, resolve } from 'node:path'
 import type { AssistantMessage, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { AgentStore } from '../shared/contract.ts'
-import { ctx, editContext, SHRINK_HINT } from './ctx.ts'
+import { ctx, editContext, messageText, SHRINK_HINT } from './ctx.ts'
 import type { Call } from './topic.ts'
 
 const short = (text: string, max = 160) => (text.length > max ? `${text.slice(0, max)}…` : text)
@@ -205,8 +205,11 @@ export async function runAgent<T>(options: {
     try {
       const context = ctx(agent)
       context.beginTurn()
-      const path = context.buildContextFile()
-      const lines = context.contextStatus()
+      // 現在のリクエストは直近の user のメッセージの本文。要約ノードをこの本文で並べ替える
+      const last = messages.findLast((m) => m.role === 'user')
+      const request = last ? messageText(last) : undefined
+      const path = context.buildContextFile(undefined, request)
+      const lines = context.contextStatus(undefined, request)
       systemPrompt =
         lines.length > 0
           ? `${system}\n文脈ファイル: ${path}\n文脈ブロック:\n${lines.join('\n')}`
