@@ -1,4 +1,5 @@
 // 対話の画面に流すデータの形。ハーネスが画面へ渡す（ADR 0016）。
+import type { DiffLine } from './diff.ts'
 
 export type TopicState = 'researching' | 'asking' | 'ready' | 'blocked'
 
@@ -41,6 +42,18 @@ export type Entry = {
   evidence: string
 }
 
+// FINAL_GOAL.md の書き換え1回分（ADR 0018）。author は 'user' か論点の id
+export type Edit = {
+  id: string
+  author: string
+  reason: string
+  // この書き換えで本文がなった版
+  version: number
+  diff: DiffLine[]
+  // この書き換えの前の本文。履歴から戻すときに使う
+  before: string
+}
+
 export type Dialog = {
   topics: Topic[]
   // 質問の待ち行列。先頭が利用者に出す質問
@@ -48,6 +61,8 @@ export type Dialog = {
   questions: Question[]
   entries: Entry[]
   started: boolean
+  goal: { text: string; version: number }
+  edits: Edit[]
 }
 
 // 中継が SSE で配信するトークン数（ADR 0016）。ハーネスを経由しない

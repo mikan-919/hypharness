@@ -11,18 +11,23 @@ const stateLabel = {
 
 const kindLabel = { fact: '事実', fail: '失敗', done: '完了' }
 
-export function DialogPage({ topics, queue, questions, entries, started }: Dialog) {
+export function DialogPage({ topics, queue, questions, entries, started, goal, edits }: Dialog) {
   const topicList = signal(topics)
   const items = signal(questions)
   const pending = signal(queue)
   const entryList = signal(entries)
-  const selected = signal('')
-  const draft = signal('')
+  const editList = signal(edits)
+  const goalText = signal(goal.text)
+  const goalVersion = signal(goal.version)
+  const draft = signal(goal.text)
+  const dirty = signal(false)
+  const conflict = signal(false)
+  const reply = signal('')
   const sending = signal(false)
   const isStarted = signal(started)
   const usage = signal<Record<string, Usage>>({})
-  const head = derived(() => pending()[0] ?? '')
-  const current = derived(() => items().find((q) => q.id === (selected() || head())))
+  const head = derived(() => items().find((q) => q.id === pending()[0]))
+  const history = derived(() => [...editList()].reverse())
   const readyCount = derived(() => topicList().filter((t) => t.ready).length)
   const majority = derived(() => readyCount() * 2 > topicList().length)
   const totalOutput = derived(() => Object.values(usage()).reduce((sum, u) => sum + u.output, 0))
@@ -57,44 +62,51 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
         </aside>
 
         <main class="conversation">
-          <nav class="queue">
-            {items().map((q) => (
-              <button
-                key={q.id}
-                type="button"
-                class={`chip ${q.id === head() ? 'head' : ''} ${q.answer ? 'answered' : ''}`}
-                data-id={q.id}
-                onClick={select}
-              >
-                {q.id}
+          <div class="goal-head">
+            <h1>FINAL_GOAL.md</h1>
+            <span class="hint">版 {goalVersion()}</span>
+          </div>
+          <form class="goal" onSubmit={save}>
+            <textarea
+              value={draft()}
+              onInput={updateDraft}
+              placeholder="作りたいものを書く。論点エージェントがこの本文を一緒に書き換える"
+            />
+            {conflict() ? (
+              <p class="conflict">
+                保存の前に本文が書き換えられました。
+                <button type="button" onClick={loadLatest}>
+                  最新を読み込む
+                </button>
+                <button type="button" onClick={overwrite}>
+                  このまま上書きする
+                </button>
+              </p>
+            ) : (
+              <button type="submit" disabled={!dirty() || sending()}>
+                保存
               </button>
-            ))}
-          </nav>
-          {current() ? (
-            <article class={`question ${current().id === head() ? 'head' : ''}`}>
-              <h1>{current().text}</h1>
+            )}
+          </form>
+          {head() && (
+            <article class="question head">
+              <h2>{head().text}</h2>
               <ul class="options">
-                {current().options.map((option) => (
+                {head().options.map((option) => (
                   <li key={option.label} class={option.recommended ? 'recommended' : ''}>
                     <strong>{option.label}</strong>
                     <span>{option.description}</span>
                   </li>
                 ))}
               </ul>
-              <p class="recommendation">{current().recommendation}</p>
-              {current().answer ? (
-                <p class="answer">答え: {current().answer}</p>
-              ) : (
-                <form class="reply" onSubmit={answer}>
-                  <textarea value={draft()} onInput={updateDraft} placeholder="答えを書く" />
-                  <button type="submit" disabled={sending()}>
-                    送る
-                  </button>
-                </form>
-              )}
+              <p class="recommendation">{head().recommendation}</p>
+              <form class="reply" onSubmit={answer}>
+                <textarea value={reply()} onInput={updateReply} placeholder="答えを書く" />
+                <button type="submit" disabled={sending()}>
+                  送る
+                </button>
+              </form>
             </article>
-          ) : (
-            <p class="hint">論点エージェントが調べています。</p>
           )}
         </main>
 
@@ -105,6 +117,27 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
             <p>出力の合計（ストリーミング中）</p>
             <p>${totalCost()}</p>
           </section>
+          <h2>書き換えの履歴</h2>
+          {history().map((edit) => (
+            <div key={edit.id} class={`edit ${edit.author === 'user' ? 'user' : 'agent'}`}>
+              <div class="edit-head">
+                <strong>
+                  {edit.author === 'user' ? '利用者' : (topicList().find((t) => t.id === edit.author)?.title ?? edit.author)}
+                </strong>
+                <span class="hint">版 {edit.version}</span>
+                <button type="button" data-id={edit.id} onClick={revert}>
+                  この前に戻す
+                </button>
+              </div>
+              <p>{edit.reason}</p>
+              <pre class="diff">
+                {edit.diff
+                  .filter((l) => l.op !== ' ')
+                  .map((l) => `${l.op} ${l.line}`)
+                  .join('\n')}
+              </pre>
+            </div>
+          ))}
           <h2>共有文脈</h2>
           {entryList().map((entry) => (
             <div key={entry.id} class={`entry ${entry.kind}`}>
@@ -143,7 +176,12 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
       items(next.questions)
       pending(next.queue)
       entryList(next.entries)
+      editList(next.edits)
       isStarted(next.started)
+      goalText(next.goal.text)
+      goalVersion(next.goal.version)
+      // 書きかけでなければ、他の書き手の書き換えをそのまま映す
+      draft(dirty() ? draft() : next.goal.text)
     }
     return () => {
       usageSource.close()
@@ -151,12 +189,48 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
     }
   })
 
-  function select(event) {
-    selected(event.currentTarget.dataset.id)
-  }
-
   function updateDraft(event) {
     draft(event.currentTarget.value)
+    dirty(event.currentTarget.value !== goalText())
+  }
+
+  function updateReply(event) {
+    reply(event.currentTarget.value)
+  }
+
+  async function send(version) {
+    sending(true)
+    const response = await fetch('/api/goal', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: draft(), version }),
+    })
+    sending(false)
+    conflict(response.status === 409)
+    dirty(response.ok ? false : dirty())
+  }
+
+  function save(event) {
+    event.preventDefault()
+    send(goalVersion())
+  }
+
+  function overwrite() {
+    send(goalVersion())
+  }
+
+  function loadLatest() {
+    draft(goalText())
+    dirty(false)
+    conflict(false)
+  }
+
+  async function revert(event) {
+    await fetch('/api/revert', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: event.currentTarget.dataset.id }),
+    })
   }
 
   async function answer(event) {
@@ -165,12 +239,10 @@ export function DialogPage({ topics, queue, questions, entries, started }: Dialo
     const response = await fetch('/api/answer', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: current().id, text: draft() }),
+      body: JSON.stringify({ id: head().id, text: reply() }),
     })
     sending(false)
-    // 答えた後は待ち行列の先頭を表示する。断られたら書いた答えを残す
-    draft(response.ok ? '' : draft())
-    selected(response.ok ? '' : selected())
+    reply(response.ok ? '' : reply())
   }
 
   // ponytail: 開始の合図は表示を変えるだけ。分解役ができたら固定部へ送る

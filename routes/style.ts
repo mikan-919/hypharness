@@ -107,6 +107,24 @@ button:disabled { opacity: 0.5; cursor: default; }
 .entry.fail { border-color: var(--fail); }
 .entry.done { border-color: var(--done); }
 .entry.fact { border-color: var(--accent); }
+.goal-head { display: flex; align-items: baseline; gap: 12px; }
+.goal { display: grid; gap: 8px; margin-bottom: 16px; }
+.goal textarea {
+  font: 14px/1.7 ui-monospace, "Noto Sans Mono CJK JP", monospace;
+  min-height: 55vh; padding: 12px; resize: vertical;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg); color: var(--ink);
+}
+.goal button[type=submit] { justify-self: end; background: var(--accent); color: #fff; border-color: var(--accent); }
+.conflict { display: flex; gap: 8px; align-items: center; color: var(--wait); margin: 0; }
+.question h2 { font-size: 15px; color: var(--ink); letter-spacing: 0; margin: 0 0 8px; }
+.edit { border-left: 3px solid var(--line); padding: 4px 8px; margin-bottom: 8px; }
+.edit.user { border-color: var(--wait); }
+.edit.agent { border-color: var(--accent); }
+.edit p { margin: 2px 0; }
+.edit-head { display: flex; gap: 8px; align-items: center; }
+.edit-head button { margin-left: auto; padding: 2px 8px; font-size: 12px; }
+.diff { margin: 4px 0 0; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; color: var(--muted); max-height: 160px; overflow: auto; }
 @media (max-width: 900px) {
   .shell { grid-template-columns: 1fr; height: auto; }
 }

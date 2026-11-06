@@ -14,7 +14,10 @@ export const relay = createRelay(deepinfra(), Number(process.env.TASK_LIMIT_USD 
 const RELAY_SOCKET = join(homedir(), '.hyph', 'relay.sock')
 const REPO = process.env.TARGET_REPO ?? process.cwd()
 // 対話は対象のリポジトリごとに1つ保存する
-const store = createStore(join(homedir(), '.hyph', 'dialogs', `${REPO.replaceAll('/', '_')}.json`))
+const store = createStore(
+  join(homedir(), '.hyph', 'dialogs', `${REPO.replaceAll('/', '_')}.json`),
+  join(REPO, 'FINAL_GOAL.md'),
+)
 
 // 中継を開き、対話を始める。待受は起動ファイルと開発サーバーから呼ぶ（Vite の設定の読み込みでは開かない）
 export function boot() {
@@ -45,6 +48,19 @@ app.get('/api/dialog', (c) =>
     while (!stream.aborted) await stream.sleep(15_000)
   }),
 )
+
+// 利用者の本文の書き換え。読んだ版の後に書き換えがあれば 409 で最新の本文を返す（ADR 0018）
+app.post('/api/goal', async (c) => {
+  const { text, version } = await c.req.json<{ text: string; version: number }>()
+  const result = store.editGoal(text, version, 'user', '画面で書き換えた')
+  return c.json(result, result.ok ? 200 : 409)
+})
+
+app.post('/api/revert', async (c) => {
+  const { id } = await c.req.json<{ id: string }>()
+  const result = store.revert(id)
+  return c.json(result, result.ok ? 200 : 404)
+})
 
 app.post('/api/answer', async (c) => {
   const { id, text } = await c.req.json<{ id: string; text: string }>()

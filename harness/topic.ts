@@ -2,6 +2,7 @@
 import { readdir } from 'node:fs/promises'
 import { relative, resolve } from 'node:path'
 import type { AssistantMessage, Context, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
+import type { Edit } from '../shared/dialog.ts'
 import type { Store } from './store.ts'
 
 export type Call = (body: { topicId: string; taskId: string; context: Context }) => Promise<AssistantMessage>
@@ -17,14 +18,18 @@ export const relayCall =
     return last.message
   }
 
-const SYSTEM = `あなたは hypharness の論点エージェントです。利用者と対話して、利用者が作りたいもの（最終目的）を、課題に分けられるところまで具体的にします。
+const SYSTEM = `あなたは hypharness の論点エージェントです。利用者と一緒に FINAL_GOAL.md（最終目的の本文）を書き換えて、課題に分けられるところまで具体的にします。
 
-- 利用者への質問は ask ツールで1度に1問だけ出す。選択肢を2〜4個付け、推奨する1つを示し、推奨の理由を書く。
+- 本文は read_goal で読み、edit_goal で直接書き換える。承認は待たない。書き換えるときは、読んだ版の番号と、書き換えの理由を付ける。断られたら read_goal で読み直してから書き直す。
+- 利用者が本文を書き換えると、その差分が会話に届く。利用者の書き換えは意図として扱い、消さない。
+- 推奨できる案がある点は、利用者に聞かずに推奨の案で本文を書き換える。利用者は気に入らなければ本文を書き換えて直す。理由は edit_goal の reason に書く。
+- 利用者への質問は、推奨の案を決められない点（利用者の好みや事情でしか決まらない点）に限る。ask ツールで1度に1問だけ出す。
+- 質問の答えを受け取ったら、次の質問を出す前に、答えを edit_goal で本文に反映する。選択肢を2〜4個付け、推奨する1つを示し、推奨の理由を書く。
 - リポジトリを読めば答えが分かることは、list_files と read_file で調べ、利用者に聞かない。
 - 決まったことは record ツールで kind を done にして残す。根拠（利用者の答えか、ファイルの場所）を evidence に書く。調べて分かった事実は fact、捨てた案は fail で残す。
 - 設計上の判断が1つ決まるたびに、write_doc で docs/adr/NNNN-短い英語の名前.md に ADR を書く。番号は既存の ADR の続きにする。形式は「# NNNN 題名」「日付: YYYY-MM-DD」の後に「## 状況」「## 決定」「## 結果」の節を置く。前の決定を変えたときは、その ADR を書き直す。
 - 決めた用語は write_doc で docs/glossary.md に「- 用語: 定義」の形で書く。既存の内容を読んでから、全体を書き直す。
-- 最終目的が課題に分けられるところまで決まり、決定を ADR に書いたら ready を呼んで終える。ADR を1つも書いていないと ready は断られる。
+- 本文が課題に分けられるところまで具体的になり、決定を ADR に書いたら ready を呼んで終える。ADR を1つも書いていないと ready は断られる。
 - 日本語で書く。修飾表現を使わず、事実を書く。`
 
 const object = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required })
@@ -66,6 +71,15 @@ const TOOLS = [
     description: 'リポジトリのファイルを読む',
     parameters: object({ path: { type: 'string', description: 'リポジトリの根からの相対パス' } }, ['path']),
   },
+  { name: 'read_goal', description: 'FINAL_GOAL.md の本文と版の番号を読む', parameters: object({}, []) },
+  {
+    name: 'edit_goal',
+    description: 'FINAL_GOAL.md の全体を content で置き換える。読んだ版の番号を version に付ける。その後に別の書き換えがあれば断られる',
+    parameters: object(
+      { version: { type: 'number' }, content: { type: 'string' }, reason: { type: 'string', description: '書き換えの理由' } },
+      ['version', 'content', 'reason'],
+    ),
+  },
   {
     name: 'write_doc',
     description: 'ADR か用語集を書く。書けるのは docs/adr/*.md と docs/glossary.md だけ。ファイル全体を content で置き換える',
@@ -93,8 +107,23 @@ const WRITABLE = /^docs\/(adr\/[\w.-]+\.md|glossary\.md)$/
 async function run(store: Store, topicId: string, repo: string, call: ToolCall) {
   const a = call.arguments as Record<string, any>
   if (call.name === 'ask') {
-    const question = { topicId, text: a.text, options: a.options ?? [], recommendation: a.recommendation, key: call.id }
+    const options = Array.isArray(a.options) ? a.options : []
+    if (!a.text || options.some((o) => !o?.label || !o?.description)) {
+      throw new Error('ask には text と、label・description・recommended を持つ options が要ります')
+    }
+    const question = { topicId, text: a.text, options, recommendation: a.recommendation, key: call.id }
     return `利用者の答え: ${await store.ask(question)}`
+  }
+  if (call.name === 'read_goal') {
+    const { text, version } = store.snapshot().goal
+    store.setSeen(topicId, version)
+    return `版 ${version}\n${text}`
+  }
+  if (call.name === 'edit_goal') {
+    const result = store.editGoal(String(a.content ?? ''), Number(a.version), topicId, String(a.reason ?? ''))
+    if (!result.ok) throw new Error(`版 ${a.version} の後に書き換えがありました。read_goal で版 ${result.version} を読み直してください`)
+    store.setSeen(topicId, result.version)
+    return `書き換えた。今の版は ${result.version}`
   }
   if (call.name === 'write_doc') {
     const full = inside(repo, a.path)
@@ -117,6 +146,15 @@ async function run(store: Store, topicId: string, repo: string, call: ToolCall) 
   throw new Error(`未知のツールです: ${call.name}`)
 }
 
+// 他の書き手（利用者か別の論点）の書き換えを、差分の文章にしてエージェントに渡す
+const describe = (edits: Edit[]) =>
+  edits
+    .map((e) => {
+      const lines = e.diff.filter((l) => l.op !== ' ').map((l) => `${l.op} ${l.line}`)
+      return `FINAL_GOAL.md が版 ${e.version} に書き換えられた（${e.author === 'user' ? '利用者' : e.author}、理由: ${e.reason}）\n${lines.join('\n')}`
+    })
+    .join('\n\n')
+
 // ADR を書かずに ready を繰り返すモデルが、費用を使い続けないための上限
 const MAX_REFUSED = 3
 
@@ -127,9 +165,9 @@ const wroteAdr = (messages: Message[]) =>
   )
 
 // 保存した会話があれば続きから始める。最後の応答のツールの呼び出しのうち、結果のないものから処理する
-export async function runTopic(store: Store, call: Call, topicId: string, repo: string, goal: string) {
+export async function runTopic(store: Store, call: Call, topicId: string, repo: string) {
   const messages: Message[] = store.transcript(topicId) ?? [
-    { role: 'user', content: `最終目的の出発点: ${goal}`, timestamp: Date.now() },
+    { role: 'user', content: 'FINAL_GOAL.md を利用者と一緒に書き換えて、課題に分けられるところまで具体的にしてください。', timestamp: Date.now() },
   ]
   const save = () => store.saveTranscript(topicId, messages)
   let refused = 0
@@ -137,6 +175,11 @@ export async function runTopic(store: Store, call: Call, topicId: string, repo: 
   try {
     while (true) {
       if (messages.at(-1)?.role !== 'assistant') {
+        const edits = store.editsSince(store.seen(topicId), topicId)
+        if (edits.length > 0) {
+          messages.push({ role: 'user', content: describe(edits), timestamp: Date.now() })
+          store.setSeen(topicId, store.snapshot().goal.version)
+        }
         // ponytail: 対話は1つの課題として費用の上限を受ける。論点が増えたら論点ごとに分ける
         messages.push(await call({ topicId, taskId: 'dialog', context: { systemPrompt: SYSTEM, messages, tools: TOOLS } }))
         save()
