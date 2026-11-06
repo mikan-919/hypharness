@@ -37,6 +37,8 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const reply = signal('')
   const picked = signal('')
   const sending = signal(false)
+  // 保存の成功の表示。保存を始めたら空にし、200 の応答で版を入れる
+  const saved = signal('')
   const isStarted = signal(started)
   const taskList = signal(tasks)
   const activityList = signal(activity)
@@ -137,6 +139,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                 保存
               </button>
             )}
+            {saved() && <p class="hint">{saved()}</p>}
           </form>
           {head() && (
             <article class="question head">
@@ -271,7 +274,11 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     // Monaco はクライアントでだけ読む。SSR の描画では monaco-editor を import しない
     const element = document.querySelector('.goal .editor') as HTMLElement | null
     if (element) {
-      void mountMonaco(element, draft(), (text) => draft(text)).then(
+      void mountMonaco(element, draft(), (text) => {
+        draft(text)
+        // 本文が変わったら、保存の成功の表示を消す
+        saved('')
+      }).then(
         (created) => {
           editor(created)
           // 読み込みの間に届いた本文を映す
@@ -324,6 +331,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
 
   async function send() {
     sending(true)
+    saved('')
     const response = await fetch('/api/goal', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -337,6 +345,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
       savedText(body.text)
       savedVersion(body.version)
     }
+    if (response.ok) saved(`保存した（版 ${body.version}）`)
     conflict(response.status === 409)
     failure(response.ok || response.status === 409 ? '' : `保存できませんでした（${response.status}）`)
   }
