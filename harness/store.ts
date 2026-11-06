@@ -96,15 +96,18 @@ export function createStore(file?: string, goalFile?: string) {
       }
       return new Promise<string>((resolve) => waiting.set(id, resolve))
     },
+    // 答えは、待つエージェントがいなくても保存する。止まっていたエージェントは、続きから進めるときにこの答えを受け取る。
+    // 戻り値の waiting は、答えを待つエージェントがいたか
     answer(id: string, text: string) {
-      const resolve = waiting.get(id)
-      if (!resolve || !text.trim()) return false
-      waiting.delete(id)
+      const question = dialog.questions.find((q) => q.id === id)
+      if (!question || question.answer || !text.trim()) return { ok: false, waiting: false }
       dialog.questions = dialog.questions.map((q) => (q.id === id ? { ...q, answer: text } : q))
       dialog.queue = dialog.queue.filter((q) => q !== id)
       changed()
-      resolve(text)
-      return true
+      const resolve = waiting.get(id)
+      waiting.delete(id)
+      resolve?.(text)
+      return { ok: true, waiting: Boolean(resolve) }
     },
     // 答えを待つ者のいない質問を待ち行列から外す（keep は待っている質問の key）
     dropOrphans(keep: Set<string>) {

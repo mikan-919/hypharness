@@ -15,7 +15,8 @@ try {
   process.loadEnvFile('.env')
 } catch {}
 
-const RELAY_SOCKET = join(homedir(), '.hyph', 'relay.sock')
+// プロセスごとに分け、別に起動したサーバーとソケットを取り合わない
+const RELAY_SOCKET = join(homedir(), '.hyph', `relay-${process.pid}.sock`)
 const REPO = process.env.TARGET_REPO ?? process.cwd()
 
 // 開発サーバーは server/app.ts が変わるたびに同じプロセスでこのファイルを読み直す。
@@ -28,7 +29,8 @@ const shared = ((globalThis as any).__hypharness ??= {
     join(REPO, 'FINAL_GOAL.md'),
   ),
   booted: false,
-}) as { relay: ReturnType<typeof createRelay>; store: ReturnType<typeof createStore>; booted: boolean }
+  running: false,
+}) as { relay: ReturnType<typeof createRelay>; store: ReturnType<typeof createStore>; booted: boolean; running: boolean }
 export const relay = shared.relay
 const store = shared.store
 
@@ -40,8 +42,17 @@ export function boot() {
     unlinkSync(RELAY_SOCKET)
   } catch {}
   relay.listen(RELAY_SOCKET)
-  void startDialog(store, relayCall(RELAY_SOCKET), REPO)
+  dialog()
   return RELAY_SOCKET
+}
+
+// 論点エージェントを動かす。止まっていたら、保存した対話の続きから動かし直せる
+function dialog() {
+  if (shared.running) return
+  shared.running = true
+  void startDialog(store, relayCall(RELAY_SOCKET), REPO).finally(() => {
+    shared.running = false
+  })
 }
 
 export const app = new Hono()
@@ -79,7 +90,11 @@ app.post('/api/revert', async (c) => {
 
 app.post('/api/answer', async (c) => {
   const { id, text } = await c.req.json<{ id: string; text: string }>()
-  return store.answer(id, text) ? c.json({ ok: true }) : c.json({ error: '答えを受け付けない質問です' }, 409)
+  const result = store.answer(id, text)
+  if (!result.ok) return c.json({ error: text.trim() ? '答えを受け付けない質問です' : '答えが空です' }, 409)
+  // 答えを待つエージェントがいなければ、保存した答えから続きを始める
+  if (!result.waiting) dialog()
+  return c.json({ ok: true })
 })
 
 app.route(

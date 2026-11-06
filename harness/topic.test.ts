@@ -42,7 +42,7 @@ test('質問に答えを受け取り、ADR を書いて ready で終える', asy
   await Bun.sleep(0)
   expect(store.snapshot().queue).toEqual(['q1'])
   expect(store.snapshot().topics[0].state).toBe('asking')
-  expect(store.answer('q1', 'ファイル')).toBe(true)
+  expect(store.answer('q1', 'ファイル')).toEqual({ ok: true, waiting: true })
   await done
   expect(store.snapshot().topics[0]).toMatchObject({ state: 'ready', ready: true })
   expect(store.snapshot().entries.map((e) => e.text)).toEqual(['ファイルに残す'])
@@ -83,7 +83,7 @@ test('再起動の後、答え待ちの質問を出し直さずに続きから�
   const done = runTopic(second, call, 'goal', mkdtempSync(join(tmpdir(), 'hyph-')))
   await Bun.sleep(0)
   expect(second.snapshot().questions.length).toBe(1)
-  expect(second.answer('q1', 'ファイル')).toBe(true)
+  expect(second.answer('q1', 'ファイル')).toEqual({ ok: true, waiting: true })
   await done
   expect(second.snapshot().topics[0].ready).toBe(true)
   expect(JSON.stringify(seen[0])).toContain('利用者の答え: ファイル')
@@ -120,4 +120,21 @@ test('利用者の書き換えを差分でエージェントに渡し、エー�
   expect(JSON.stringify(seen[0])).not.toContain('- ')
   expect(await Bun.file(goalFile).text()).toBe('対話を見返したい\n保存先: ファイル')
   expect(store.snapshot().edits.map((e) => e.author)).toEqual(['user', 'goal'])
+})
+
+test('待つエージェントがいなくても答えを保存し、続きから進めるときに渡す', async () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'hyph-')), 'dialog.json')
+  const first = setup(file)
+  const ask = reply('ask', { text: 'どこに残しますか', options: [], recommendation: '理由' })
+  void runTopic(first, script(ask).call, 'goal', tmpdir())
+  await Bun.sleep(0)
+
+  const second = setup(file)
+  expect(second.answer('q1', '')).toEqual({ ok: false, waiting: false })
+  expect(second.answer('q1', 'ファイル')).toEqual({ ok: true, waiting: false })
+  expect(second.snapshot().queue).toEqual([])
+  const { call, seen } = script(adr, reply('ready', {}))
+  await runTopic(second, call, 'goal', mkdtempSync(join(tmpdir(), 'hyph-')))
+  expect(second.snapshot().topics[0].ready).toBe(true)
+  expect(JSON.stringify(seen[0])).toContain('利用者の答え: ファイル')
 })
