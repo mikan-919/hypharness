@@ -3,7 +3,7 @@
 import type { Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { AgentStore, DecomposeResult, Job, SolveResult } from '../shared/contract.ts'
 import type { Dialog } from '../shared/dialog.ts'
-import { answerPending, inside, listFiles, object, READ_TOOLS, readFile, runAgent } from './agent.ts'
+import { answerPending, inside, listFiles, object, READ_TOOLS, readFile, recall, RECALL_TOOL, runAgent } from './agent.ts'
 import { sandboxed } from './sandbox.ts'
 import type { Call } from './topic.ts'
 
@@ -44,6 +44,7 @@ function experience(dialog: Dialog) {
 
 const DECOMPOSE_TOOLS = [
   ...READ_TOOLS,
+  RECALL_TOOL,
   {
     name: 'submit_task',
     description: '次の課題を出す。title はコミットの件名になる',
@@ -61,6 +62,7 @@ const DECOMPOSE_TOOLS = [
 
 const SOLVE_TOOLS = [
   ...READ_TOOLS,
+  RECALL_TOOL,
   {
     name: 'write_file',
     description: '作業ツリーのファイルを content で置き換える。ないファイルは作る',
@@ -84,6 +86,11 @@ const SOLVE_TOOLS = [
 ] as Tool[]
 
 const arg = (call: ToolCall, name: string) => String((call.arguments as Record<string, unknown>)[name] ?? '')
+
+const maxResults = (call: ToolCall) => {
+  const n = Number((call.arguments as Record<string, unknown>).max_results)
+  return Number.isFinite(n) && n > 0 ? n : undefined
+}
 
 // 分解役に渡すユーザーメッセージ。最終目的の本文、終えた課題、保留にした課題とその理由、保留の割合を入れる（ADR 0010）
 function decomposeMessage(dialog: Dialog) {
@@ -110,7 +117,12 @@ export async function decompose(store: AgentStore, call: Call, job: Extract<Job,
     system: DECOMPOSE,
     tools: DECOMPOSE_TOOLS,
     messages: [{ role: 'user', content: decomposeMessage(await store.snapshot()), timestamp: Date.now() }],
-    run: async (c) => (c.name === 'list_files' ? listFiles(tree, arg(c, 'path')) : readFile(tree, arg(c, 'path'))),
+    run: async (c) => {
+      if (c.name === 'list_files') return listFiles(tree, arg(c, 'path'))
+      if (c.name === 'read_file') return readFile(tree, arg(c, 'path'))
+      if (c.name === 'recall') return recall('decompose', arg(c, 'query'), maxResults(c))
+      throw new Error(`未知のツールです: ${c.name}`)
+    },
     stop: (c) =>
       c.name === 'submit_task'
         ? { statement: `${arg(c, 'title') || arg(c, 'statement').split('\n')[0]}\n\n${arg(c, 'statement')}` }
@@ -137,6 +149,7 @@ export async function solve(store: AgentStore, call: Call, job: Extract<Job, { r
     run: async (c) => {
       if (c.name === 'list_files') return listFiles(tree, arg(c, 'path'))
       if (c.name === 'read_file') return readFile(tree, arg(c, 'path'))
+      if (c.name === 'recall') return recall('solve', arg(c, 'query'), maxResults(c))
       if (c.name === 'write_file') {
         await Bun.write(inside(tree, arg(c, 'path')), arg(c, 'content'))
         return `書いた: ${arg(c, 'path')}`

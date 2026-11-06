@@ -55,6 +55,33 @@ export const READ_TOOLS = [
   },
 ] as Tool[]
 
+// 過去の会話を語で検索するツール。呼んだエージェントの id の SQLite を検索する
+export const RECALL_TOOL = {
+  name: 'recall',
+  description: 'このエージェントの過去のメッセージと要約を語で検索する。一致したメッセージの全文と要約を返す',
+  parameters: object(
+    {
+      query: { type: 'string', description: '検索する語' },
+      max_results: { type: 'number', description: '返す件数の上限（既定 5）' },
+    },
+    ['query'],
+  ),
+} as Tool
+
+// recall の結果を文にする。一致が無ければその旨を返す
+export function recall(agent: string, query: unknown, maxResults?: unknown) {
+  const n = Number(maxResults)
+  const found = ctx(agent).search(String(query ?? ''), Number.isFinite(n) && n > 0 ? n : undefined)
+  if (found.messages.length === 0 && found.summaries.length === 0) return '一致するメッセージや要約はありません。'
+  const lines: string[] = []
+  for (const message of found.messages) {
+    const inSummaries = message.summaries.length > 0 ? `（要約 ${message.summaries.join(', ')} に含まれる）` : ''
+    lines.push(`メッセージ ${message.id}${inSummaries}:\n${message.text}`)
+  }
+  for (const summary of found.summaries) lines.push(`要約 ${summary.id}:\n${summary.text}`)
+  return lines.join('\n\n')
+}
+
 // 最後の応答のツールの呼び出しのうち、結果のないものに text を結果として返す。API は結果のない呼び出しの後に会話を続けさせない
 export function answerPending(messages: Message[], text: string) {
   const last = messages.findLast((m) => m.role === 'assistant') as AssistantMessage | undefined
