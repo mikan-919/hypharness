@@ -10,5 +10,6 @@
     "lib": ["ESNext"],
     "types": ["bun"]
   },
-  "include": [".", "../agent", "../src/queue.ts", "../src/**/*.test.ts"]
+  "include": [".", "../agent", "../src/queue.ts", "../src/**/*.test.ts"],
+  "exclude": ["dashboard/app.tsx"]
 }
