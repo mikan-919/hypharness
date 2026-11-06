@@ -38,7 +38,7 @@ test('課題を解いて検査が通ったら統合ブランチに積み、最�
   const { dir, log } = repo()
   const store = createStore()
   const call = script({
-    decompose: [reply('submit_task', { statement: 'out.txt に ok と書く' }), reply('finish', { reason: '満たした' })],
+    decompose: [reply('submit_task', { statement: 'out.txt に ok と書く。理由は検査のため\n\n## 受け入れの条件\n- test.sh が通る' }), reply('finish', { reason: '満たした' })],
     solve: [reply('write_file', { path: 'out.txt', content: 'ok' }), reply('done', { summary: '書いた' })],
   })
   await runPipeline(store, call, dir, options())

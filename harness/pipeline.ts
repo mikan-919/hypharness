@@ -179,7 +179,9 @@ async function solve(store: Store, call: Call, tree: string, taskId: string, sta
         ? await sandboxed(tree, check).then(({ code, output }) => (code === 0 ? '' : `検査が終了コード ${code} で落ちました\n${output}`))
         : ''
     if (!failure) {
-      git(tree, '-c', 'user.name=hypharness', '-c', 'user.email=hypharness@localhost', 'commit', '-q', '-m', `${taskId}: ${statement.split('\n')[0]}`)
+      // 件名は課題文の最初の文（72 文字まで）、本文に課題文の全体を置く
+      const subject = `${taskId}: ${statement.split(/\n|。/)[0].slice(0, 72)}`
+      git(tree, '-c', 'user.name=hypharness', '-c', 'user.email=hypharness@localhost', 'commit', '-q', '-m', subject, '-m', statement)
       store.act('solve', 'check', `${taskId} の検査が通った`)
       return
     }
