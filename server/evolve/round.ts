@@ -21,8 +21,8 @@ export type Proposal = {
 export type RoundOptions = {
   round: number
   dialog: Dialog
-  propose: (input: ProposeInput) => Proposal
-  check: (candidate: Candidate) => 0 | 1
+  propose: (input: ProposeInput) => Proposal | Promise<Proposal>
+  check: (candidate: Candidate) => 0 | 1 | Promise<0 | 1>
   spent: () => number
   limitUsd: number
   root?: string
@@ -81,7 +81,7 @@ export function pickUnstuck(archive: Candidate[], round: number): Module[] {
 }
 
 // 1周を順に進める。費用が上限を超えたら、残りの検証と採用をせずに止める
-export function runRound(options: RoundOptions): RoundResult {
+export async function runRound(options: RoundOptions): Promise<RoundResult> {
   const { round, dialog, propose, check, spent, limitUsd, root } = options
   const weak = weaknesses(dialog)
   // 前の周までの候補。この周で採用した候補を後の提案に混ぜないよう、始めに1回だけ取る
@@ -95,7 +95,7 @@ export function runRound(options: RoundOptions): RoundResult {
 
   for (const module of targets) {
     const id = `${round}-${MODULES.indexOf(module) + 1}`
-    const proposal = propose({ module, weaknesses: weak, archive, round, start })
+    const proposal = await propose({ module, weaknesses: weak, archive, round, start })
     const candidate: Candidate = {
       id,
       round,
@@ -110,7 +110,7 @@ export function runRound(options: RoundOptions): RoundResult {
       if (spent() > limitUsd) {
         stopped = true
       } else {
-        candidate.score = check(candidate)
+        candidate.score = await check(candidate)
         writeCandidate(candidate, root)
         if (candidate.score === 1) archiveCandidate(candidate.id, root)
       }

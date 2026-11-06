@@ -74,9 +74,9 @@ const putRound = (root: string, round: number, modules: readonly Module[], score
 }
 
 // 1周を回して、propose に渡ったモジュールを順に返す
-const modulesOfRound = (round: number, root: string): Module[] => {
+const modulesOfRound = async (round: number, root: string): Promise<Module[]> => {
   const seen: Module[] = []
-  runRound({
+  await runRound({
     round,
     dialog: dialog(),
     propose: (input) => {
@@ -92,9 +92,9 @@ const modulesOfRound = (round: number, root: string): Module[] => {
 }
 
 // 1周だけ回して、propose に渡った start を返す
-const startOfRound = (round: number, root: string): Candidate | undefined => {
+const startOfRound = async (round: number, root: string): Promise<Candidate | undefined> => {
   let start: Candidate | undefined
-  runRound({
+  await runRound({
     round,
     dialog: dialog(),
     propose: (input) => {
@@ -118,7 +118,7 @@ test('weaknesses は失敗の項目と保留の理由を、重複を除いて en
   expect(weaknesses(dialog())).toEqual([])
 })
 
-test('propose は5つのモジュールについて1回ずつ呼ばれ、archive に前の周の候補が渡る', () => {
+test('propose は5つのモジュールについて1回ずつ呼ばれ、archive に前の周の候補が渡る', async () => {
   evo()
   const root = process.env.HYPH_EVO!
   const seen: ProposeInput[] = []
@@ -127,7 +127,7 @@ test('propose は5つのモジュールについて1回ずつ呼ばれ、archive
   writeCandidate(before, root)
   archiveCandidate(before.id, root)
 
-  const result = runRound({
+  const result = await runRound({
     round: 2,
     dialog: dialog({ entries: [entry('e1', 'fail', 'A')] }),
     propose: (input) => {
@@ -153,38 +153,39 @@ test('propose は5つのモジュールについて1回ずつ呼ばれ、archive
   expect(listCandidates(root).map((c) => c.id)).toEqual(MODULES.map((_, i) => `2-${i + 1}`))
 })
 
-test('archive が空のとき、propose に渡る start は undefined', () => {
+test('archive が空のとき、propose に渡る start は undefined', async () => {
   const root = evo()
-  expect(startOfRound(1, root)).toBeUndefined()
+  expect(await startOfRound(1, root)).toBeUndefined()
 })
 
-test('archive に候補が2件以上あるとき、周を1つ進めると start の id が変わる', () => {
+test('archive に候補が2件以上あるとき、周を1つ進めると start の id が変わる', async () => {
   const root = evo()
   putArchive(root, '1-1')
   putArchive(root, '1-2')
-  const first = startOfRound(1, root)
-  const second = startOfRound(2, root)
+  const first = await startOfRound(1, root)
+  const second = await startOfRound(2, root)
   expect(first?.id).toBeDefined()
   expect(second?.id).toBeDefined()
   expect([first?.id, second?.id].sort()).toEqual(['1-1', '1-2'])
   expect(first?.id).not.toBe(second?.id)
 })
 
-test('archive の件数ぶん周を進めると、選ぶ候補が一巡して最初に戻る', () => {
+test('archive の件数ぶん周を進めると、選ぶ候補が一巡して最初に戻る', async () => {
   const root = evo()
   putArchive(root, '1-1')
   putArchive(root, '1-2')
   putArchive(root, '1-3')
-  const ids = [1, 2, 3, 4].map((round) => startOfRound(round, root)?.id)
+  const ids: (string | undefined)[] = []
+  for (const round of [1, 2, 3, 4]) ids.push((await startOfRound(round, root))?.id)
   expect(ids).toEqual(['1-2', '1-3', '1-1', '1-2'])
   expect(new Set(ids.slice(0, 3)).size).toBe(3)
   expect(ids[3]).toBe(ids[0])
 })
 
-test('check が 1 を返した候補だけ archive に出て、0 の候補は candidates に残る', () => {
+test('check が 1 を返した候補だけ archive に出て、0 の候補は candidates に残る', async () => {
   evo()
   const root = process.env.HYPH_EVO!
-  const result = runRound({
+  const result = await runRound({
     round: 1,
     dialog: dialog(),
     propose: (input) => ({ changes: [`${input.module} の変更`], note: '' }),
@@ -202,12 +203,12 @@ test('check が 1 を返した候補だけ archive に出て、0 の候補は ca
   expect(result.candidates.map((c) => c.changes)).toEqual(MODULES.map((m) => [`${m} の変更`]))
 })
 
-test('spent が limitUsd を超えたら、その後の check と採用は呼ばれず stopped が true になる', () => {
+test('spent が limitUsd を超えたら、その後の check と採用は呼ばれず stopped が true になる', async () => {
   evo()
   const root = process.env.HYPH_EVO!
   const checked: string[] = []
   let calls = 0
-  const result = runRound({
+  const result = await runRound({
     round: 3,
     dialog: dialog(),
     propose: (input) => ({ changes: [`${input.module} の変更`], note: '' }),
@@ -229,10 +230,10 @@ test('spent が limitUsd を超えたら、その後の check と採用は呼ば
   expect(listCandidates(root).map((c) => c.id)).toEqual(['3-2', '3-3', '3-4', '3-5'])
 })
 
-test('上限に達していなければ stopped は false で全件検証する', () => {
+test('上限に達していなければ stopped は false で全件検証する', async () => {
   evo()
   const root = process.env.HYPH_EVO!
-  const result = runRound({
+  const result = await runRound({
     round: 1,
     dialog: dialog(),
     propose: () => ({ changes: ['a'], note: 'n' }),
@@ -246,11 +247,11 @@ test('上限に達していなければ stopped は false で全件検証する'
   expect(listCandidates(root)).toEqual([])
 })
 
-test('直前の3周がすべて改善なしで未探索のモジュールがあるとき、未探索の1つだけを対象にする', () => {
+test('直前の3周がすべて改善なしで未探索のモジュールがあるとき、未探索の1つだけを対象にする', async () => {
   const root = evo()
   for (const round of [1, 2, 3]) putRound(root, round, MODULES, 0)
   // archive が空なので5つすべてが未探索。周の番号 4 から巡回して MODULES[4]
-  const result = runRound({
+  const result = await runRound({
     round: 4,
     dialog: dialog(),
     propose: (input) => ({ changes: [`${input.module} の変更`], note: '' }),
@@ -264,28 +265,28 @@ test('直前の3周がすべて改善なしで未探索のモジュールがあ�
   expect(listCandidates(root).filter((c) => c.round === 4).map((c) => c.id)).toEqual([`4-${MODULES.length}`])
 })
 
-test('直前の3周のどれかに改善があったときは5つすべてを対象にする', () => {
+test('直前の3周のどれかに改善があったときは5つすべてを対象にする', async () => {
   const root = evo()
   putRound(root, 1, MODULES, 0)
   putRound(root, 2, MODULES, 1)
   putRound(root, 3, MODULES, 0)
-  expect(modulesOfRound(4, root)).toEqual([...MODULES])
+  expect(await modulesOfRound(4, root)).toEqual([...MODULES])
 })
 
-test('未探索のモジュールが無いときは5つすべてを対象にする', () => {
+test('未探索のモジュールが無いときは5つすべてを対象にする', async () => {
   const root = evo()
   putRound(root, 1, MODULES, 1)
   for (const round of [2, 3, 4]) putRound(root, round, MODULES, 0)
-  expect(modulesOfRound(5, root)).toEqual([...MODULES])
+  expect(await modulesOfRound(5, root)).toEqual([...MODULES])
 })
 
-test('未探索が複数あるとき、周の番号を1つ進めると選ばれるモジュールが変わる', () => {
+test('未探索が複数あるとき、周の番号を1つ進めると選ばれるモジュールが変わる', async () => {
   const root = evo()
   // 周 9 で agent-loop と tool-use を探索済みにして、未探索を3つにする
   putRound(root, 9, [MODULES[0], MODULES[1]], 1)
   for (const round of [1, 2, 3, 4]) putRound(root, round, MODULES, 0)
-  const first = modulesOfRound(4, root)
-  const second = modulesOfRound(5, root)
+  const first = await modulesOfRound(4, root)
+  const second = await modulesOfRound(5, root)
   expect(first).toEqual([MODULES[2 + (4 % 3)]])
   expect(second).toEqual([MODULES[2 + (5 % 3)]])
   expect(first).not.toEqual(second)

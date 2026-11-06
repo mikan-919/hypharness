@@ -6,6 +6,7 @@
     "dev": "bun --bun vp dev",
     "build": "vp build",
     "start": "bun server/start.ts",
+    "evolve": "bun server/evolve/run.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
