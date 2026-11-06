@@ -3,6 +3,7 @@ import { readdir } from 'node:fs/promises'
 import { relative, resolve } from 'node:path'
 import type { AssistantMessage, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { AgentStore } from '../shared/contract.ts'
+import { ctx } from './ctx.ts'
 import type { Call } from './topic.ts'
 
 const short = (text: string, max = 160) => (text.length > max ? `${text.slice(0, max)}…` : text)
@@ -71,6 +72,32 @@ export function answerPending(messages: Message[], text: string) {
   }
 }
 
+// 会話を ctx に追記する関数を返す。追記した位置を覚えておき、同じメッセージは2回追記しない。
+// 続きから始める会話は、既に保存されている先頭の分を飛ばす。追記の失敗では例外を出さない
+function recorder(agent: string) {
+  let store: ReturnType<typeof ctx> | undefined
+  let opened = false
+  let saved = 0
+  return (messages: Message[]) => {
+    if (!opened) {
+      opened = true
+      try {
+        store = ctx(agent)
+        const stored = store.messages().map((m) => JSON.stringify(m))
+        while (saved < stored.length && saved < messages.length && JSON.stringify(messages[saved]) === stored[saved]) saved++
+      } catch {
+        store = undefined
+      }
+    }
+    if (!store) return
+    try {
+      for (; saved < messages.length; saved++) store.append(messages[saved])
+    } catch {
+      // 追記の失敗でエージェントの実行を止めない
+    }
+  }
+}
+
 // 1回の実行のモデルの呼び出しの上限。費用は課題ごとの上限（ADR 0011）で止めるので、これは暴走の止め役に過ぎない。
 // 60 回では、irisout の制約を調べながら Monaco を入れる課題（t13）が終わらなかった
 const MAX_TURNS = 200
@@ -88,13 +115,17 @@ export async function runAgent<T>(options: {
   stop: (call: ToolCall) => T | undefined
 }): Promise<T> {
   const { store, call, agent, taskId, system, tools, messages, run, stop } = options
+  const save = recorder(agent)
+  save(messages)
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     const reply = await call({ topicId: agent, taskId, context: { systemPrompt: system, messages, tools } })
     messages.push(reply)
+    save(messages)
     noteReply(store, agent, reply)
     const calls = reply.content.filter((c): c is ToolCall => c.type === 'toolCall')
     if (calls.length === 0) {
       messages.push({ role: 'user', content: 'ツールを呼んで進めてください。', timestamp: Date.now() })
+      save(messages)
       continue
     }
     for (const toolCall of calls) {
@@ -113,6 +144,7 @@ export async function runAgent<T>(options: {
         isError: outcome.isError,
         timestamp: Date.now(),
       })
+      save(messages)
     }
   }
   throw new Error(`${agent} がモデルを ${MAX_TURNS} 回呼んでも終わりませんでした`)
