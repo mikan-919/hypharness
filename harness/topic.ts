@@ -3,15 +3,13 @@ import { relative } from 'node:path'
 import type { AssistantMessage, Context, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { Edit } from '../shared/dialog.ts'
 import { inside, listFiles, noteReply, object, readFile } from './agent.ts'
-import type { Store } from './store.ts'
+import { type AgentStore, CostLimitError } from '../shared/contract.ts'
 
 export type Call = (body: { topicId: string; taskId: string; context: Context }) => Promise<AssistantMessage>
 
 // モデルの利用料以外の費用を中継へ知らせる
 export type Charge = (body: { topicId: string; taskId: string; costUsd: number }) => Promise<void>
 
-// 中継が費用の上限に達してモデルの呼び出しを断った（ADR 0011、0012）
-export class CostLimitError extends Error {}
 
 // 中継の Unix ソケットを呼び、流れてくるイベントの最後（done か error）の応答を返す。
 // onText には、書いている途中の文（考えている途中の文を含む）を、届くたびにそれまでの全体で渡す
@@ -187,7 +185,7 @@ export async function webSearch(objective: string, maxResults?: number) {
 // 論点エージェントが書けるのは ADR と用語集だけ（読むだけの他のファイルは変えさせない）
 const WRITABLE = /^docs\/(adr\/[\w.-]+\.md|glossary\.md)$/
 
-async function run(store: Store, topicId: string, repo: string, call: ToolCall, charge?: Charge) {
+async function run(store: AgentStore, topicId: string, repo: string, call: ToolCall, charge?: Charge) {
   const a = call.arguments as Record<string, any>
   if (call.name === 'ask') {
     const options = Array.isArray(a.options) ? a.options : []
@@ -198,12 +196,12 @@ async function run(store: Store, topicId: string, repo: string, call: ToolCall, 
     return `利用者の答え: ${await store.ask(question)}`
   }
   if (call.name === 'read_goal') {
-    const { text, version } = store.snapshot().goal
+    const { text, version } = (await store.snapshot()).goal
     store.setSeen(topicId, version)
     return `版 ${version}\n${text}`
   }
   if (call.name === 'edit_goal') {
-    const result = store.editGoal(String(a.content ?? ''), Number(a.version), topicId, String(a.reason ?? ''))
+    const result = await store.editGoal(String(a.content ?? ''), Number(a.version), topicId, String(a.reason ?? ''))
     if (!result.ok) throw new Error(`版 ${a.version} の後に書き換えがありました。read_goal で版 ${result.version} を読み直してください`)
     store.setSeen(topicId, result.version)
     return `書き換えた。今の版は ${result.version}`
@@ -255,8 +253,8 @@ const wroteAdr = (messages: Message[]) =>
   )
 
 // 保存した会話があれば続きから始める。最後の応答のツールの呼び出しのうち、結果のないものから処理する
-export async function runTopic(store: Store, call: Call, topicId: string, repo: string, charge?: Charge) {
-  const messages: Message[] = store.transcript(topicId) ?? [
+export async function runTopic(store: AgentStore, call: Call, topicId: string, repo: string, charge?: Charge) {
+  const messages: Message[] = (await store.transcript(topicId)) ?? [
     { role: 'user', content: 'FINAL_GOAL.md を利用者と一緒に書き換えて、課題に分けられるところまで具体的にしてください。', timestamp: Date.now() },
   ]
   const save = () => store.saveTranscript(topicId, messages)
@@ -265,10 +263,10 @@ export async function runTopic(store: Store, call: Call, topicId: string, repo: 
   try {
     while (true) {
       if (messages.at(-1)?.role !== 'assistant') {
-        const edits = store.editsSince(store.seen(topicId), topicId)
+        const edits = await store.editsSince(await store.seen(topicId), topicId)
         if (edits.length > 0) {
           messages.push({ role: 'user', content: describe(edits), timestamp: Date.now() })
-          store.setSeen(topicId, store.snapshot().goal.version)
+          store.setSeen(topicId, (await store.snapshot()).goal.version)
         }
         // ponytail: 対話は1つの課題として費用の上限を受ける。論点が増えたら論点ごとに分ける
         const reply = await call({ topicId, taskId: 'dialog', context: { systemPrompt: SYSTEM, messages, tools: TOOLS() } })

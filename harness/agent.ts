@@ -2,13 +2,13 @@
 import { readdir } from 'node:fs/promises'
 import { relative, resolve } from 'node:path'
 import type { AssistantMessage, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
-import type { Store } from './store.ts'
+import type { AgentStore } from '../shared/contract.ts'
 import type { Call } from './topic.ts'
 
 const short = (text: string, max = 160) => (text.length > max ? `${text.slice(0, max)}…` : text)
 
 // 応答の文とツールの呼び出しを、動きとして残す
-export function noteReply(store: Store, agent: string, reply: AssistantMessage) {
+export function noteReply(store: AgentStore, agent: string, reply: AssistantMessage) {
   for (const c of reply.content) {
     if (c.type === 'text' && c.text.trim()) store.act(agent, 'text', short(c.text.trim(), 400))
     if (c.type === 'toolCall') store.act(agent, 'tool', `${c.name} ${short(JSON.stringify(c.arguments))}`)
@@ -76,7 +76,7 @@ const MAX_TURNS = 60
 
 // stop が値を返したツールの呼び出しで、ループを終えてその値を返す
 export async function runAgent<T>(options: {
-  store: Store
+  store: AgentStore
   call: Call
   agent: string
   taskId: string

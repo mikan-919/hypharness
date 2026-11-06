@@ -4,12 +4,13 @@ import { join } from 'node:path'
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import { createFileRouter } from 'irisout/hono'
-import { startDialog } from '../harness/index.ts'
-import { holdUnfinished, runPipeline } from '../harness/pipeline.ts'
-import { createStore } from '../harness/store.ts'
-import { relayCall, relayCharge } from '../harness/topic.ts'
+import { startDialog } from './dialog.ts'
+import { serveHost } from './host.ts'
 import { deepinfra } from './model.ts'
+import { holdUnfinished, runPipeline } from './pipeline.ts'
 import { createRelay } from './relay.ts'
+import { createStore } from './store.ts'
+import { createWorkers } from './workers.ts'
 
 // Vite の開発サーバーには Bun が .env を読み込まないため、ここで読む。既にある環境変数は上書きしない
 try {
@@ -18,6 +19,8 @@ try {
 
 // プロセスごとに分け、別に起動したサーバーとソケットを取り合わない
 const RELAY_SOCKET = join(homedir(), '.hyph', `relay-${process.pid}.sock`)
+// 子プロセスとして動く改良の対象が、対話の状態に触れる受け口（ADR 0022）
+const HOST_SOCKET = join(homedir(), '.hyph', `host-${process.pid}.sock`)
 const REPO = process.env.TARGET_REPO ?? process.cwd()
 
 // 開発サーバーは server/app.ts が変わるたびに同じプロセスでこのファイルを読み直す。
@@ -44,25 +47,31 @@ export function boot() {
     holdUnfinished(store)
     store.setRun({ started: false, halted: 'サーバーが再起動したため流れが止まりました' })
   }
-  try {
-    unlinkSync(RELAY_SOCKET)
-  } catch {}
+  for (const socket of [RELAY_SOCKET, HOST_SOCKET]) {
+    try {
+      unlinkSync(socket)
+    } catch {}
+  }
   relay.listen(RELAY_SOCKET)
+  serveHost(store, HOST_SOCKET)
   dialog()
   return RELAY_SOCKET
 }
 
-// 書いている途中の文を画面へ流す
-const call = relayCall(RELAY_SOCKET, (agent, text) => store.setLive(agent, text.slice(-600)))
-
-// 検索などの、モデルの利用料以外の費用を中継へ知らせる
-const charge = relayCharge(RELAY_SOCKET)
+// 論点エージェント・分解役・解答役は、hypharness 自身の統合ブランチの先端の版で、子プロセスとして動かす（ADR 0022）
+const workers = createWorkers({
+  harness: process.cwd(),
+  versions: join(homedir(), '.hyph', 'versions'),
+  relay: RELAY_SOCKET,
+  host: HOST_SOCKET,
+  store,
+})
 
 // 論点エージェントを動かす。止まっていたら、保存した対話の続きから動かし直せる
 function dialog() {
   if (shared.running) return
   shared.running = true
-  void startDialog(store, call, REPO, charge).finally(() => {
+  void startDialog(store, workers.run, REPO).finally(() => {
     shared.running = false
   })
 }
@@ -105,7 +114,7 @@ app.post('/api/start', (c) => {
   }
   // 費用の上限で止まっていたら、開始の合図で中継の停止を解いてから流れを始める（ADR 0012）
   relay.resume()
-  void runPipeline(store, call, REPO, {
+  void runPipeline(store, workers.roles, REPO, {
     worktrees: join(homedir(), '.hyph', 'worktrees', REPO.replaceAll('/', '_')),
     setup: process.env.SETUP_COMMAND,
     check: process.env.CHECK_COMMAND,

@@ -3,10 +3,15 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
-import { BRANCH, runPipeline } from './pipeline.ts'
+import { decompose, solve } from '../harness/roles.ts'
+import type { Call } from '../harness/topic.ts'
+import { CostLimitError } from '../shared/contract.ts'
+import { BRANCH, type PipelineOptions, runPipeline } from './pipeline.ts'
 import { createStore } from './store.ts'
-import { CostLimitError } from './topic.ts'
-import type { Call } from './topic.ts'
+
+// 分解役と解答役を、子プロセスを使わずに同じプロセスの中で動かす
+const run = (store: ReturnType<typeof createStore>, call: Call, dir: string, options: PipelineOptions) =>
+  runPipeline(store, { decompose: (job) => decompose(store, call, job), solve: (job) => solve(store, call, job) }, dir, options)
 
 const reply = (name: string, args: object) =>
   ({
@@ -55,7 +60,7 @@ test('課題を解いて検査が通ったら統合ブランチに積み、最�
     decompose: [reply('submit_task', { statement: 'out.txt に ok と書く。理由は検査のため\n\n## 受け入れの条件\n- test.sh が通る' }), reply('finish', { reason: '満たした' })],
     solve: [reply('write_file', { path: 'out.txt', content: 'ok' }), reply('done', { summary: '書いた' })],
   })
-  await runPipeline(store, call, dir, options())
+  await run(store, call, dir, options())
   expect(store.snapshot()).toMatchObject({ started: false, halted: '' })
   expect(store.snapshot().tasks[0]).toMatchObject({ state: 'committed', attempts: 1 })
   expect(log()).toBe('t1: out.txt に ok と書く\ninit')
@@ -66,7 +71,7 @@ test('積んだ課題の記録に差分を残し、保留にした課題の差�
   const store = createStore()
   const wrong = () => [reply('write_file', { path: 'out.txt', content: 'ng' }), reply('done', { summary: '書いた' })]
   // 検査に落ちて保留になった課題
-  await runPipeline(
+  await run(
     store,
     script({
       decompose: [reply('submit_task', { statement: 'out.txt に ok と書く' })],
@@ -78,7 +83,7 @@ test('積んだ課題の記録に差分を残し、保留にした課題の差�
   expect(store.snapshot().tasks[0]).toMatchObject({ state: 'held', diff: '' })
 
   // 検査が通って積んだ課題
-  await runPipeline(
+  await run(
     store,
     script({
       decompose: [reply('submit_task', { statement: 'out.txt に ok と書く' }), reply('finish', { reason: '満たした' })],
@@ -100,7 +105,7 @@ test('検査に3回落ちたら保留にして流れを止め、統合ブラン�
     decompose: [reply('submit_task', { statement: 'out.txt に ok と書く' })],
     solve: [...wrong(), reply('done', { summary: 'もう一度' }), reply('done', { summary: 'もう一度' })],
   })
-  await runPipeline(store, call, dir, options())
+  await run(store, call, dir, options())
   expect(store.snapshot().tasks[0]).toMatchObject({ state: 'held', attempts: 3 })
   expect(store.snapshot().tasks[0].reason).not.toBe('')
   expect(store.snapshot().tasks[0].reason).toContain('検査が終了コード')
@@ -130,7 +135,7 @@ test('解いている間に統合ブランチが動いていたら、上書き�
     }
     return call(body)
   }
-  await runPipeline(store, moving, dir, options())
+  await run(store, moving, dir, options())
   expect(store.snapshot().started).toBe(false)
   expect(store.snapshot().halted).not.toBe('')
   expect(log()).toBe('outside\ninit')
@@ -149,7 +154,7 @@ test('分解役に画面の最終目的を渡し、その本文を最初の課�
     if (body.topicId === 'decompose') seen.push(JSON.stringify(body.context.messages[0]))
     return inner(body)
   }
-  await runPipeline(store, call, dir, options())
+  await run(store, call, dir, options())
   expect(seen[0]).toContain('out.txt に ok と書く')
   const subject = Bun.spawnSync(['git', '-C', dir, 'log', '-1', '--format=%s', BRANCH]).stdout.toString().trim()
   expect(subject).toBe('t1: ok を書く')
@@ -168,7 +173,7 @@ test('止めるボタンを押したら、今の課題を終えてから次の�
     if (body.topicId === 'solve') store.setRun({ stopping: true })
     return inner(body)
   }
-  await runPipeline(store, call, dir, options())
+  await run(store, call, dir, options())
   expect(store.snapshot()).toMatchObject({ started: false, halted: '利用者が止めました', stopping: false })
   expect(log()).toBe('t1: ok を書く\ninit')
 })
@@ -181,7 +186,7 @@ test('費用の上限で断られたら課題を保留にして流れを止め�
     if (topicId === 'decompose') return reply('submit_task', { statement: 'out.txt に ok と書く' })
     throw new CostLimitError('停止中です: 課題 t1 が費用の上限 1 に達しました')
   }
-  await runPipeline(store, call, dir, { ...options(), spent: (taskId) => (taskId === 't1' ? 1.2 : 0), limitUsd: 1 })
+  await run(store, call, dir, { ...options(), spent: (taskId) => (taskId === 't1' ? 1.2 : 0), limitUsd: 1 })
   expect(store.snapshot().tasks[0]).toMatchObject({ state: 'held' })
   expect(store.snapshot().tasks[0].reason).toContain('停止中です: 課題 t1 が費用の上限 1 に達しました')
   expect(store.snapshot().tasks[0].spent).toBe(1.2)
@@ -203,7 +208,7 @@ test('分解役に保留にした課題とその理由と保留の割合を渡�
     messages = context.messages
     return reply('finish', { reason: '満たした' })
   }
-  await runPipeline(store, call, dir, options())
+  await run(store, call, dir, options())
   const user = messages.find((m) => m.role === 'user')
   const text = String(user?.content)
   expect(text).toContain(id)
@@ -220,7 +225,7 @@ test('解答役のシステムプロンプトに、根拠が実行の結果の�
   store.record({ topicId: 'k1', kind: 'fact', text: '利用者は赤を選んだ', evidence: '利用者の答え' })
   const wrong = () => [reply('write_file', { path: 'out.txt', content: 'ng' }), reply('done', { summary: '書いた' })]
   const first: Call0[] = []
-  await runPipeline(
+  await run(
     store,
     recorded(
       {
@@ -235,7 +240,7 @@ test('解答役のシステムプロンプトに、根拠が実行の結果の�
   expect(store.snapshot().tasks[0]).toMatchObject({ state: 'held' })
   expect(store.snapshot().entries.filter((e) => e.kind === 'fail')).toHaveLength(3)
   const second: Call0[] = []
-  await runPipeline(
+  await run(
     store,
     recorded(
       {
@@ -262,7 +267,7 @@ test('解答役のシステムプロンプトに、根拠が実行の結果の�
   const other = createStore()
   other.record({ topicId: 'k1', kind: 'fact', text: '利用者は赤を選んだ', evidence: '利用者の答え' })
   const prompts: Call0[] = []
-  await runPipeline(
+  await run(
     other,
     recorded(
       {

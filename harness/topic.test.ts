@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AssistantMessage, Context, Message } from '@earendil-works/pi-ai'
-import { createStore } from './store.ts'
+import { createStore } from '../server/store.ts'
 import { type Call, runTopic, TOOLS } from './topic.ts'
 
 const reply = (name: string, args: object, id = name) =>

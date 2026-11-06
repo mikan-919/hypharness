@@ -13,7 +13,7 @@ const kindLabel = { fact: '事実', fail: '失敗', done: '完了' }
 
 const taskLabel = { solving: '解いている', checking: '検査中', committed: '統合ブランチに積んだ', held: '保留' }
 
-const agentLabel = { decompose: '分解役', solve: '解答役' }
+const agentLabel = { decompose: '分解役', solve: '解答役', host: '固定部' }
 
 export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping }: Dialog) {
   const topicList = signal(topics)

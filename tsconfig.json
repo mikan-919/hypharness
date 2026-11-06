@@ -12,5 +12,5 @@
     "isolatedModules": true,
     "strict": false
   },
-  "include": ["routes", "server", "shared", "vite.config.ts"]
+  "include": ["routes", "server", "harness", "shared", "vite.config.ts"]
 }
