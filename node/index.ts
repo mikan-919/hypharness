@@ -1,4 +1,4 @@
-import { chmod, mkdir, rename } from 'node:fs/promises'
+import { appendFile, chmod, mkdir, rename } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { type Grant, LEASE_MS, type RelayMessage } from '../src/queue'
@@ -237,7 +237,16 @@ async function run(task: Grant) {
       await checkout(version),
       solver,
       budget,
-      () => {},
+      // モデルの呼び出しを1行ずつ残す。ダッシュボード（node/dashboard.ts）がエージェントのやり取りを描く
+      (call) => {
+        appendFile(
+          join(LOGS, `${task.id}-${task.generation}.calls.jsonl`),
+          `${JSON.stringify(call)}\n`,
+          { mode: 0o600 },
+        ).catch((e) =>
+          console.error(`呼び出しの記録を残せません: ${e.message}`),
+        )
+      },
       join(LOGS, `${task.id}-${task.generation}.log`),
       {
         signal: abort.signal,

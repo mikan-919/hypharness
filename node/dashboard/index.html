@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>エージェントのやり取り</title>
+    <style>
+      :root { color-scheme: light dark; --bg: #fff; --fg: #111; --muted: #666; --line: #ddd; --panel: #f6f6f6; }
+      @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --muted: #999; --line: #333; --panel: #1b1b1b; } }
+      body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+      #app { display: grid; grid-template-columns: 300px 1fr 380px; height: 100vh; }
+      aside { overflow: auto; border-right: 1px solid var(--line); font-size: 13px; }
+      aside h2 { font-size: 13px; margin: 12px 12px 4px; color: var(--muted); }
+      aside button { display: block; width: 100%; text-align: left; padding: 6px 12px; border: 0; background: none; color: inherit; cursor: pointer; }
+      aside button:hover, aside button.on { background: var(--panel); }
+      .detail { overflow: auto; border-left: 1px solid var(--line); padding: 12px; font-size: 13px; }
+      .detail pre { white-space: pre-wrap; word-break: break-word; }
+      .step { width: 300px; padding: 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); font-size: 12px; }
+      .step b { display: block; margin-bottom: 4px; }
+      .step span { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; word-break: break-word; }
+      .step .react-flow__handle { opacity: 0; }
+      .goal { border-color: #3b82f6; } .tool { border-color: #a855f7; } .result { border-color: #22c55e; } .error { border-color: #ef4444; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./app.tsx"></script>
+  </body>
+</html>
