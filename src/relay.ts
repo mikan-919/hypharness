@@ -90,11 +90,15 @@ export class Relay extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
-    this.queue = openQueue(
-      (query, ...params) =>
-        ctx.storage.sql.exec(query, ...params).toArray() as never[],
+    this.queue = this.init()
+  }
+
+  private init() {
+    const { sql } = this.ctx.storage
+    const queue = openQueue(
+      (query, ...params) => sql.exec(query, ...params).toArray() as never[],
     )
-    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS ledger (
+    sql.exec(`CREATE TABLE IF NOT EXISTS ledger (
       period TEXT NOT NULL,
       kind TEXT NOT NULL,
       budget REAL,
@@ -103,17 +107,26 @@ export class Relay extends DurableObject<Env> {
       PRIMARY KEY (period, kind)
     )`)
     // セッションごとの系統と提案は、ノードが送った最新の一覧で置き換える。承認の依頼はノードが処理するまで残す
-    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS evolution (
+    sql.exec(`CREATE TABLE IF NOT EXISTS evolution (
       session TEXT PRIMARY KEY,
       lineage TEXT NOT NULL,
       proposals TEXT NOT NULL,
       at INTEGER NOT NULL
     )`)
-    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS approvals (
+    sql.exec(`CREATE TABLE IF NOT EXISTS approvals (
       session TEXT NOT NULL,
       id INTEGER NOT NULL,
       PRIMARY KEY (session, id)
     )`)
+    return queue
+  }
+
+  // 利用者の記録（タスク・履歴・費用・進化の記録・承認の依頼）をすべて消す。接続中のノードは切り、再接続させる
+  async reset() {
+    for (const ws of this.ctx.getWebSockets())
+      ws.close(1000, '記録を消しました')
+    await this.ctx.storage.deleteAll()
+    this.queue = this.init()
   }
 
   // Worker がノード用トークンを確かめ、ノードの ID と名前をヘッダーに入れて渡す

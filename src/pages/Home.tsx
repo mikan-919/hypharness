@@ -22,15 +22,30 @@ export default function Home({ user, status }: PageProps<'Home'>) {
     await post('/auth/logout')
     router.visit('/login')
   }
+  const reset = async () => {
+    if (
+      !confirm(
+        'タスク・履歴・費用・進化の記録・チェックポイントをすべて消します。元に戻せません',
+      )
+    )
+      return
+    await post('/reset')
+    router.reload()
+  }
   const names = new Map(status.nodes.map((n) => [n.id, n.name]))
 
   return (
     <main className='mx-auto flex max-w-3xl flex-col gap-8 p-4 sm:p-8'>
       <header className='flex items-center justify-between'>
         <h1 className='text-2xl font-bold'>{user.name}</h1>
-        <Button variant='outline' onClick={logout}>
-          ログアウト
-        </Button>
+        <div className='flex gap-2'>
+          <Button variant='outline' onClick={reset}>
+            記録を消す
+          </Button>
+          <Button variant='outline' onClick={logout}>
+            ログアウト
+          </Button>
+        </div>
       </header>
       <section className='flex flex-col gap-2 text-sm'>
         <h2 className='text-lg font-bold'>ノード</h2>
