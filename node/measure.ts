@@ -45,11 +45,35 @@ import {
 import { unpack } from './vault'
 
 export const DIR = join(homedir(), '.hyph')
-// モデルの提供元は PROVIDER で選ぶ（deepinfra か openai）
-const PROVIDER = process.env.PROVIDER || 'deepinfra'
+// モデルの提供元は PROVIDER で選ぶ（deepinfra か codex）。MODEL を指定しなければ、提供元ごとの既定のモデルを使う。
+// codex は ChatGPT のサブスクリプションでサインインした OpenAI を使う
 const DEEPINFRA_MODEL = 'deepseek-ai/DeepSeek-V4.1-Flash-1017'
-const solverModel = () =>
-  process.env.MODEL || (PROVIDER === 'openai' ? 'gpt-6.1-sol' : DEEPINFRA_MODEL)
+const PROVIDERS = {
+  deepinfra: {
+    id: 'deepinfra',
+    model: DEEPINFRA_MODEL,
+    create: () => deepinfraProvider(),
+    login: '.env に DEEPINFRA_API_KEY を設定してください',
+  },
+  codex: {
+    id: 'openai',
+    model: 'gpt-6-luna',
+    create: () => openaiProvider(),
+    login: `${DIR} で bunx @earendil-works/pi-ai login openai を実行してサインインしてください`,
+  },
+} as const
+const provider = () => {
+  const name = process.env.PROVIDER || 'deepinfra'
+  if (!(name in PROVIDERS)) {
+    throw new Error(
+      `PROVIDER は ${Object.keys(PROVIDERS).join(' か ')} です: ${name}`,
+    )
+  }
+  return PROVIDERS[name as keyof typeof PROVIDERS]
+}
+const solverModel = () => process.env.MODEL || provider().model
+// 予算の基準は解答役のモデルごとに持つ。提供元を切り替えても、別のモデルの費用で上限を切らない
+export const budgetKey = (split: string) => `budget:${split}:${solverModel()}`
 export const REPO = join(import.meta.dir, '..')
 // ponytail: 解答役は、並べた計測すべてを合わせて同時に8つまで動かす。待ち時間の大半はモデルの応答で、
 // 4つでは CPU の9割が空いていた。ノードの CPU・メモリとモデルの流量制限を見て変える
@@ -554,7 +578,7 @@ export async function measure(
   }
   const tasks = m.tasks(split)
   if (!tasks.length) throw new Error(`${split} の課題がありません`)
-  const base = m.meta(`budget:${split}`)
+  const base = m.meta(budgetKey(split))
   const limit =
     base === null ? null : (Number(base) / tasks.length) * BUDGET_MARGIN
   const agent = await checkout(commit)
@@ -608,8 +632,7 @@ export async function measure(
   )
   const result = m.finishMeasurement(id)
   // 最初の計測の費用を、その分割の予算の基準にする
-  if (base === null && !memory)
-    m.setMeta(`budget:${split}`, String(result.cost))
+  if (base === null && !memory) m.setMeta(budgetKey(split), String(result.cost))
   return result
 }
 
@@ -627,7 +650,7 @@ export async function stateCheck(
   times: number,
 ) {
   const agent = await checkout(commit)
-  const base = m.meta('budget:test')
+  const base = m.meta(budgetKey('test'))
   const limit =
     base === null
       ? null
@@ -714,20 +737,9 @@ export const summary = (rates: number[]) => {
 // onCost を渡すと、呼び出しのたびに費用を知らせる（段階5の資源配分の記録）
 export async function models(onCost?: (cost: number) => void) {
   const m = createModels({ credentials: fileStore(join(DIR, 'auth.json')) })
-  if (PROVIDER === 'openai') {
-    m.setProvider(openaiProvider())
-  } else if (PROVIDER === 'deepinfra') {
-    m.setProvider(deepinfraProvider())
-  } else {
-    throw new Error(`PROVIDER は deepinfra か openai です: ${PROVIDER}`)
-  }
-  if (!(await m.getAuth(PROVIDER))) {
-    throw new Error(
-      PROVIDER === 'openai'
-        ? `${DIR} で bunx @earendil-works/pi-ai login openai を実行してサインインしてください`
-        : '.env に DEEPINFRA_API_KEY を設定してください',
-    )
-  }
+  const p = provider()
+  m.setProvider(p.create())
+  if (!(await m.getAuth(p.id))) throw new Error(p.login)
   // timeoutMs は1回の呼び出しの上限。SDK の既定は10分で、候補の制限時間（10分）と同じため、止まった呼び出しが1回あると試行全体が時間切れになる。
   // 上限を付けるときは SDK の中の呼び直し（既定2回）をやめ、withRetry だけが理由を残して呼び直す
   const load = (
@@ -736,7 +748,7 @@ export async function models(onCost?: (cost: number) => void) {
     reasoning?: string,
     timeoutMs?: number,
   ): Complete => {
-    const model = m.getModel(PROVIDER, name)
+    const model = m.getModel(p.id, name)
     if (!model) throw new Error(`未対応のモデルです: ${name}`)
     console.log(`${role}: ${name}、推論の深さ: ${reasoning ?? '既定'}`)
     const complete: Complete = (context, options) =>
@@ -932,7 +944,7 @@ if (import.meta.main) {
       splits.map(async (split) => {
         const rates: number[] = []
         let rest = Number(times)
-        if (m.meta(`budget:${split}`) === null) {
+        if (m.meta(budgetKey(split)) === null) {
           rates.push(await one(split))
           rest--
         }
@@ -943,7 +955,7 @@ if (import.meta.main) {
         )
         const { mean, std } = summary(rates)
         console.log(
-          `${split}: 成功率 平均 ${mean.toFixed(3)}、標準偏差 ${std.toFixed(3)}（${rates.length} 回）、予算の基準（1回分） $${Number(m.meta(`budget:${split}`)).toFixed(4)}`,
+          `${split}: 成功率 平均 ${mean.toFixed(3)}、標準偏差 ${std.toFixed(3)}（${rates.length} 回）、予算の基準（1回分） $${Number(m.meta(budgetKey(split))).toFixed(4)}`,
         )
       }),
     )

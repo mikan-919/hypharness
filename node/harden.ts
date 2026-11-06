@@ -3,6 +3,7 @@
 import { join } from 'node:path'
 import {
   attempt,
+  budgetKey,
   checkout,
   currentWorkspace,
   DIR,
@@ -179,7 +180,7 @@ export async function harden(
     after.delete(id)
   }
   // 課題が変わると1回の計測の費用も変わるため、予算の基準を消し、次の計測で作り直す
-  if (added) m.db.run('DELETE FROM meta WHERE key = ?', [`budget:${split}`])
+  if (added) m.db.run('DELETE FROM meta WHERE key = ?', [budgetKey(split)])
   const reviewed = Number(m.meta('reviewed') ?? 0)
   const flagged = reviewed ? Number(m.meta('flagged') ?? 0) / reviewed : null
   const dist = (r: Map<number, Rate>) =>

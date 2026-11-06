@@ -9,6 +9,7 @@ import { openLedger } from './ledger'
 import {
   attempt,
   BUDGET_MARGIN,
+  budgetKey,
   checkout,
   currentWorkspace,
   DIR,
@@ -50,7 +51,7 @@ if (!/^[\w-]{1,32}$/.test(session) || !(await Bun.file(path).exists())) {
 }
 const m = openMeasure(path)
 const deploy = openDeploy(m)
-if (!deploy.stable() || !m.meta('budget:val')) {
+if (!deploy.stable() || !m.meta(budgetKey('val'))) {
   throw new Error(
     `セッション ${session} に基準版と予算の基準がありません。先に evolve を回してください`,
   )
@@ -179,7 +180,8 @@ async function run(task: Grant) {
   // ponytail: 1タスクの予算は、検証用課題1問あたりの予算と同じにする。実際のタスクの費用が貯まったら、それを基準にする
   const budget: Budget = {
     limit:
-      (Number(m.meta('budget:val')) / m.tasks('val').length) * BUDGET_MARGIN,
+      (Number(m.meta(budgetKey('val'))) / m.tasks('val').length) *
+      BUDGET_MARGIN,
     spent: 0,
   }
   console.log(
