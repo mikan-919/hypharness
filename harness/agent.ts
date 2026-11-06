@@ -149,6 +149,12 @@ function recorder(agent: string) {
 // 60 回では、irisout の制約を調べながら Monaco を入れる課題（t13）が終わらなかった
 const MAX_TURNS = 200
 
+// 要約ノードにまとめず、生のまま残す直近のメッセージの件数
+const SUMMARY_KEEP = 8
+
+// 要約ノードを作る間隔（ターン）
+const SUMMARY_EVERY = 4
+
 // stop が値を返したツールの呼び出しで、ループを終えてその値を返す
 export async function runAgent<T>(options: {
   store: AgentStore
@@ -173,25 +179,34 @@ export async function runAgent<T>(options: {
     if (calls.length === 0) {
       messages.push({ role: 'user', content: 'ツールを呼んで進めてください。', timestamp: Date.now() })
       save(messages)
-      continue
+    } else {
+      for (const toolCall of calls) {
+        const result = stop(toolCall)
+        if (result !== undefined) return result
+        const outcome = await run(toolCall).then(
+          (text) => ({ text: shrinkToolResult(text), isError: false }),
+          (e: Error) => ({ text: shrinkToolResult(e.message), isError: true }),
+        )
+        store.act(agent, 'result', `${toolCall.name}: ${short(outcome.text.replace(/\s+/g, ' '))}`)
+        messages.push({
+          role: 'toolResult',
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [{ type: 'text', text: outcome.text }],
+          isError: outcome.isError,
+          timestamp: Date.now(),
+        })
+        save(messages)
+      }
     }
-    for (const toolCall of calls) {
-      const result = stop(toolCall)
-      if (result !== undefined) return result
-      const outcome = await run(toolCall).then(
-        (text) => ({ text: shrinkToolResult(text), isError: false }),
-        (e: Error) => ({ text: shrinkToolResult(e.message), isError: true }),
-      )
-      store.act(agent, 'result', `${toolCall.name}: ${short(outcome.text.replace(/\s+/g, ' '))}`)
-      messages.push({
-        role: 'toolResult',
-        toolCallId: toolCall.id,
-        toolName: toolCall.name,
-        content: [{ type: 'text', text: outcome.text }],
-        isError: outcome.isError,
-        timestamp: Date.now(),
-      })
-      save(messages)
+    // ターンが終わった後に、4ターンごとに古いメッセージを要約ノードにまとめる。
+    // 要約を作れなくてもエージェントの実行は止めない
+    if ((turn + 1) % SUMMARY_EVERY === 0) {
+      try {
+        ctx(agent).summarizeOld(SUMMARY_KEEP)
+      } catch {
+        // 要約の失敗は握りつぶす
+      }
     }
   }
   throw new Error(`${agent} がモデルを ${MAX_TURNS} 回呼んでも終わりませんでした`)

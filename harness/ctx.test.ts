@@ -121,3 +121,77 @@ test('runAgent はループで増えたメッセージを agent の DB に追記
   expect(ctx('solve').messages()).toEqual(messages)
   expect(messages.length).toBe(4)
 })
+
+test('追記が8件以下のときは要約ノードが増えない', () => {
+  const store = ctx('solve')
+  for (let i = 1; i <= 8; i++) store.append(message(`${i}件目`))
+  expect(store.summarizeOld(8)).toBeUndefined()
+  expect(store.summaries()).toEqual([])
+})
+
+test('9件以上で呼ぶと要約ノードが1件増え、messageIds は直近8件より前の id になる', () => {
+  const store = ctx('solve')
+  for (let i = 1; i <= 10; i++) store.append(message(`${i}件目`))
+  const id = store.summarizeOld(8)
+  expect(store.summaries().length).toBe(1)
+  expect(store.summary(id!)).toEqual({ id: id!, text: '1件目\n2件目', messageIds: [1, 2] })
+})
+
+test('同じ状態で2回呼んでも、要約ノードは増えない', () => {
+  const store = ctx('solve')
+  for (let i = 1; i <= 10; i++) store.append(message(`${i}件目`))
+  store.summarizeOld(8)
+  expect(store.summarizeOld(8)).toBeUndefined()
+  expect(store.summaries().length).toBe(1)
+})
+
+test('要約ノードを足した後も、messages() の件数と本文は変わらない', () => {
+  const store = ctx('solve')
+  for (let i = 1; i <= 10; i++) store.append(message(`${i}件目`))
+  const before = store.messages()
+  store.summarizeOld(8)
+  expect(store.messages()).toEqual(before)
+  expect(store.messages().length).toBe(10)
+})
+
+test('要約ノードの本文は、1件あたり500文字で切った本文を順につないだものになる', () => {
+  const store = ctx('solve')
+  store.append(message('a'.repeat(600)))
+  store.append(message('b'.repeat(600)))
+  for (let i = 1; i <= 8; i++) store.append(message(`${i}件目`))
+  const id = store.summarizeOld(8)!
+  expect(store.summary(id)!.text).toBe(`${'a'.repeat(500)}\n${'b'.repeat(500)}`)
+})
+
+test('runAgent は4ターン目に要約ノードを1件作り、5ターン目には増やさない', async () => {
+  const store = createStore()
+  const replies = [
+    reply('read_file', { path: 'a' }, 'c1'),
+    reply('read_file', { path: 'a' }, 'c2'),
+    reply('read_file', { path: 'a' }, 'c3'),
+    reply('read_file', { path: 'a' }, 'c4'),
+    reply('read_file', { path: 'a' }, 'c5'),
+    reply('done', {}, 'c6'),
+  ]
+  const call: Call = async () => replies.shift()!
+  const messages: Message[] = [message('はじめての指示')]
+  // 各ターンのツールを動かす時点での要約ノードの件数
+  const counts: number[] = []
+  const summary = await runAgent<string>({
+    store,
+    call,
+    agent: 'solve',
+    taskId: 't1',
+    system: '',
+    tools: [],
+    messages,
+    run: async () => {
+      counts.push(ctx('solve').summaries().length)
+      return '結果です'
+    },
+    stop: (c) => (c.name === 'done' ? '終えた' : undefined),
+  })
+  expect(summary).toBe('終えた')
+  expect(counts).toEqual([0, 0, 0, 0, 1])
+  expect(ctx('solve').summaries().length).toBe(1)
+})

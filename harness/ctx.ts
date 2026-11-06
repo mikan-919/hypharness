@@ -26,6 +26,9 @@ export type SearchResult = {
 
 export type Summary = { id: number; text: string; messageIds: number[] }
 
+// 要約ノードの本文に入れる、1件のメッセージの本文の上限
+const MAX_SUMMARY_PART = 500
+
 // エージェントの id ごとに1つのファイルを開き、追記と読み出しを返す
 export function ctx(agent: string) {
   const dir = root()
@@ -47,6 +50,13 @@ export function ctx(agent: string) {
     }[]
     return rows.map((row) => ({ id: row.id, text: row.text, messageIds: JSON.parse(row.message_ids) as number[] }))
   }
+  // 要約ノードを1件足し、その id を返す。元のメッセージは消さない
+  const addSummary = (text: string, messageIds: number[]) => {
+    const row = db
+      .query('INSERT INTO summaries(text, message_ids) VALUES (?, ?) RETURNING id')
+      .get(text, JSON.stringify(messageIds)) as { id: number }
+    return row.id
+  }
   return {
     append(message: Message) {
       db.query('INSERT INTO messages(message) VALUES (?)').run(JSON.stringify(message))
@@ -57,12 +67,22 @@ export function ctx(agent: string) {
     },
     // メッセージを id 付きで返す。id は messages 表の seq
     messagesWithIds,
+    // 要約ノードを全部返す
+    summaries,
     // 要約ノードを1件足し、その id を返す。元のメッセージは消さない
-    addSummary(text: string, messageIds: number[]) {
-      const row = db
-        .query('INSERT INTO summaries(text, message_ids) VALUES (?, ?) RETURNING id')
-        .get(text, JSON.stringify(messageIds)) as { id: number }
-      return row.id
+    addSummary,
+    // まだどの要約ノードにも入っていないメッセージのうち、直近 keep 件より前のものを1つの要約ノードにまとめる。
+    // まとめる対象が無ければ何も足さず undefined を返す。本文は1件あたり 500 文字で切って順につなぐ
+    summarizeOld(keep = 8) {
+      const all = messagesWithIds()
+      const claimed = new Set(summaries().flatMap((s) => s.messageIds))
+      const older = all.slice(0, Math.max(0, all.length - keep)).filter((m) => !claimed.has(m.id))
+      if (older.length === 0) return undefined
+      const text = older.map((m) => messageText(m.message).slice(0, MAX_SUMMARY_PART)).join('\n')
+      return addSummary(
+        text,
+        older.map((m) => m.id),
+      )
     },
     // 要約ノードを id で引く
     summary(id: number): Summary | undefined {
