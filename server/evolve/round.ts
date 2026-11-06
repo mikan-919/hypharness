@@ -3,12 +3,13 @@ import type { Dialog } from '../../shared/dialog.ts'
 import { MODULES, type Candidate, type Module } from '../../shared/evolve.ts'
 import { archiveCandidate, listArchive, writeCandidate } from './store.ts'
 
-// 提案に渡す材料。archive は前の周までの採用済みの候補
+// 提案に渡す材料。archive は前の周までの採用済みの候補、start はこの周の出発点
 export type ProposeInput = {
   module: Module
   weaknesses: string[]
   archive: Candidate[]
   round: number
+  start?: Candidate
 }
 
 // 提案の返り値。id・round・module・score は runRound が入れる
@@ -31,6 +32,7 @@ export type RoundResult = {
   round: number
   candidates: Candidate[]
   stopped: boolean
+  start?: Candidate
 }
 
 // 対話の状態から失敗の型を集める。entries の失敗の項目が先、保留の課題の理由が後。同じ文字列は1つにする
@@ -51,18 +53,25 @@ export function weaknesses(dialog: Dialog): string[] {
   return out
 }
 
+// archive から周の番号で巡回して出発点を1つ選ぶ。archive が空なら選ばない
+export function pickStart(archive: Candidate[], round: number): Candidate | undefined {
+  if (archive.length === 0) return undefined
+  return archive[round % archive.length]
+}
+
 // 1周を順に進める。費用が上限を超えたら、残りの検証と採用をせずに止める
 export function runRound(options: RoundOptions): RoundResult {
   const { round, dialog, propose, check, spent, limitUsd, root } = options
   const weak = weaknesses(dialog)
   // 前の周までの候補。この周で採用した候補を後の提案に混ぜないよう、始めに1回だけ取る
   const archive = listArchive(root)
+  const start = pickStart(archive, round)
   const candidates: Candidate[] = []
   let stopped = false
 
   for (const [index, module] of MODULES.entries()) {
     const id = `${round}-${index + 1}`
-    const proposal = propose({ module, weaknesses: weak, archive, round })
+    const proposal = propose({ module, weaknesses: weak, archive, round, start })
     const candidate: Candidate = {
       id,
       round,
@@ -86,5 +95,5 @@ export function runRound(options: RoundOptions): RoundResult {
     candidates.push(candidate)
   }
 
-  return { round, candidates, stopped }
+  return { round, candidates, stopped, start }
 }

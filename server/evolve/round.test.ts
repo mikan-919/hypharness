@@ -49,6 +49,32 @@ const dialog = (over: Partial<Dialog> = {}): Dialog => ({
   ...over,
 })
 
+// archive に候補を置く
+const putArchive = (root: string, id: string) => {
+  const c: Candidate = { id, round: Number(id.split('-')[0]), module: 'context', changes: [id], score: 1, note: '' }
+  writeCandidate(c, root)
+  archiveCandidate(c.id, root)
+  return c
+}
+
+// 1周だけ回して、propose に渡った start を返す
+const startOfRound = (round: number, root: string): Candidate | undefined => {
+  let start: Candidate | undefined
+  runRound({
+    round,
+    dialog: dialog(),
+    propose: (input) => {
+      start = input.start
+      return { changes: [`${input.module} の変更`], note: '' }
+    },
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  return start
+}
+
 test('weaknesses は失敗の項目と保留の理由を、重複を除いて entries 優先で返す', () => {
   const d = dialog({
     entries: [entry('e1', 'fail', 'A'), entry('e2', 'fact', '無視'), entry('e3', 'fail', 'B'), entry('e4', 'fail', 'A')],
@@ -84,11 +110,41 @@ test('propose は5つのモジュールについて1回ずつ呼ばれ、archive
   expect(seen.every((i) => i.round === 2)).toBe(true)
   expect(seen.every((i) => i.weaknesses.length === 1 && i.weaknesses[0] === 'A')).toBe(true)
   expect(seen.every((i) => i.archive.length === 1 && i.archive[0].id === '1-1')).toBe(true)
+  expect(seen.every((i) => i.start?.id === '1-1')).toBe(true)
   expect(result.round).toBe(2)
   expect(result.stopped).toBe(false)
+  expect(result.start?.id).toBe('1-1')
   expect(result.candidates.map((c) => c.id)).toEqual(MODULES.map((_, i) => `2-${i + 1}`))
   expect(result.candidates.map((c) => c.module)).toEqual([...MODULES])
   expect(listCandidates(root).map((c) => c.id)).toEqual(MODULES.map((_, i) => `2-${i + 1}`))
+})
+
+test('archive が空のとき、propose に渡る start は undefined', () => {
+  const root = evo()
+  expect(startOfRound(1, root)).toBeUndefined()
+})
+
+test('archive に候補が2件以上あるとき、周を1つ進めると start の id が変わる', () => {
+  const root = evo()
+  putArchive(root, '1-1')
+  putArchive(root, '1-2')
+  const first = startOfRound(1, root)
+  const second = startOfRound(2, root)
+  expect(first?.id).toBeDefined()
+  expect(second?.id).toBeDefined()
+  expect([first?.id, second?.id].sort()).toEqual(['1-1', '1-2'])
+  expect(first?.id).not.toBe(second?.id)
+})
+
+test('archive の件数ぶん周を進めると、選ぶ候補が一巡して最初に戻る', () => {
+  const root = evo()
+  putArchive(root, '1-1')
+  putArchive(root, '1-2')
+  putArchive(root, '1-3')
+  const ids = [1, 2, 3, 4].map((round) => startOfRound(round, root)?.id)
+  expect(ids).toEqual(['1-2', '1-3', '1-1', '1-2'])
+  expect(new Set(ids.slice(0, 3)).size).toBe(3)
+  expect(ids[3]).toBe(ids[0])
 })
 
 test('check が 1 を返した候補だけ archive に出て、0 の候補は candidates に残る', () => {
