@@ -24,7 +24,7 @@ const honoDevelopment = {
   },
 }
 
-// ponytail: irisoutHono 0.3.7 は /irisout-client.js を要求の書き換えだけで配信し、HTML の事前変換で解決できずに警告が出る。irisout が直ったら外す
+// ponytail: irisoutHono 0.3.7 は /irisout-client.js を要求の書き換えだけで配信し、HTML の事前変換で解決できずに警告が出る。irisout が直ったら外す（mikan-919/irisout#5）
 const clientAlias = {
   name: 'irisout-client-alias',
   apply: 'serve' as const,
