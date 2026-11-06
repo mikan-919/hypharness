@@ -8,6 +8,26 @@ import type { Call } from './topic.ts'
 
 const short = (text: string, max = 160) => (text.length > max ? `${text.slice(0, max)}…` : text)
 
+// ツール結果を文脈に入れる前の長さの上限
+const MAX_RESULT = 10_000
+
+// ツール結果の文字列を決まった規則で縮める。連続する同じ行を1行に、連続する空行を1行に詰め、
+// 10,000 文字を超える分を後ろから切る
+export function shrinkToolResult(text: string) {
+  const deduped: string[] = []
+  for (const line of text.split('\n')) {
+    if (deduped.length > 0 && deduped[deduped.length - 1] === line) continue
+    deduped.push(line)
+  }
+  const lines: string[] = []
+  for (const line of deduped) {
+    const blank = line.trim() === ''
+    if (blank && lines.length > 0 && lines[lines.length - 1].trim() === '') continue
+    lines.push(line)
+  }
+  return lines.join('\n').slice(0, MAX_RESULT)
+}
+
 // 応答の文とツールの呼び出しを、動きとして残す
 export function noteReply(store: AgentStore, agent: string, reply: AssistantMessage) {
   for (const c of reply.content) {
@@ -159,8 +179,8 @@ export async function runAgent<T>(options: {
       const result = stop(toolCall)
       if (result !== undefined) return result
       const outcome = await run(toolCall).then(
-        (text) => ({ text, isError: false }),
-        (e: Error) => ({ text: e.message, isError: true }),
+        (text) => ({ text: shrinkToolResult(text), isError: false }),
+        (e: Error) => ({ text: shrinkToolResult(e.message), isError: true }),
       )
       store.act(agent, 'result', `${toolCall.name}: ${short(outcome.text.replace(/\s+/g, ' '))}`)
       messages.push({
