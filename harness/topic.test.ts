@@ -2,9 +2,9 @@ import { expect, test } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
+import type { AssistantMessage, Context, Message } from '@earendil-works/pi-ai'
 import { createStore } from './store.ts'
-import { type Call, runTopic } from './topic.ts'
+import { type Call, runTopic, TOOLS } from './topic.ts'
 
 const reply = (name: string, args: object, id = name) =>
   ({ role: 'assistant', content: [{ type: 'toolCall', id, name, arguments: args }] }) as unknown as AssistantMessage
@@ -14,13 +14,15 @@ const adr = reply('write_doc', { path: 'docs/adr/0001-x.md', content: '# 0001 x'
 // 決めた順にツールを呼ぶモデルの代わり。受け取った会話を残し、応答を使い切ったら止まる
 function script(...replies: AssistantMessage[]) {
   const seen: Message[][] = []
+  const contexts: Context[] = []
   const call: Call = async ({ context }) => {
     seen.push([...context.messages])
+    contexts.push(context)
     const next = replies.shift()
     if (!next) throw new Error('用意した応答を使い切った')
     return next
   }
-  return { call, seen }
+  return { call, seen, contexts }
 }
 
 const setup = (file?: string) => {
@@ -28,6 +30,109 @@ const setup = (file?: string) => {
   if (!store.hasTopic('goal')) store.addTopic({ id: 'goal', title: '最終目的', state: 'asking', ready: false })
   return store
 }
+
+// 環境変数と fetch を差し替えてから body を動かし、終わったら戻す
+async function withSearch(handler: (url: any, init: any) => Response | Promise<Response>, body: (sent: any[]) => Promise<void>) {
+  const savedKey = process.env.PARALLEL_API_KEY
+  const savedFetch = globalThis.fetch
+  process.env.PARALLEL_API_KEY = 'test-key'
+  const sent: any[] = []
+  globalThis.fetch = (async (url: any, init: any) => {
+    sent.push({ url, init })
+    return handler(url, init)
+  }) as typeof fetch
+  try {
+    await body(sent)
+  } finally {
+    globalThis.fetch = savedFetch
+    if (savedKey === undefined) delete process.env.PARALLEL_API_KEY
+    else process.env.PARALLEL_API_KEY = savedKey
+  }
+}
+
+const searchResult = (store: ReturnType<typeof setup>) =>
+  store
+    .transcript('goal')!
+    .filter((m) => m.role === 'toolResult' && m.toolName === 'web_search')
+    .at(-1) as any
+
+const ok = (results: unknown) => () => new Response(JSON.stringify({ results }), { status: 200 })
+
+test('PARALLEL_API_KEY があるときだけツールの一覧に web_search を加える', async () => {
+  const saved = process.env.PARALLEL_API_KEY
+  try {
+    process.env.PARALLEL_API_KEY = 'test-key'
+    expect(TOOLS().map((t) => t.name)).toContain('web_search')
+    delete process.env.PARALLEL_API_KEY
+    expect(TOOLS().map((t) => t.name)).not.toContain('web_search')
+
+    // 鍵が無いときは、runTopic がモデルに渡す一覧にも入らない
+    const store = setup()
+    const { call, contexts } = script(adr, reply('ready', {}))
+    await runTopic(store, call, 'goal', mkdtempSync(join(tmpdir(), 'hyph-')))
+    expect(contexts[0].tools?.map((t) => t.name)).not.toContain('web_search')
+  } finally {
+    if (saved === undefined) delete process.env.PARALLEL_API_KEY
+    else process.env.PARALLEL_API_KEY = saved
+  }
+})
+
+test('web_search は mode fast と既定の max_results を送り、応答を title・url・抜粋にする', async () => {
+  await withSearch(ok([{ title: 'T1', url: 'https://a.example', excerpts: ['e1', 'e2'] }, { title: 'T2', url: 'https://b.example', excerpts: ['e3'] }]), async (sent) => {
+    const store = setup()
+    const { call, contexts } = script(reply('web_search', { objective: '調べる' }), adr, reply('ready', {}))
+    await runTopic(store, call, 'goal', mkdtempSync(join(tmpdir(), 'hyph-')))
+    expect(contexts[0].tools?.map((t) => t.name)).toContain('web_search')
+    expect(sent[0].url).toBe('https://api.parallel.ai/v1beta/search')
+    expect(sent[0].init.method).toBe('POST')
+    expect(sent[0].init.headers['x-api-key']).toBe('test-key')
+    expect(sent[0].init.headers['content-type']).toBe('application/json')
+    expect(JSON.parse(sent[0].init.body)).toEqual({ objective: '調べる', max_results: 5, mode: 'fast' })
+    const result = searchResult(store)
+    expect(result.isError).toBe(false)
+    expect(result.content[0].text).toBe('T1\nhttps://a.example\ne1\ne2\n\nT2\nhttps://b.example\ne3')
+  })
+})
+
+test('web_search は max_results を 1〜20 に丸め、0 件なら「結果なし」を返す', async () => {
+  await withSearch(ok([]), async (sent) => {
+    const store = setup()
+    const { call } = script(reply('web_search', { objective: '調べる', max_results: 99 }), adr, reply('ready', {}))
+    await runTopic(store, call, 'goal', mkdtempSync(join(tmpdir(), 'hyph-')))
+    expect(JSON.parse(sent[0].init.body).max_results).toBe(20)
+    expect(searchResult(store).content[0].text).toBe('結果なし')
+  })
+  await withSearch(ok([]), async (sent) => {
+    const store = setup()
+    const { call } = script(reply('web_search', { objective: '調べる', max_results: -3 }), adr, reply('ready', {}))
+    await runTopic(store, call, 'goal', mkdtempSync(join(tmpdir(), 'hyph-')))
+    expect(JSON.parse(sent[0].init.body).max_results).toBe(1)
+  })
+})
+
+test('web_search の HTTP 500 は isError の結果になり、fail に理由を残して対話を続ける', async () => {
+  await withSearch(() => new Response('{"error":"boom"}', { status: 500 }), async () => {
+    const store = setup()
+    const { call } = script(reply('web_search', { objective: '調べる' }), adr, reply('ready', {}))
+    await runTopic(store, call, 'goal', mkdtempSync(join(tmpdir(), 'hyph-')))
+    const result = searchResult(store)
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('500')
+    const fail = store.snapshot().entries.find((e) => e.evidence === 'Parallel の検索')
+    expect(fail?.kind).toBe('fail')
+    expect(fail?.text).toContain('500')
+    expect(store.snapshot().topics[0].ready).toBe(true)
+  })
+})
+
+test('web_search は 8,000 文字を超える応答を切る', async () => {
+  await withSearch(ok([{ title: 'T', url: 'https://a.example', excerpts: ['x'.repeat(9_000)] }]), async () => {
+    const store = setup()
+    const { call } = script(reply('web_search', { objective: '調べる' }), adr, reply('ready', {}))
+    await runTopic(store, call, 'goal', mkdtempSync(join(tmpdir(), 'hyph-')))
+    expect(searchResult(store).content[0].text.length).toBe(8_000)
+  })
+})
 
 test('質問に答えを受け取り、ADR を書いて ready で終える', async () => {
   const repo = mkdtempSync(join(tmpdir(), 'hyph-'))
