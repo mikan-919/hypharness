@@ -9,17 +9,12 @@ import {
   Position,
   ReactFlow,
 } from '@xyflow/react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import '@xyflow/react/dist/style.css'
 import type { Graph, Step } from './graph'
 
-type Live = {
-  file: string
-  task: number
-  generation: number
-  statement: string
-}
+type Live = { file: string; name: string; active: boolean; statement: string }
 type Run = {
   id: number
   task: number
@@ -31,6 +26,9 @@ type Run = {
 }
 type Runs = { live: Live[]; sessions: { session: string; runs: Run[] }[] }
 
+// 実行中のやり取りを追うため、一覧と選んだ図を短い間隔で読み直す。どちらも手元のファイルを読むだけ
+const LIST_MS = 2000
+const GRAPH_MS = 1000
 const LANE_WIDTH = 360
 const ROW_HEIGHT = 110
 
@@ -99,26 +97,36 @@ function App() {
   const [error, setError] = useState('')
 
   useEffect(() => {
-    fetch('/api/runs')
-      .then((r) => r.json() as Promise<Runs>)
-      .then(setRuns)
-      .catch((e) => setError(String(e)))
+    const load = () =>
+      fetch('/api/runs')
+        .then((r) => r.json() as Promise<Runs>)
+        .then(setRuns)
+        .catch((e) => setError(String(e)))
+    load()
+    const timer = setInterval(load, LIST_MS)
+    return () => clearInterval(timer)
   }, [])
-  // 実際のタスクは実行中も記録が増えるため、選んでいる間は5秒ごとに読み直す
+  // エージェントの記録は実行中に増えるため、選んでいる間は読み直す。変わっていなければ図を描き直さない
+  const last = useRef('')
   useEffect(() => {
     if (!query) return
+    last.current = ''
     const load = () =>
       fetch(`/api/graph?${query}`)
         .then(async (r) => {
-          const body = (await r.json()) as Graph & { error?: string }
+          const text = await r.text()
+          const body = JSON.parse(text) as Graph & { error?: string }
           if (!r.ok) throw new Error(body.error)
-          setGraph(body)
+          if (text !== last.current) {
+            last.current = text
+            setGraph(body)
+          }
           setError('')
         })
         .catch((e) => setError(e instanceof Error ? e.message : String(e)))
     load()
     if (!query.startsWith('live=')) return
-    const timer = setInterval(load, 5000)
+    const timer = setInterval(load, GRAPH_MS)
     return () => clearInterval(timer)
   }, [query])
   const flow = useMemo(() => (graph ? layout(graph) : null), [graph])
@@ -130,7 +138,7 @@ function App() {
   return (
     <>
       <aside>
-        <h2>実際のタスク</h2>
+        <h2>エージェントの記録（● は実行中）</h2>
         {runs.live.map((l) => {
           const q = `live=${encodeURIComponent(l.file)}`
           return (
@@ -140,7 +148,8 @@ function App() {
               className={query === q ? 'on' : ''}
               onClick={() => choose(q)}
             >
-              #{l.task}（世代 {l.generation}） {l.statement.slice(0, 40)}
+              {l.active ? '● ' : ''}
+              {l.name} {l.statement.slice(0, 40)}
             </button>
           )
         })}

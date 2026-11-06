@@ -23,14 +23,14 @@ test('会話ごとに列を分け、委任の行きと戻りを結び、圧縮�
   const calls: Call[] = [
     {
       context: { ...parent, messages: [user('課題')] },
-      reply: call('a', 'sh', { cmd: 'ls' }),
+      reply: call('a', 'sh', { command: 'ls' }),
     },
     {
       context: {
         ...parent,
         messages: [
           user('課題'),
-          call('a', 'sh', { cmd: 'ls' }),
+          call('a', 'sh', { command: 'ls' }),
           result('a', 'sh', '長い出力'),
         ],
       },
@@ -45,7 +45,7 @@ test('会話ごとに列を分け、委任の行きと戻りを結び、圧縮�
         ...parent,
         messages: [
           user('課題'),
-          call('a', 'sh', { cmd: 'ls' }),
+          call('a', 'sh', { command: 'ls' }),
           result('a', 'sh', '短'),
           call('b', 'delegate', { goal: '調べる' }),
           result('b', 'delegate', '要約'),

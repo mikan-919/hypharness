@@ -19,7 +19,7 @@
 //   bun run measure <セッション> approve|reject <提案の番号>
 import { Database } from 'bun:sqlite'
 import { existsSync } from 'node:fs'
-import { chmod, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
+import { appendFile, chmod, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
@@ -450,6 +450,8 @@ export async function checkout(commit: string) {
 // 候補のエージェントを、作業用ディレクトリ work で動かす。隔離環境に見せるのは、作業用ディレクトリ・課題文・
 // 候補のコード・モデル中継のソケット・エージェントの状態（/state）だけ。終了コードを返す。
 // state はタスクをまたいで持ち越す状態のディレクトリ。渡さなければ空のディレクトリを使い、終わったら消す（計測では課題の間で答えが漏れないようにする）
+export const callsOf = (log: string) => `${log}.calls.jsonl`
+
 export async function runAgent(
   agent: string,
   work: string,
@@ -468,7 +470,14 @@ export async function runAgent(
   await mkdir(dir, { recursive: true })
   const socket = join(root, 'model.sock')
   await Bun.write(join(root, 'task.md'), statement)
-  const server = serveModel(socket, complete, budget, onCall)
+  // モデルの呼び出しを、ログの隣（<ログ>.calls.jsonl）に1行ずつ残す。ダッシュボード（node/dashboard.ts）が実行中のやり取りを描く
+  const calls = callsOf(log)
+  const server = serveModel(socket, complete, budget, (call) => {
+    onCall(call)
+    appendFile(calls, `${JSON.stringify(call)}\n`, { mode: 0o600 }).catch((e) =>
+      console.error(`呼び出しの記録を残せません: ${e.message}`),
+    )
+  })
   try {
     const child = Bun.spawn(
       sandboxFor(workspace, work, 'bun /agent/solve.ts', [
@@ -598,6 +607,7 @@ export async function measure(
     const started = Date.now()
     console.log(`${tag} 課題 ${task.id}: 開始`)
     let calls: Parameters<Parameters<typeof serveModel>[3]>[0][] = []
+    const log = join(DIR, 'logs', `measure-${id}-${task.id}.log`)
     const solve = { ...task, statement: withMemory(memory, task.statement) }
     const { ok, code, patch } = REMOTE
       ? await (async () => {
@@ -614,13 +624,15 @@ export async function measure(
             complete,
             budget,
             (call) => calls.push(call),
-            join(DIR, 'logs', `measure-${id}-${task.id}.log`),
+            log,
             { state: dir },
           ),
         )
     const run = m.addRun(id, task.id, ok, budget.spent, code, patch)
     for (const c of calls)
       m.addCall(run, c.context, c.reply, c.reply.usage.cost.total)
+    // 計測の呼び出しはセッションの記録に移したため、実行中に見せるための記録は消す（試行ごとに数 MB になる）
+    await rm(callsOf(log), { force: true })
     console.log(
       `${tag} 課題 ${task.id}: ${ok ? '成功' : '失敗'}（$${budget.spent.toFixed(4)}、${Math.round((Date.now() - started) / 1000)}秒、${++done}/${tasks.length}）`,
     )

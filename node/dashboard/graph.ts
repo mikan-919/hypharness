@@ -103,8 +103,8 @@ export function buildGraph(calls: Call[]): Graph {
             kind: 'tool',
             title: b.name ?? 'ツール',
             text:
-              typeof args.cmd === 'string'
-                ? args.cmd
+              typeof args.command === 'string'
+                ? args.command
                 : JSON.stringify(args, null, 2),
           })
           if (b.id) calledBy.set(b.id, id)
