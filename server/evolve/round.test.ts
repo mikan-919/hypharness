@@ -3,8 +3,9 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Dialog, Entry, Task } from '../../shared/dialog.ts'
-import { MODULES, type Candidate, type Module } from '../../shared/evolve.ts'
+import { MODULES, type Candidate, type Module, type PromptCandidate } from '../../shared/evolve.ts'
 import { critic, pruner, runRound, weaknesses, type ProposeInput } from './round.ts'
+import { readPrompts } from './prompts.ts'
 import { archiveCandidate, listArchive, listCandidates, writeCandidate } from './store.ts'
 
 // HYPH_EVO を一時ディレクトリにした置き場を作る
@@ -458,4 +459,102 @@ test('check の前後で spent の差を取り、候補の cost に書く', asyn
   })
   expect(result.candidates.map((c) => c.cost)).toEqual([2, 0, 0, 0, 0])
   expect(listCandidates(root).map((c) => c.cost)).toEqual([2, 0, 0, 0, 0])
+})
+
+test('propose が prompt を返すと prompts/<module>.json に書き、次の周の propose にその候補が渡る', async () => {
+  const root = evo()
+  await runRound({
+    round: 1,
+    dialog: dialog(),
+    propose: (input) => ({
+      changes: [`${input.module} の変更`],
+      note: '',
+      prompt: input.module === 'context' ? 'P1' : undefined,
+    }),
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    pass: () => ({ t1: 1 }),
+    root,
+  })
+
+  expect(readPrompts('context', root)).toEqual([
+    { module: 'context', text: 'P1', passes: { t1: 1 }, cost: 0 },
+  ])
+  expect(readPrompts('completion', root)).toEqual([])
+
+  const seen: PromptCandidate[][] = []
+  await runRound({
+    round: 2,
+    dialog: dialog(),
+    propose: (input) => {
+      if (input.module === 'context') seen.push(input.prompts)
+      return { changes: [`${input.module} の変更`], note: '' }
+    },
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  expect(seen).toHaveLength(1)
+  expect(seen[0].map((p) => p.text)).toEqual(['P1'])
+})
+
+test('同じ text のプロンプトを2周にわたって提案しても、prompts/<module>.json の候補は1つになる', async () => {
+  const root = evo()
+  for (const round of [1, 2]) {
+    await runRound({
+      round,
+      dialog: dialog(),
+      propose: () => ({ changes: [`r${round} の変更`], note: '', prompt: 'P' }),
+      check: () => 0,
+      spent: () => 0,
+      limitUsd: 100,
+      pass: () => ({ t1: 1 }),
+      root,
+    })
+  }
+  expect(readPrompts('context', root)).toHaveLength(1)
+})
+
+test('pass を省略したとき、プロンプトの通過は空で費用は 0 になる', async () => {
+  const root = evo()
+  await runRound({
+    round: 1,
+    dialog: dialog(),
+    propose: () => ({ changes: ['a'], note: '', prompt: 'P' }),
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  expect(readPrompts('context', root)).toEqual([
+    { module: 'context', text: 'P', passes: {}, cost: 0 },
+  ])
+})
+
+test('測ったプロンプトは既存の候補と合わせて Pareto に通してから書く', async () => {
+  const root = evo()
+  await runRound({
+    round: 1,
+    dialog: dialog(),
+    propose: () => ({ changes: ['a'], note: '', prompt: 'A' }),
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    pass: () => ({ t1: 1, t2: 1 }),
+    root,
+  })
+  await runRound({
+    round: 2,
+    dialog: dialog(),
+    propose: () => ({ changes: ['b'], note: '', prompt: 'B' }),
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    pass: () => ({ t1: 1 }),
+    root,
+  })
+  // A は B を全課題で同等以上かつ1つで上回るので B は残らない
+  expect(readPrompts('context', root).map((p) => p.text)).toEqual(['A'])
 })

@@ -23,10 +23,18 @@ const candidate = (id: string, over: Partial<Candidate> = {}): Candidate => ({
   ...over,
 })
 
-test('HYPH_EVO の下に candidates と archive のパスを返す', () => {
+test('HYPH_EVO の下に candidates と archive と prompts のパスを返す', () => {
   const root = evo()
-  expect(evoPaths()).toEqual({ candidates: join(root, 'candidates'), archive: join(root, 'archive') })
-  expect(evoPaths('/tmp/x')).toEqual({ candidates: '/tmp/x/candidates', archive: '/tmp/x/archive' })
+  expect(evoPaths()).toEqual({
+    candidates: join(root, 'candidates'),
+    archive: join(root, 'archive'),
+    prompts: join(root, 'prompts'),
+  })
+  expect(evoPaths('/tmp/x')).toEqual({
+    candidates: '/tmp/x/candidates',
+    archive: '/tmp/x/archive',
+    prompts: '/tmp/x/prompts',
+  })
 })
 
 test('書いた候補を読み戻せる', () => {

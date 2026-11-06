@@ -1,10 +1,19 @@
-// 自己改良の1周（最終目的の 6 の 1〜6）。弱点を集め、モジュールごとに候補を作り、検証して、通ったものだけを残す。
+// 自己改良の1周（最終目的の 6 の 1〜8）。弱点を集め、モジュールごとに候補を作り、検証して、通ったものだけを残す。
 import type { Dialog } from '../../shared/dialog.ts'
-import { MODULES, type Candidate, type Module } from '../../shared/evolve.ts'
+import {
+  MODULES,
+  paretoPrompts,
+  rankPrompts,
+  type Candidate,
+  type Module,
+  type PromptCandidate,
+} from '../../shared/evolve.ts'
+import { readPrompts, writePrompts } from './prompts.ts'
 import { archiveCandidate, listArchive, listCandidates, writeCandidate } from './store.ts'
 
 // 提案に渡す材料。archive は前の周までの採用済みの候補、start はこの周の出発点。
-// failed は検証に通らなかった変更の履歴、maxChanges は1つの候補に残す変更の数の上限
+// failed は検証に通らなかった変更の履歴、maxChanges は1つの候補に残す変更の数の上限。
+// prompts はそのモジュールで残っている Pareto のプロンプトの候補を rankPrompts の順にしたもの
 export type ProposeInput = {
   module: Module
   weaknesses: string[]
@@ -13,13 +22,19 @@ export type ProposeInput = {
   start?: Candidate
   failed: string[]
   maxChanges: number
+  prompts: PromptCandidate[]
 }
 
-// 提案の返り値。id・round・module・score・cost は runRound が入れる
+// 提案の返り値。id・round・module・score・cost は runRound が入れる。
+// prompt はそのモジュールのプロンプトの候補。空でなければ pass で測る
 export type Proposal = {
   changes: string[]
   note?: string
+  prompt?: string
 }
+
+// プロンプトの候補を課題ごとの通過（0 か 1）で測る。渡さないときはモデルを呼ばずに空の結果にする
+export type Pass = (candidate: PromptCandidate) => Record<string, 0 | 1> | Promise<Record<string, 0 | 1>>
 
 export type RoundOptions = {
   round: number
@@ -29,6 +44,7 @@ export type RoundOptions = {
   spent: () => number
   limitUsd: number
   root?: string
+  pass?: Pass
 }
 
 export type RoundResult = {
@@ -151,7 +167,7 @@ export function pruner(history: Candidate[]): Set<string> {
 
 // 1周を順に進める。費用が上限を超えたら、残りの検証と採用をせずに止める
 export async function runRound(options: RoundOptions): Promise<RoundResult> {
-  const { round, dialog, propose, check, spent, limitUsd, root } = options
+  const { round, dialog, propose, check, spent, limitUsd, root, pass } = options
   const weak = weaknesses(dialog)
   // 前の周までの候補。この周で採用した候補を後の提案に混ぜないよう、始めに1回だけ取る
   const archive = listArchive(root)
@@ -163,13 +179,42 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
   const pruned = pruner(history)
   // 直前の3周に改善が無ければ、未探索のモジュールに回す
   const targets = stuckModules(history, round) ? pickUnstuck(archive, round) : [...MODULES]
+  // 各モジュールのプロンプトの候補も、この周の間は1回だけ読む
+  const promptLists = new Map<Module, PromptCandidate[]>(
+    MODULES.map((module) => [module, readPrompts(module, root)]),
+  )
   const candidates: Candidate[] = []
   const rejected: { module: Module; reason: string }[] = []
   let stopped = false
 
   for (const module of targets) {
     const id = `${round}-${MODULES.indexOf(module) + 1}`
-    const proposal = await propose({ module, weaknesses: weak, archive, round, start, failed, maxChanges })
+    const prompts = promptLists.get(module) ?? []
+    const proposal = await propose({
+      module,
+      weaknesses: weak,
+      archive,
+      round,
+      start,
+      failed,
+      maxChanges,
+      prompts: rankPrompts(prompts),
+    })
+    // プロンプトの候補があれば、課題ごとの通過で測って Pareto の候補として書く。
+    // pass を渡さないときはモデルを呼ばず、通過を空にする
+    if (proposal.prompt) {
+      const before = spent()
+      const passes = pass ? await pass({ module, text: proposal.prompt, passes: {}, cost: 0 }) : {}
+      const prompt: PromptCandidate = {
+        module,
+        text: proposal.prompt,
+        passes,
+        cost: pass ? spent() - before : 0,
+      }
+      const next = paretoPrompts([...prompts, prompt])
+      writePrompts(module, next, root)
+      promptLists.set(module, next)
+    }
     // 課題に固有すぎる提案は候補を書かずに弾く
     const judgement = critic(proposal.changes, dialog.tasks)
     if (!judgement.ok) {

@@ -23,3 +23,51 @@ export type Candidate = {
   note: string
   cost: number
 }
+
+// モジュールごとのプロンプトの候補（最終目的の 6 の 8）。
+// passes は課題 id ごとの通過（0 か 1）、cost は通過を測るのに使った費用（ドル）
+export type PromptCandidate = {
+  module: Module
+  text: string
+  passes: Record<string, 0 | 1>
+  cost: number
+}
+
+// 通過数の合計
+const totalPasses = (prompt: PromptCandidate) =>
+  Object.values(prompt.passes).reduce((sum, value) => sum + value, 0)
+
+// a が b を全課題で同等以上かつ1つ以上で上回るか。課題の無い候補は上回らない
+export function dominates(a: PromptCandidate, b: PromptCandidate): boolean {
+  const keys = new Set([...Object.keys(a.passes), ...Object.keys(b.passes)])
+  let better = false
+  for (const key of keys) {
+    const x = a.passes[key] ?? 0
+    const y = b.passes[key] ?? 0
+    if (x < y) return false
+    if (x > y) better = true
+  }
+  return better
+}
+
+// 同じ text の候補を1つにし、ほかの候補に全課題で同等以上かつ1つ以上で上回られる候補を落とす
+export function paretoPrompts(list: PromptCandidate[]): PromptCandidate[] {
+  const seen = new Set<string>()
+  const unique = list.filter((prompt) => {
+    if (seen.has(prompt.text)) return false
+    seen.add(prompt.text)
+    return true
+  })
+  return unique.filter((prompt) => !unique.some((other) => other !== prompt && dominates(other, prompt)))
+}
+
+// 通過数の合計の降順、同じなら cost の昇順、同じなら text の昇順
+export function rankPrompts(list: PromptCandidate[]): PromptCandidate[] {
+  return [...list].sort((a, b) => {
+    const pa = totalPasses(a)
+    const pb = totalPasses(b)
+    if (pa !== pb) return pb - pa
+    if (a.cost !== b.cost) return a.cost - b.cost
+    return a.text < b.text ? -1 : a.text > b.text ? 1 : 0
+  })
+}

@@ -9,7 +9,11 @@ import type { Candidate } from '../../shared/evolve.ts'
 const defaultRoot = () => process.env.HYPH_EVO || join(homedir(), '.hyph', 'evo')
 
 export function evoPaths(root = defaultRoot()) {
-  return { candidates: join(root, 'candidates'), archive: join(root, 'archive') }
+  return {
+    candidates: join(root, 'candidates'),
+    archive: join(root, 'archive'),
+    prompts: join(root, 'prompts'),
+  }
 }
 
 const ensure = (dir: string) => mkdirSync(dir, { recursive: true })
