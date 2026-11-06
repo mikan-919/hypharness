@@ -71,8 +71,9 @@ export function answerPending(messages: Message[], text: string) {
   }
 }
 
-// ponytail: 1回の実行のモデルの呼び出しは 60 回まで。長い課題で足りなくなったら増やす
-const MAX_TURNS = 60
+// 1回の実行のモデルの呼び出しの上限。費用は課題ごとの上限（ADR 0011）で止めるので、これは暴走の止め役に過ぎない。
+// 60 回では、irisout の制約を調べながら Monaco を入れる課題（t13）が終わらなかった
+const MAX_TURNS = 200
 
 // stop が値を返したツールの呼び出しで、ループを終えてその値を返す
 export async function runAgent<T>(options: {
