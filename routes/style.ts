@@ -82,6 +82,7 @@ button {
   cursor: pointer;
 }
 button:disabled { opacity: 0.5; cursor: default; }
+.start .stop { margin-top: 8px; background: var(--panel); color: var(--fail); border-color: var(--fail); }
 .start button, .reply button { background: var(--accent); color: #fff; border-color: var(--accent); }
 .queue { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
 .chip.head { border-color: var(--wait); color: var(--wait); }

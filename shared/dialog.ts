@@ -70,6 +70,8 @@ export type Dialog = {
   live: Record<string, string>
   // 流れを止めた理由。動いているときや止まっていないときは空
   halted: string
+  // 利用者が止めるボタンを押した。今の課題を終えたら止める
+  stopping: boolean
 }
 
 export type TaskState = 'solving' | 'checking' | 'committed' | 'held'

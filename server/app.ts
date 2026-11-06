@@ -108,6 +108,13 @@ app.post('/api/start', (c) => {
   return c.json({ ok: true })
 })
 
+// 止めるボタン。解いている途中では止めず、今の課題を終えたら止める
+app.post('/api/stop', (c) => {
+  if (!store.snapshot().started) return c.json({ error: '流れは動いていません' }, 409)
+  store.setRun({ stopping: true })
+  return c.json({ ok: true })
+})
+
 app.post('/api/revert', async (c) => {
   const { id } = await c.req.json<{ id: string }>()
   const result = store.revert(id)

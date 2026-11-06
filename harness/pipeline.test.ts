@@ -87,3 +87,40 @@ test('解いている間に統合ブランチが動いていたら、上書き�
   expect(store.snapshot().halted).not.toBe('')
   expect(log()).toBe('outside\ninit')
 })
+
+test('分解役に画面の最終目的を渡し、その本文を最初の課題のコミットに入れる', async () => {
+  const { dir } = repo()
+  const store = createStore()
+  store.editGoal('out.txt に ok と書く', 0, 'user', '最初')
+  const seen: string[] = []
+  const inner = script({
+    decompose: [reply('submit_task', { title: 'ok を書く', statement: 'out.txt に ok と書く' }), reply('finish', { reason: '満たした' })],
+    solve: [reply('write_file', { path: 'out.txt', content: 'ok' }), reply('done', { summary: '書いた' })],
+  })
+  const call: Call = async (body) => {
+    if (body.topicId === 'decompose') seen.push(JSON.stringify(body.context.messages[0]))
+    return inner(body)
+  }
+  await runPipeline(store, call, dir, options())
+  expect(seen[0]).toContain('out.txt に ok と書く')
+  const subject = Bun.spawnSync(['git', '-C', dir, 'log', '-1', '--format=%s', BRANCH]).stdout.toString().trim()
+  expect(subject).toBe('t1: ok を書く')
+  expect(Bun.spawnSync(['git', '-C', dir, 'show', `${BRANCH}:FINAL_GOAL.md`]).stdout.toString()).toBe('out.txt に ok と書く')
+})
+
+test('止めるボタンを押したら、今の課題を終えてから次の課題に入らずに止める', async () => {
+  const { dir, log } = repo()
+  const store = createStore()
+  const inner = script({
+    decompose: [reply('submit_task', { title: 'ok を書く', statement: 'out.txt に ok と書く' })],
+    solve: [reply('write_file', { path: 'out.txt', content: 'ok' }), reply('done', { summary: '書いた' })],
+  })
+  const call: Call = async (body) => {
+    // 解答役が解いている途中で、利用者が止めるボタンを押す
+    if (body.topicId === 'solve') store.setRun({ stopping: true })
+    return inner(body)
+  }
+  await runPipeline(store, call, dir, options())
+  expect(store.snapshot()).toMatchObject({ started: false, halted: '利用者が止めました', stopping: false })
+  expect(log()).toBe('t1: ok を書く\ninit')
+})

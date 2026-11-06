@@ -1,6 +1,6 @@
 // 開始の合図の後の流れ（ADR 0021）。分解役が課題文を1つ作り、解答役が隔離環境で解き、検査が通れば統合ブランチに積む
-import { mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import { answerPending, inside, listFiles, object, READ_TOOLS, readFile, runAgent } from './agent.ts'
 import { sandboxed } from './sandbox.ts'
@@ -17,12 +17,14 @@ function git(repo: string, ...args: string[]) {
   return result.stdout.toString().trim()
 }
 
-const DECOMPOSE = `あなたは hypharness の分解役です。FINAL_GOAL.md（最終目的）と docs/adr の決定を読み、統合ブランチの今のコードと比べて、次にやる課題を1つだけ課題文にします。
+const DECOMPOSE = `あなたは hypharness の分解役です。最終目的の本文と、統合ブランチの今のコードを比べて、次にやる課題を1つだけ課題文にします。
 
-- list_files と read_file で、FINAL_GOAL.md、docs/adr、関係するコードを読む。
+- 最終目的は、会話で渡す FINAL_GOAL.md の本文だけである。完了を判断するのは、この本文に書かれたことを満たしたかどうかだけにする。
+- docs/adr の決定は、最終目的の満たし方の制約であって、最終目的ではない。ADR に書かれていて本文に書かれていないことを、課題にしない。
+- list_files と read_file で、関係するコードと ADR を読む。
 - 課題は submit_task で出す。title に 40 文字以内の題名を付ける。1つの課題は、1回のコミットで終わる大きさにする。変える振る舞い、受け入れの条件、やらないことを書く。
 - 既に終えた課題と同じことは出さない。
-- 最終目的を満たしていると判断したら finish を呼ぶ。理由を書く。
+- 本文に書かれたことをすべて満たしていると判断したら、課題を出さずに finish を呼ぶ。理由を書く。
 - 日本語で書く。修飾表現を使わず、事実を書く。`
 
 const SOLVE = `あなたは hypharness の解答役です。課題文の内容を、作業ツリーのコードに実装します。
@@ -74,7 +76,7 @@ export type PipelineOptions = { worktrees: string; setup?: string; check?: strin
 
 // 統合ブランチに課題を積み続ける。finish か保留で終わる。止めた理由を store.halted に残す
 export async function runPipeline(store: Store, call: Call, repo: string, options: PipelineOptions) {
-  store.setRun({ started: true, halted: '' })
+  store.setRun({ started: true, halted: '', stopping: false })
   try {
     if (!git(repo, 'branch', '--list', BRANCH)) git(repo, 'branch', BRANCH, 'HEAD')
     // 前の起動が途中で止まって残した作業ツリーを片付ける
@@ -84,6 +86,11 @@ export async function runPipeline(store: Store, call: Call, repo: string, option
     }
     git(repo, 'worktree', 'prune')
     while (true) {
+      // 利用者が止めるボタンを押していたら、次の課題に入らずに止める
+      if (store.snapshot().stopping) {
+        store.setRun({ started: false, halted: '利用者が止めました', stopping: false })
+        return
+      }
       const finished = await step(store, call, repo, options)
       if (finished !== undefined) {
         store.act('decompose', 'commit', `最終目的を満たした: ${finished}`)
@@ -114,6 +121,9 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
   const base = git(repo, 'rev-parse', BRANCH)
   git(repo, 'worktree', 'add', '--detach', tree, base)
   try {
+    // 最終目的の本文は対話の状態にある（画面で書き換えたもの）。作業ツリーにも書き、最初の課題のコミットに入れる（ADR 0003）
+    const goal = store.snapshot().goal.text
+    writeFileSync(join(tree, 'FINAL_GOAL.md'), goal)
     const done = store.snapshot().tasks.filter((t) => t.state === 'committed')
     const next = await runAgent<{ statement: string } | { finish: string }>({
       store,
@@ -125,7 +135,7 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
       messages: [
         {
           role: 'user',
-          content: `既に終えた課題:\n${done.map((t) => `- ${t.statement.split('\n')[0]}`).join('\n') || '（なし）'}\n\n次の課題を1つ出してください。`,
+          content: `最終目的（FINAL_GOAL.md）の本文:\n\n${goal}\n\n既に終えた課題:\n${done.map((t) => `- ${t.statement.split('\n')[0]}`).join('\n') || '（なし）'}\n\n本文をすべて満たしていれば finish を、まだなら次の課題を1つ出してください。`,
           timestamp: Date.now(),
         },
       ],

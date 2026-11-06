@@ -20,6 +20,7 @@ const EMPTY: Dialog = {
   activity: [],
   live: {},
   halted: '',
+  stopping: false,
 }
 
 // ponytail: 動きは新しい 200 件だけを残す。遡って見る必要が出たら別のファイルに全件を書く
@@ -152,7 +153,7 @@ export function createStore(file?: string, goalFile?: string) {
       dialog.tasks = dialog.tasks.map((t) => (t.id === id ? { ...t, ...patch } : t))
       changed()
     },
-    setRun(patch: { started?: boolean; halted?: string }) {
+    setRun(patch: { started?: boolean; halted?: string; stopping?: boolean }) {
       Object.assign(dialog, patch)
       changed()
     },

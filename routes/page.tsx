@@ -15,7 +15,7 @@ const taskLabel = { solving: '解いている', checking: '検査中', committed
 
 const agentLabel = { decompose: '分解役', solve: '解答役' }
 
-export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted }: Dialog) {
+export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping }: Dialog) {
   const topicList = signal(topics)
   const items = signal(questions)
   const pending = signal(queue)
@@ -35,6 +35,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const activityList = signal(activity)
   const liveText = signal(live)
   const haltedReason = signal(halted)
+  const isStopping = signal(stopping)
   const recent = derived(() => [...activityList()].reverse().slice(0, 60))
   const writing = derived(() =>
     Object.entries(liveText())
@@ -81,6 +82,11 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
               {isStarted() ? '流れが動いている' : '開始の合図'}
             </button>
             <p class="hint">{startHint()}</p>
+            {isStarted() && (
+              <button type="button" class="stop" disabled={isStopping()} onClick={stop}>
+                {isStopping() ? '今の課題を終えたら止める' : '止める'}
+              </button>
+            )}
           </div>
         </aside>
 
@@ -240,6 +246,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
       activityList(next.activity)
       liveText(next.live)
       haltedReason(next.halted)
+      isStopping(next.stopping)
       goalText(next.goal.text)
       goalVersion(next.goal.version)
       // 書きかけでなければ、他の書き手の書き換えをそのまま映す
@@ -323,6 +330,13 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     reply(response.ok ? '' : reply())
     picked(response.ok ? '' : picked())
     failure(response.ok ? '' : `送れませんでした: ${(await response.json().catch(() => ({}))).error ?? response.status}`)
+  }
+
+  async function stop() {
+    const response = await fetch('/api/stop', { method: 'POST' }).catch(() =>
+      Response.json({ error: 'サーバーにつながりません' }, { status: 503 }),
+    )
+    failure(response.ok ? '' : `止められませんでした: ${(await response.json().catch(() => ({}))).error ?? response.status}`)
   }
 
   async function start() {
