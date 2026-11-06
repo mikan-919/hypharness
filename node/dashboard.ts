@@ -1,5 +1,5 @@
 // エージェントのやり取りを図で見せるダッシュボード。課題の出力はノードの外に出さない設計のため、
-// 中継には置かず、このノードの記録（計測のセッションと、実際のタスクの呼び出しの記録）を手元だけで見せる。
+// 中継には置かず、このノードの記録（計測のセッションと、エージェントを動かすたびに残す呼び出しの記録）を手元だけで見せる。
 // 使い方: bun run dashboard [ポート]
 import { Database } from 'bun:sqlite'
 import { readdir, stat } from 'node:fs/promises'
@@ -12,7 +12,13 @@ const LOGS = join(DIR, 'logs')
 const SESSIONS = join(DIR, 'sessions')
 // 一覧に出す計測の試行は、セッションごとに新しい順でこの数まで
 const RUN_LIMIT = 200
-const LIVE = /^(\d+)-(\d+)\.calls\.jsonl$/
+// 呼び出しの記録は runAgent がログの隣に残す（<ログ>.calls.jsonl）。名前に / を含めず、logs の外を指せないようにする
+const LIVE = /^[\w.-]+\.calls\.jsonl$/
+// 一覧に出す呼び出しの記録の数（新しい順）と、実行中とみなす最後の書き込みからの時間
+const LIVE_LIMIT = 100
+const ACTIVE_MS = 15_000
+// 一覧に出す課題文は、記録の先頭のこの長さから読む。記録は1回の呼び出しごとに文脈全体を持ち、大きくなるため
+const HEAD_BYTES = 64 * 1024
 const SESSION = /^[\w-]{1,32}$/
 
 const open = (session: string) =>
@@ -24,27 +30,33 @@ const firstStatement = (call: Call | undefined) => {
 }
 
 async function runs() {
-  const live = await Promise.all(
+  const files = await Promise.all(
     (await readdir(LOGS).catch(() => []))
       .filter((f) => LIVE.test(f))
-      .map(async (file) => {
-        const [, task, generation] = file.match(LIVE) as RegExpMatchArray
-        const first = (await Bun.file(join(LOGS, file)).text()).split(
-          '\n',
-          1,
-        )[0]
-        return {
-          file,
-          task: Number(task),
-          generation: Number(generation),
-          at: (await stat(join(LOGS, file))).mtimeMs,
-          statement: firstStatement(
-            first ? JSON.parse(first) : undefined,
-          ).slice(0, 200),
-        }
-      }),
+      .map(async (file) => ({
+        file,
+        at: (await stat(join(LOGS, file))).mtimeMs,
+      })),
   )
-  live.sort((a, b) => b.at - a.at)
+  files.sort((a, b) => b.at - a.at)
+  const now = Date.now()
+  const live = await Promise.all(
+    files.slice(0, LIVE_LIMIT).map(async ({ file, at }) => {
+      const head = await Bun.file(join(LOGS, file)).slice(0, HEAD_BYTES).text()
+      let statement = ''
+      try {
+        statement = firstStatement(JSON.parse(head.split('\n', 1)[0]))
+      } catch {
+        // 最初の呼び出しが先頭の範囲に収まらないときは、課題文を出さない
+      }
+      return {
+        file,
+        name: file.slice(0, -'.log.calls.jsonl'.length),
+        active: now - at < ACTIVE_MS,
+        statement: statement.slice(0, 200),
+      }
+    }),
+  )
   const sessions = (await readdir(SESSIONS).catch(() => []))
     .filter((f) => f.endsWith('.sqlite'))
     .map((f) => f.slice(0, -'.sqlite'.length))
