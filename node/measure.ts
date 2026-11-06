@@ -25,6 +25,7 @@ import { join, resolve } from 'node:path'
 import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { createModels } from '@earendil-works/pi-ai/models'
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
+import type { Arm } from './evolve'
 import { KINDS, type Kind, metered, openLedger } from './ledger'
 import { type Budget, type Complete, serveModel } from './model'
 import {
@@ -937,25 +938,26 @@ if (import.meta.main) {
     if (policy !== 'simple' && policy !== 'explore') {
       throw new Error('方式は simple か explore です')
     }
-    const { evolve, rate } = await import('./evolve')
+    const { evolve, openLineage, planArms, rate } = await import('./evolve')
     const commit = (
       await Bun.$`git -C ${REPO} rev-parse ${start}`.text()
     ).trim()
     const { solver, generator } = await models(charge)
-    const round = async (i: number) => {
+    const round = async (i: number, arm?: Arm) => {
       if (exhausted()) return
       console.log(`周回 ${i}/${times}（${policy}）`)
-      await evolve(m, commit, solver, generator, policy)
+      await evolve(m, commit, solver, generator, policy, arm)
     }
     // 周回は互いに独立なので並べて回す。基準版をまだ測っていなければ、最初の周回だけ先に回して基準版と予算の基準を決める
-    // ponytail: 並べた周回は同じ系統の記録から親と改善対象を選ぶため、UCB1 の選択が重なりうる。重なりが探索を偏らせたら、周回ごとに選んでから並べる
+    // 並べた周回が同じ統計から同じ改善対象を選ばないよう、explore では改善対象を周回ごとに先に決めてから並べる
     const base = m.meta('base')
     let first = 1
     if (!base || rate(m, base, 'val') === null) await round(first++)
+    const rest = Number(times) - first + 1
+    const arms =
+      policy === 'explore' ? planArms(openLineage(m).armStats(), rest) : []
     await Promise.all(
-      Array.from({ length: Number(times) - first + 1 }, (_, k) =>
-        round(first + k),
-      ),
+      Array.from({ length: rest }, (_, k) => round(first + k, arms[k])),
     )
   } else if (command === 'ideas' || command === 'ideas-check') {
     const [n = command === 'ideas' ? '1' : '3'] = args

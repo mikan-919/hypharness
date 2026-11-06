@@ -51,6 +51,19 @@ export function ucb(stats: ArmStats[]): Arm {
   return stats.reduce((best, s) => (score(s) > score(best) ? s : best)).arm
 }
 
+// 並べて回す周回の改善対象を先に決める。選んだ対象を勝ちなしの試行1回として数えてから次を選び、
+// 同じ統計から全周回が同じ対象を選ぶのを防ぐ
+export function planArms(stats: ArmStats[], k: number): Arm[] {
+  const s = stats.map((x) => ({ ...x }))
+  return Array.from({ length: k }, () => {
+    const arm = ucb(s)
+    const hit = s.find((x) => x.arm === arm)
+    if (hit) hit.n++
+    else s.push({ arm, n: 1, wins: 0 })
+    return arm
+  })
+}
+
 type Status = 'base' | 'adopted' | 'measured' | 'rejected'
 export type Candidate = {
   commit_id: string
@@ -483,6 +496,7 @@ export async function evolve(
   complete: Complete,
   generator: Complete,
   policy: Policy = 'simple',
+  planned?: Arm,
 ) {
   const lineage = openLineage(m)
   let base = m.meta('base')
@@ -505,7 +519,7 @@ export async function evolve(
     (Number(m.meta('budget:val')) / m.tasks('val').length) * BUDGET_MARGIN
   await ensure(m, parent.commit_id, 'val', complete)
 
-  const arm = policy === 'explore' ? ucb(lineage.armStats()) : null
+  const arm = policy === 'explore' ? (planned ?? ucb(lineage.armStats())) : null
   const focus = arm
     ? `- 改善対象: ${ARMS[arm]}
 - 変更は合計 ${MAX_CHANGED_LINES} 行以内にしてください
@@ -642,19 +656,43 @@ export async function promote(
         measure(m, commit, split, complete).then((r) => r.ok / r.total),
       ),
     )
-  const pad = async (commit: string, split: Split, skip = 0) => {
-    const known = rates(m, commit, split).slice(skip)
+  const pad = async (commit: string, split: Split) => {
+    const known = rates(m, commit, split)
     const rest = Math.max(0, repeats - known.length)
     console.log(
       `${commit === base ? '基準版' : '候補'} ${commit.slice(0, 7)} の${split}: 計測済み ${known.length} 回、あと ${rest} 回`,
     )
     return [...known, ...(await again(commit, split, rest))]
   }
+  // 候補の検証用は1回ずつ測り、基準版との対にした差が 0 以下になった時点で打ち切る。見込みのない候補に試行を使わない
+  const baseVal = pad(base, 'val')
+  const trim = async (commit: string) => {
+    for (
+      let known = rates(m, commit, 'val').length - 1;
+      known < repeats;
+      known++
+    ) {
+      if (known > 0) {
+        await baseVal
+        const d = paired(
+          counts(m, base, 'val'),
+          counts(m, commit, 'val', '', 1),
+        ).delta
+        if (d <= 0) {
+          console.log(
+            `候補 ${commit.slice(0, 7)} の val: ${known} 回で差 ${d.toFixed(3)}、打ち切ります`,
+          )
+          return
+        }
+      }
+      await measure(m, commit, 'val', complete)
+    }
+  }
   // 候補の成績用は、検証用で基準版を上回ったときだけ測る
   await Promise.all([
-    pad(base, 'val'),
+    baseVal,
     pad(base, 'test'),
-    ...candidates.map(({ c }) => pad(c.commit_id, 'val', 1)),
+    ...candidates.map(({ c }) => trim(c.commit_id)),
   ])
   const passed = await Promise.all(
     candidates.map(async ({ c }) => {

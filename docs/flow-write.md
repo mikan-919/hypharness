@@ -77,7 +77,7 @@ flowchart TD
         GATE{"門番: agent/ の外を変えていない・型検査・<br/>agent/ のテスト・自己編集できる<br/>gate"}
         FILTER["批評役が不要な変更を指摘し、<br/>除いた候補が門番を通ればそちらを使う<br/>filter"]
         MEASURE1["1回測って系統に記録<br/>measureCandidate"]
-        PROMOTE["上位の候補を5回ずつ測り直す<br/>最初の1回は判定に使わない<br/>promote"]
+        PROMOTE["上位の候補を1回ずつ測り直し<br/>基準版との差が 0 以下で打ち切る<br/>最初の1回は判定に使わない<br/>promote"]
         COMPARE{"検証用で確かに上回り、<br/>成績用で確かに下回らないか<br/>（差 > 差のばらつきの2倍）"}
         HARDEN["課題の強化: 基準版が20〜80%解く課題を足し、<br/>毎回解ける課題を外す<br/>harden"]
         PR["成功した試行の差分を対象のリポジトリに PR<br/>node/pr.ts"]
