@@ -1050,7 +1050,7 @@ if (import.meta.main) {
   }
 }
 
-// SDK に DeepInfra の定義がないため、OpenAI 互換の接続として定義する。料金は DeepInfra の公開値（100万トークンあたりのドル）
+// SDK に DeepInfra の定義がないため、OpenAI 互換の接続として定義する。料金は DeepInfra の定価（100万トークンあたりのドル、割引前）
 function deepinfraProvider() {
   return createProvider({
     id: 'deepinfra',
@@ -1070,7 +1070,8 @@ function deepinfraProvider() {
         input: ['text'],
         cost: { input: 0.2, output: 0.6, cacheRead: 0.006, cacheWrite: 0 },
         contextWindow: 1_048_576,
-        maxTokens: 65_536,
+        // DeepInfra の出力の上限（多くのモデルで16,384トークン）
+        maxTokens: 16_384,
         compat: {
           supportsStore: false,
           supportsDeveloperRole: false,
