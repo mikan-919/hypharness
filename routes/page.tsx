@@ -1,6 +1,7 @@
 import { derived, onMount, render, signal } from 'irisout'
 import { Layout } from './Layout.tsx'
 import type { Dialog, Usage } from '../shared/dialog.ts'
+import { mountMonaco } from 'hyph-monaco'
 
 const stateLabel = {
   researching: '調査中',
@@ -29,6 +30,8 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const savedText = signal(goal.text)
   const savedVersion = signal(goal.version)
   const draft = signal(goal.text)
+  // Monaco のエディタ。クライアントの onMount が走った後にだけ入る
+  const editor = signal<{ setValue(value: string): void; getValue(): string; dispose(): void } | null>(null)
   const conflict = signal(false)
   const failure = signal('')
   const reply = signal('')
@@ -158,11 +161,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
             <span class="hint">版 {savedVersion()}</span>
           </div>
           <form class="goal" onSubmit={save}>
-            <textarea
-              value={draft()}
-              onInput={updateDraft}
-              placeholder="作りたいものを書く。論点エージェントがこの本文を一緒に書き換える"
-            />
+            <div class="editor" />
             {conflict() ? (
               <p class="conflict">
                 保存の前に本文が書き換えられました。
@@ -260,7 +259,26 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     </Layout>,
   )
 
+  // エディタの表示だけを差し替える。didChangeModelContent からの draft の更新と往復しても値は同じになる
+  function showInEditor(text: string) {
+    const current = editor()
+    if (!current || current.getValue() === text) return
+    current.setValue(text)
+  }
+
   onMount(() => {
+    // Monaco はクライアントでだけ読む。SSR の描画では monaco-editor を import しない
+    const element = document.querySelector('.goal .editor') as HTMLElement | null
+    if (element) {
+      void mountMonaco(element, draft(), (text) => draft(text)).then(
+        (created) => {
+          editor(created)
+          // 読み込みの間に届いた本文を映す
+          showInEditor(draft())
+        },
+        () => failure('エディタを読み込めませんでした'),
+      )
+    }
     const usageSource = new EventSource('/api/usage')
     // 中継が論点ごとの合計を送ってくる
     usageSource.onmessage = (event) => usage(JSON.parse(event.data))
@@ -284,20 +302,19 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
         draft(next.goal.text)
         savedText(next.goal.text)
         savedVersion(next.goal.version)
+        showInEditor(next.goal.text)
       }
     }
     return () => {
       usageSource.close()
       dialogSource.close()
+      editor()?.dispose()
+      editor(null)
     }
   })
 
   function pickTab(event) {
     tab(event.currentTarget.dataset.tab)
-  }
-
-  function updateDraft(event) {
-    draft(event.currentTarget.value)
   }
 
   function updateReply(event) {
@@ -323,19 +340,20 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     failure(response.ok || response.status === 409 ? '' : `保存できませんでした（${response.status}）`)
   }
 
-  function save(event) {
+  async function save(event) {
     event.preventDefault()
-    draft(event.currentTarget.querySelector('textarea').value)
-    void send()
+    // 本文はエディタが draft に写している。応答の反映は send の後（await の後）に走る
+    await send()
   }
 
-  function overwrite() {
+  async function overwrite() {
     // 競合の応答で受け取った版のまま、入力中の本文で送り直す
-    void send()
+    await send()
   }
 
   function loadLatest() {
     draft(savedText())
+    showInEditor(savedText())
     conflict(false)
   }
 

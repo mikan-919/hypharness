@@ -12,6 +12,7 @@
     "@earendil-works/pi-ai": "^1.5.0",
     "hono": "^4.13.16",
     "irisout": "0.3.7",
+    "monaco-editor": "^0.57.0",
     "vite-plus": "0.3.0"
   },
   "devDependencies": {
