@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AssistantMessage } from '@earendil-works/pi-ai'
+import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
 import { BRANCH, runPipeline } from './pipeline.ts'
 import { createStore } from './store.ts'
 import { CostLimitError } from './topic.ts'
@@ -83,4 +83,24 @@ test('費用の上限で断られたら課題を保留にして流れを止め�
   expect(store.snapshot().halted).toContain('1.2')
   expect(store.snapshot().halted).toContain('上限 1')
   expect(log()).toBe('init')
+})
+
+test('分解役に保留にした課題とその理由と保留の割合を渡す', async () => {
+  const { dir } = repo()
+  const store = createStore()
+  const id = store.addTask('out.txt に ok と書く\n詳しい説明')
+  store.setTask(id, { state: 'held', reason: '検査が終了コード 1 で落ちました\n出力の続き' })
+  let messages: Message[] = []
+  const call: Call = async ({ topicId, context }) => {
+    if (topicId !== 'decompose') throw new Error('分解役以外は呼ばない')
+    messages = context.messages
+    return reply('finish', { reason: '満たした' })
+  }
+  await runPipeline(store, call, dir, options())
+  const user = messages.find((m) => m.role === 'user')
+  const text = String(user?.content)
+  expect(text).toContain(id)
+  expect(text).toContain('out.txt に ok と書く')
+  expect(text).toContain('検査が終了コード 1 で落ちました')
+  expect(text).toContain('保留 1 / 課題 1')
 })

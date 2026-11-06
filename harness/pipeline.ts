@@ -68,6 +68,21 @@ const SOLVE_TOOLS = [
 
 const arg = (call: ToolCall, name: string) => String((call.arguments as Record<string, unknown>)[name] ?? '')
 
+// 分解役に渡すユーザーメッセージ。終えた課題、保留にした課題とその理由、保留の割合を入れる（ADR 0010）
+function decomposeMessage(store: Store) {
+  const tasks = store.snapshot().tasks
+  const first = (text: string) => text.split('\n')[0]
+  const done = tasks.filter((t) => t.state === 'committed')
+  const held = tasks.filter((t) => t.state === 'held')
+  const lines = [
+    `既に終えた課題:\n${done.map((t) => `- ${first(t.statement)}`).join('\n') || '（なし）'}`,
+    `保留にした課題:\n${held.map((t) => `- ${t.id}: ${first(t.statement)}（保留の理由: ${first(t.reason)}）`).join('\n') || '（なし）'}`,
+  ]
+  if (tasks.length > 0) lines.push(`保留 ${held.length} / 課題 ${tasks.length}`)
+  lines.push('次の課題を1つ出してください。')
+  return lines.join('\n\n')
+}
+
 export type PipelineOptions = {
   worktrees: string
   setup?: string
@@ -110,7 +125,6 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
   mkdirSync(dirname(tree), { recursive: true })
   git(repo, 'worktree', 'add', '--detach', tree, BRANCH)
   try {
-    const done = store.snapshot().tasks.filter((t) => t.state === 'committed')
     const next = await runAgent<{ statement: string } | { finish: string }>({
       store,
       call,
@@ -118,13 +132,7 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
       taskId: `t${n}`,
       system: DECOMPOSE,
       tools: DECOMPOSE_TOOLS,
-      messages: [
-        {
-          role: 'user',
-          content: `既に終えた課題:\n${done.map((t) => `- ${t.statement.split('\n')[0]}`).join('\n') || '（なし）'}\n\n次の課題を1つ出してください。`,
-          timestamp: Date.now(),
-        },
-      ],
+      messages: [{ role: 'user', content: decomposeMessage(store), timestamp: Date.now() }],
       run: async (c) => (c.name === 'list_files' ? listFiles(tree, arg(c, 'path')) : readFile(tree, arg(c, 'path'))),
       stop: (c) =>
         c.name === 'submit_task'
