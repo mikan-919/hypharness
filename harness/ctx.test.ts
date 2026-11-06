@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
 import { createStore } from '../server/store.ts'
 import { recall, runAgent } from './agent.ts'
-import { ctx, editContext } from './ctx.ts'
+import { ctx, editContext, SHRINK_HINT } from './ctx.ts'
 import type { Call } from './topic.ts'
 
 const message = (text: string): Message => ({ role: 'user', content: text, timestamp: 0 })
@@ -391,4 +391,67 @@ test('recall で一致したブロックの参照回数が1増える', () => {
   expect(refs('要約')).toBe(1)
   recall('solve', 'アルファワード')
   expect(refs('要約')).toBe(2)
+})
+
+// 文脈のトークン数が CONTEXT_WINDOW の 70% を超える本文を作る。4 文字で 1 トークン
+const overText = 'x'.repeat(4 * 734_004)
+const underText = 'x'.repeat(4 * 700_000)
+
+test('文脈のトークン数が上限の 70% を超えたかを返す', () => {
+  const store = ctx('solve')
+  store.append(message('はじめての指示'))
+  // 上限の 70% は 734,003.2 トークン。境目では超えない
+  store.addSummary('x'.repeat(4 * 734_003), [])
+  expect(store.contextTokens()).toBe(734_003)
+  expect(store.overLimit()).toBe(false)
+  store.addSummary('4文字', [])
+  expect(store.contextTokens()).toBe(734_004)
+  expect(store.overLimit()).toBe(true)
+})
+
+test('70% を超える状態で recall を呼ぶと、要約して縮める指示の行が入る', () => {
+  const store = ctx('solve')
+  store.append(message('はじめての指示'))
+  store.append(message('アルファワードを含む本文'))
+  store.addSummary(overText, [])
+  const text = recall('solve', 'アルファワード')
+  expect(text).toContain('アルファワードを含む本文')
+  expect(text.endsWith(SHRINK_HINT)).toBe(true)
+  expect(text).toContain('edit_context')
+  expect(text).toContain('recall')
+})
+
+test('70% 以下の状態では、recall の返り値に指示の行が入らない', () => {
+  const store = ctx('solve')
+  store.append(message('はじめての指示'))
+  store.append(message('アルファワードを含む本文'))
+  store.addSummary(underText, [])
+  const text = recall('solve', 'アルファワード')
+  expect(text).not.toContain(SHRINK_HINT)
+})
+
+test('70% を超える状態では、edit_context が成功しても失敗しても指示の行が入る', () => {
+  const store = ctx('solve')
+  store.append(message('はじめての指示'))
+  store.append(message('置き換える前の文'))
+  store.addSummary(overText, [])
+  store.buildContextFile()
+  const ok = editContext('solve', '置き換える前の文', '置き換えた後の文')
+  expect(ok).toContain('要約ノード')
+  expect(ok.endsWith(SHRINK_HINT)).toBe(true)
+  const ng = editContext('solve', '見つからない語', '置き換え後')
+  expect(ng).toContain('1回も現れない')
+  expect(ng.endsWith(SHRINK_HINT)).toBe(true)
+})
+
+test('70% 以下の状態では、edit_context の返り値に指示の行が入らない', () => {
+  const store = ctx('solve')
+  store.append(message('はじめての指示'))
+  store.addSummary('小さな要約', [])
+  store.addSummary(underText, [])
+  store.buildContextFile()
+  const ok = editContext('solve', '置き換える前の文', '置き換えた後の文')
+  expect(ok).not.toContain(SHRINK_HINT)
+  const ng = editContext('solve', '見つからない語', '置き換え後')
+  expect(ng).not.toContain(SHRINK_HINT)
 })

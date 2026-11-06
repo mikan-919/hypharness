@@ -3,7 +3,7 @@ import { readdir } from 'node:fs/promises'
 import { relative, resolve } from 'node:path'
 import type { AssistantMessage, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { AgentStore } from '../shared/contract.ts'
-import { ctx, editContext } from './ctx.ts'
+import { ctx, editContext, SHRINK_HINT } from './ctx.ts'
 import type { Call } from './topic.ts'
 
 const short = (text: string, max = 160) => (text.length > max ? `${text.slice(0, max)}…` : text)
@@ -101,12 +101,17 @@ export const EDIT_CONTEXT_TOOL = {
   ),
 } as Tool
 
-// recall の結果を文にする。一致が無ければその旨を返す。一致したブロックは参照したものとして数える
+// recall の結果を文にする。一致が無ければその旨を返す。一致したブロックは参照したものとして数える。
+// 文脈のトークン数が上限の 70% を超えているときは、返す文の末尾に縮める指示を添える
 export function recall(agent: string, query: unknown, maxResults?: unknown) {
   const n = Number(maxResults)
   const store = ctx(agent)
+  // 文脈が上限に近いときだけ、末尾に縮める指示を添える
+  const withHint = (text: string) => (store.overLimit() ? `${text}\n${SHRINK_HINT}` : text)
   const found = store.search(String(query ?? ''), Number.isFinite(n) && n > 0 ? n : undefined)
-  if (found.messages.length === 0 && found.summaries.length === 0) return '一致するメッセージや要約はありません。'
+  if (found.messages.length === 0 && found.summaries.length === 0) {
+    return withHint('一致するメッセージや要約はありません。')
+  }
   for (const message of found.messages) store.markReferenced('生', message.id)
   for (const summary of found.summaries) store.markReferenced('要約', summary.id)
   const lines: string[] = []
@@ -115,7 +120,7 @@ export function recall(agent: string, query: unknown, maxResults?: unknown) {
     lines.push(`メッセージ ${message.id}${inSummaries}:\n${message.text}`)
   }
   for (const summary of found.summaries) lines.push(`要約 ${summary.id}:\n${summary.text}`)
-  return lines.join('\n\n')
+  return withHint(lines.join('\n\n'))
 }
 
 // 最後の応答のツールの呼び出しのうち、結果のないものに text を結果として返す。API は結果のない呼び出しの後に会話を続けさせない

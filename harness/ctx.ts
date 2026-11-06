@@ -11,6 +11,13 @@ export const root = () => process.env.HYPH_CTX_DIR || join(homedir(), '.hyph', '
 // モデルの文脈の大きさ（トークン）。server/model.ts の contextWindow に合わせる
 export const CONTEXT_WINDOW = 1_048_576
 
+// 文脈がこの割合を超えたら、要約して縮めるよう促す
+export const CONTEXT_RATIO = 0.7
+
+// 文脈が上限に近いときに、ツールの結果の末尾に添える1行
+export const SHRINK_HINT =
+  '文脈が上限の 70% を超えました。edit_context で文脈ファイルを縮め、recall で取る件数（max_results）を減らして要約して縮めてください。'
+
 // 本文の文字数からトークン数を見積もる。モデルは呼ばず、4 文字を 1 トークンとする
 export const estimateTokens = (text: string) => Math.ceil(text.length / 4)
 
@@ -85,6 +92,11 @@ export function ctx(agent: string) {
     for (const { id, message } of raw) list.push({ kind: '生', id, text: messageText(message) })
     return list
   }
+  // 文脈ファイルのトークン数の見積もり。blocks() の本文を estimateTokens で数える
+  const contextTokens = (keep = CONTEXT_KEEP) =>
+    blocks(keep).reduce((n, b) => n + estimateTokens(b.text), 0)
+  // 文脈ファイルのトークン数が CONTEXT_WINDOW の 70% を超えたか
+  const overLimit = (keep = CONTEXT_KEEP) => contextTokens(keep) > CONTEXT_WINDOW * CONTEXT_RATIO
   // ターンの番号。実行をまたいで数える
   const currentTurn = () => (db.query('SELECT turn FROM turn_counter WHERE id = 1').get() as { turn: number }).turn
   const lastTurnOf = (kind: string, id: number) =>
@@ -130,6 +142,10 @@ export function ctx(agent: string) {
     },
     // 文脈のブロックごとの1行
     contextStatus,
+    // 文脈ファイルのトークン数の見積もり
+    contextTokens,
+    // 文脈ファイルのトークン数が CONTEXT_WINDOW の 70% を超えたか
+    overLimit,
     // ブロックを参照したものとして数える
     markReferenced,
     append(message: Message) {
@@ -195,21 +211,24 @@ export function ctx(agent: string) {
 }
 
 // 文脈ファイルを読み、old が1回だけ現れるときその1箇所を next に置き換え、置き換えた後の本文を
-// 新しい要約ノードとして保存し、文脈ファイルも書き直す。変えられないときは理由を返す。元のメッセージは消さない
+// 新しい要約ノードとして保存し、文脈ファイルも書き直す。変えられないときは理由を返す。元のメッセージは消さない。
+// 文脈のトークン数が上限の 70% を超えているときは、返す文の末尾に縮める指示を添える
 export function editContext(agent: string, old: string, next: string) {
   const store = ctx(agent)
-  if (next === '') return 'new が空文字のため、文脈ファイルを変えませんでした。空にする編集はできません。'
-  if (old === '') return 'old が空文字のため、文脈ファイルを変えませんでした。'
+  // 文脈が上限に近いときだけ、末尾に縮める指示を添える
+  const withHint = (text: string) => (store.overLimit() ? `${text}\n${SHRINK_HINT}` : text)
+  if (next === '') return withHint('new が空文字のため、文脈ファイルを変えませんでした。空にする編集はできません。')
+  if (old === '') return withHint('old が空文字のため、文脈ファイルを変えませんでした。')
   const path = join(root(), `${agent}.md`)
   if (!existsSync(path)) store.buildContextFile()
   const text = readFileSync(path, 'utf8')
   const first = text.indexOf(old)
-  if (first < 0) return `old が文脈ファイルに1回も現れないため、変えませんでした: ${old}`
+  if (first < 0) return withHint(`old が文脈ファイルに1回も現れないため、変えませんでした: ${old}`)
   if (text.indexOf(old, first + old.length) >= 0) {
-    return `old が文脈ファイルに2回以上現れるため、変えませんでした: ${old}`
+    return withHint(`old が文脈ファイルに2回以上現れるため、変えませんでした: ${old}`)
   }
   const edited = text.slice(0, first) + next + text.slice(first + old.length)
   const id = store.addSummary(edited, [])
   writeFileSync(path, edited)
-  return `要約ノード ${id} として保存し、文脈ファイルを書き換えました。`
+  return withHint(`要約ノード ${id} として保存し、文脈ファイルを書き換えました。`)
 }
