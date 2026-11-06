@@ -13,6 +13,7 @@ const DECOMPOSE = `あなたは hypharness の分解役です。最終目的の�
 - docs/adr の決定は、最終目的の満たし方の制約であって、最終目的ではない。ADR に書かれていて本文に書かれていないことを、課題にしない。
 - list_files と read_file で、関係するコードと ADR を読む。
 - 課題は submit_task で出す。title に 40 文字以内の題名を付ける。1つの課題は、1回のコミットで終わる大きさにする。変える振る舞い、受け入れの条件、やらないことを書く。
+- 解答役の隔離環境にはネットワークがなく、依存を足せない（bun install も動かない）。今の node_modules にない依存が要る課題は出さない。
 - 既に終えた課題と同じことは出さない。
 - 本文に書かれたことをすべて満たしていると判断したら、課題を出さずに finish を呼ぶ。理由を書く。
 - 日本語で書く。修飾表現を使わず、事実を書く。`
@@ -22,6 +23,7 @@ const SOLVE = `あなたは hypharness の解答役です。課題文の内容�
 - list_files と read_file で読み、write_file で書く。run はコマンドを隔離環境で動かす。隔離環境にはネットワークがない。
 - 課題文の受け入れの条件を満たす最小の変更をする。条件に書かれていない機能、抽象化、設定は足さない。
 - 終えたら done を呼び、何を変えたかを summary に書く。done の後に検査を動かし、落ちたら出力を返す。
+- 依存の追加やネットワークが要るなど、作業ツリーの中だけでは課題を満たせないと分かったら、回避策を作らずに give_up を呼び、理由を書く。
 - 日本語で書く。修飾表現を使わず、事実を書く。`
 
 // 経験の一覧に入れる項目の根拠の形。パイプラインが実行の結果から書いた項目だけに合う
@@ -74,6 +76,11 @@ const SOLVE_TOOLS = [
     name: 'done',
     description: '実装を終えたときに呼ぶ',
     parameters: object({ summary: { type: 'string' } }, ['summary']),
+  },
+  {
+    name: 'give_up',
+    description: '作業ツリーの中だけでは課題を満たせないときに呼ぶ。課題は保留になる',
+    parameters: object({ reason: { type: 'string' } }, ['reason']),
   },
 ] as Tool[]
 
@@ -141,7 +148,10 @@ export async function solve(store: AgentStore, call: Call, job: Extract<Job, { r
       }
       throw new Error(`未知のツールです: ${c.name}`)
     },
-    stop: (c) => (c.name === 'done' ? arg(c, 'summary') : undefined),
+    stop: (c) => {
+      if (c.name === 'give_up') throw new Error(`解答役が諦めた: ${arg(c, 'reason')}`)
+      return c.name === 'done' ? arg(c, 'summary') : undefined
+    },
   })
   return { summary, messages }
 }

@@ -60,15 +60,15 @@ export async function runPipeline(store: Store, roles: Roles, repo: string, opti
   } catch (e) {
     const reason = (e as Error).message
     store.act('solve', 'fail', reason)
-    holdUnfinished(store)
+    holdUnfinished(store, reason)
     store.setRun({ started: false, halted: reason })
   }
 }
 
 // 途中で止まった課題を保留にする。「解いている」のまま残さない
-export function holdUnfinished(store: Store) {
+export function holdUnfinished(store: Store, reason = '流れが途中で止まった') {
   for (const t of store.snapshot().tasks) {
-    if (t.state === 'solving' || t.state === 'checking') store.setTask(t.id, { state: 'held', reason: t.reason || '流れが途中で止まった' })
+    if (t.state === 'solving' || t.state === 'checking') store.setTask(t.id, { state: 'held', reason: t.reason || reason })
   }
 }
 
