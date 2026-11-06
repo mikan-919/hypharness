@@ -23,6 +23,19 @@ function script(replies: Record<string, AssistantMessage[]>): Call {
   }
 }
 
+type Call0 = { taskId: string; system: string }
+
+// 解答役に渡したシステムプロンプトを、課題 id と組にして集める
+function recorded(replies: Record<string, AssistantMessage[]>, prompts: Call0[]): Call {
+  const inner = script(replies)
+  return async (body) => {
+    if (body.topicId === 'solve') prompts.push({ taskId: body.taskId, system: body.context.systemPrompt })
+    return inner(body)
+  }
+}
+
+const systems = (prompts: Call0[], taskId: string) => prompts.filter((p) => p.taskId === taskId).map((p) => p.system)
+
 function repo() {
   const dir = mkdtempSync(join(tmpdir(), 'hyph-repo-'))
   const git = (...args: string[]) => Bun.spawnSync(['git', '-C', dir, ...args])
@@ -103,4 +116,91 @@ test('分解役に保留にした課題とその理由と保留の割合を渡�
   expect(text).toContain('out.txt に ok と書く')
   expect(text).toContain('検査が終了コード 1 で落ちました')
   expect(text).toContain('保留 1 / 課題 1')
+})
+
+test('解答役のシステムプロンプトに、根拠が実行の結果の経験だけを新しい順に入れる', async () => {
+  // 検査に落ちて保留になった課題の失敗が、次に解く課題のシステムプロンプトに入る
+  const { dir } = repo()
+  const store = createStore()
+  // 論点エージェントが書いた項目は、根拠が実行の結果でないので入れない
+  store.record({ topicId: 'k1', kind: 'fact', text: '利用者は赤を選んだ', evidence: '利用者の答え' })
+  const wrong = () => [reply('write_file', { path: 'out.txt', content: 'ng' }), reply('done', { summary: '書いた' })]
+  const first: Call0[] = []
+  await runPipeline(
+    store,
+    recorded(
+      {
+        decompose: [reply('submit_task', { statement: 'out.txt に ok と書く' })],
+        solve: [...wrong(), reply('done', { summary: 'もう一度' }), reply('done', { summary: 'もう一度' })],
+      },
+      first,
+    ),
+    dir,
+    options(),
+  )
+  expect(store.snapshot().tasks[0]).toMatchObject({ state: 'held' })
+  expect(store.snapshot().entries.filter((e) => e.kind === 'fail')).toHaveLength(3)
+  const second: Call0[] = []
+  await runPipeline(
+    store,
+    recorded(
+      {
+        decompose: [reply('submit_task', { statement: 'out.txt に ok と書く' }), reply('finish', { reason: '満たした' })],
+        solve: [reply('write_file', { path: 'out.txt', content: 'ok' }), reply('done', { summary: '直した' })],
+      },
+      second,
+    ),
+    dir,
+    options(),
+  )
+  // 2つ目の課題を解く解答役の呼び出し
+  const next = systems(second, 't2')
+  expect(next.length).toBeGreaterThan(0)
+  for (const system of next) {
+    expect(system).toContain('検査が終了コード 1 で落ちました')
+    expect(system).toContain('課題 t1 の検査の終了コード 1')
+    expect(system).not.toContain('利用者は赤を選んだ')
+    expect(system).not.toContain('利用者の答え')
+  }
+
+  // 積んだ課題の事実の項目（課題文の1行目、変えた点、積んだコミットの短い id）が入る
+  const committed = repo()
+  const other = createStore()
+  other.record({ topicId: 'k1', kind: 'fact', text: '利用者は赤を選んだ', evidence: '利用者の答え' })
+  const prompts: Call0[] = []
+  await runPipeline(
+    other,
+    recorded(
+      {
+        decompose: [
+          reply('submit_task', { statement: 'out.txt に ok と書く\n詳しい説明' }),
+          reply('submit_task', { statement: 'note.txt を足す' }),
+          reply('finish', { reason: '満たした' }),
+        ],
+        solve: [
+          reply('write_file', { path: 'out.txt', content: 'ok' }),
+          reply('done', { summary: 'out.txt を書いた' }),
+          reply('write_file', { path: 'note.txt', content: 'n' }),
+          reply('done', { summary: 'note.txt を足した' }),
+        ],
+      },
+      prompts,
+    ),
+    committed.dir,
+    options(),
+  )
+  expect(other.snapshot().tasks[0].state).toBe('committed')
+  const commit = other.snapshot().tasks[0].commit.slice(0, 8)
+  // 項目がないときは節を出さない
+  for (const system of systems(prompts, 't1')) expect(system).not.toContain('共有文脈から作った経験の一覧')
+  // 2つ目の課題を解く解答役の呼び出し
+  const later = systems(prompts, 't2')
+  expect(later.length).toBeGreaterThan(0)
+  for (const system of later) {
+    expect(system).toContain('共有文脈から作った経験の一覧')
+    expect(system).toContain('out.txt に ok と書く')
+    expect(system).toContain('変えた点: out.txt を書いた')
+    expect(system).toContain(`課題 t1 のコミット ${commit}`)
+    expect(system).not.toContain('利用者は赤を選んだ')
+  }
 })

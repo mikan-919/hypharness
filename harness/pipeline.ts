@@ -33,6 +33,24 @@ const SOLVE = `あなたは hypharness の解答役です。課題文の内容�
 - 終えたら done を呼び、何を変えたかを summary に書く。done の後に検査を動かし、落ちたら出力を返す。
 - 日本語で書く。修飾表現を使わず、事実を書く。`
 
+// 経験の一覧に入れる項目の根拠の形。パイプラインが実行の結果から書いた項目だけに合う
+const EXECUTION = /^課題 t\d+ の(コミット \S+|検査の終了コード \S+)$/
+
+// プロンプトが課題の数だけ伸びないための上限
+const MAX_EXPERIENCE = 20
+
+// 解答役のシステムプロンプトに付ける、共有文脈から作った経験の一覧（ADR 0004）
+function experience(store: Store) {
+  const entries = store
+    .snapshot()
+    .entries.filter((e) => EXECUTION.test(e.evidence))
+    .slice(-MAX_EXPERIENCE)
+    .reverse()
+  if (entries.length === 0) return ''
+  const lines = entries.map((e) => `- ${e.kind}: ${e.text.split('\n').join(' / ')}（根拠: ${e.evidence}）`)
+  return `\n\n共有文脈から作った経験の一覧（新しい順）:\n${lines.join('\n')}`
+}
+
 const DECOMPOSE_TOOLS = [
   ...READ_TOOLS,
   {
@@ -148,10 +166,16 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
       const setup = Bun.spawnSync(['sh', '-c', options.setup], { cwd: tree, stdout: 'pipe', stderr: 'pipe' })
       if (setup.exitCode !== 0) throw new Error(`準備のコマンドが失敗しました: ${setup.stderr.toString().slice(-2000)}`)
     }
-    await solve(store, call, tree, taskId, next.statement, options)
+    const summary = await solve(store, call, tree, taskId, next.statement, options)
     const commit = git(tree, 'rev-parse', 'HEAD')
     git(repo, 'branch', '-f', BRANCH, commit)
     store.setTask(taskId, { state: 'committed', commit })
+    store.record({
+      topicId: 'solve',
+      kind: 'fact',
+      text: `${next.statement.split('\n')[0]}\n変えた点: ${summary}`,
+      evidence: `課題 ${taskId} のコミット ${commit.slice(0, 8)}`,
+    })
     store.act('solve', 'commit', `${taskId} を ${commit.slice(0, 8)} として統合ブランチに積んだ`)
     if (git(repo, 'remote').split('\n').includes('origin')) git(repo, 'push', 'origin', BRANCH)
     return undefined
@@ -160,18 +184,19 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
   }
 }
 
+// 課題を解く。検査が通れば done の summary を返す
 async function solve(store: Store, call: Call, tree: string, taskId: string, statement: string, options: PipelineOptions) {
   const messages: Message[] = [{ role: 'user', content: `課題 ${taskId}:\n${statement}`, timestamp: Date.now() }]
   // 最後の検査の失敗の出力。保留にしたときの理由に使う
   let reason = ''
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     store.setTask(taskId, { state: 'solving', attempts: attempt })
-    await runAgent({
+    const summary = await runAgent<string>({
       store,
       call,
       agent: 'solve',
       taskId,
-      system: SOLVE,
+      system: SOLVE + experience(store),
       tools: SOLVE_TOOLS,
       messages,
       run: async (c) => {
@@ -199,19 +224,27 @@ async function solve(store: Store, call: Call, tree: string, taskId: string, sta
     })
     store.setTask(taskId, { state: 'checking' })
     git(tree, 'add', '-A')
-    const failure = !git(tree, 'status', '--porcelain')
-      ? '作業ツリーに変更がありません'
-      : options.check
-        ? await sandboxed(tree, options.check).then(({ code, output }) => (code === 0 ? '' : `検査が終了コード ${code} で落ちました\n${output}`))
-        : ''
+    let failure: { text: string; code: string } | undefined
+    if (!git(tree, 'status', '--porcelain')) failure = { text: '作業ツリーに変更がありません', code: 'なし' }
+    else if (options.check) {
+      const { code, output } = await sandboxed(tree, options.check)
+      if (code !== 0) failure = { text: `検査が終了コード ${code} で落ちました\n${output}`, code: String(code) }
+    }
     if (!failure) {
       git(tree, '-c', 'user.name=hypharness', '-c', 'user.email=hypharness@localhost', 'commit', '-q', '-m', `${taskId}: ${statement.split('\n')[0]}`)
       store.act('solve', 'check', `${taskId} の検査が通った`)
-      return
+      return summary
     }
-    reason = failure
-    store.act('solve', 'check', failure.split('\n')[0])
-    answerPending(messages, `${failure}\n\n直してから、もう一度 done を呼んでください。`)
+    reason = failure.text
+    store.act('solve', 'check', failure.text.split('\n')[0])
+    // 差し戻し1回ごとに、検査の失敗を共有文脈に残す。3回落ちて保留にしたときは、この最後の記録が残る
+    store.record({
+      topicId: 'solve',
+      kind: 'fail',
+      text: failure.text.split('\n')[0],
+      evidence: `課題 ${taskId} の検査の終了コード ${failure.code}`,
+    })
+    answerPending(messages, `${failure.text}\n\n直してから、もう一度 done を呼んでください。`)
   }
   const spent = options.spent?.(taskId) ?? 0
   store.setTask(taskId, { state: 'held', reason, spent })
