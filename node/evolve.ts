@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   BUDGET_MARGIN,
+  budgetKey,
   checkout,
   DIR,
   type Measure,
@@ -516,7 +517,7 @@ export async function evolve(
   const parent = choose(m, lineage.pool())
   console.log(`親: ${parent.commit_id.slice(0, 7)}（${parent.description}）`)
   const perTask =
-    (Number(m.meta('budget:val')) / m.tasks('val').length) * BUDGET_MARGIN
+    (Number(m.meta(budgetKey('val'))) / m.tasks('val').length) * BUDGET_MARGIN
   await ensure(m, parent.commit_id, 'val', complete)
 
   const arm = policy === 'explore' ? (planned ?? ucb(lineage.armStats())) : null
