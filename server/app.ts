@@ -15,17 +15,27 @@ try {
   process.loadEnvFile('.env')
 } catch {}
 
-export const relay = createRelay(deepinfra(), Number(process.env.TASK_LIMIT_USD ?? 1))
 const RELAY_SOCKET = join(homedir(), '.hyph', 'relay.sock')
 const REPO = process.env.TARGET_REPO ?? process.cwd()
-// 対話は対象のリポジトリごとに1つ保存する
-const store = createStore(
-  join(homedir(), '.hyph', 'dialogs', `${REPO.replaceAll('/', '_')}.json`),
-  join(REPO, 'FINAL_GOAL.md'),
-)
+
+// 開発サーバーは server/app.ts が変わるたびに同じプロセスでこのファイルを読み直す。
+// 中継・対話の状態・論点エージェントが二重にならないよう、プロセスに1つだけ置く
+const shared = ((globalThis as any).__hypharness ??= {
+  relay: createRelay(deepinfra(), Number(process.env.TASK_LIMIT_USD ?? 1)),
+  // 対話は対象のリポジトリごとに1つ保存する
+  store: createStore(
+    join(homedir(), '.hyph', 'dialogs', `${REPO.replaceAll('/', '_')}.json`),
+    join(REPO, 'FINAL_GOAL.md'),
+  ),
+  booted: false,
+}) as { relay: ReturnType<typeof createRelay>; store: ReturnType<typeof createStore>; booted: boolean }
+export const relay = shared.relay
+const store = shared.store
 
 // 中継を開き、対話を始める。待受は起動ファイルと開発サーバーから呼ぶ（Vite の設定の読み込みでは開かない）
 export function boot() {
+  if (shared.booted) return RELAY_SOCKET
+  shared.booted = true
   try {
     unlinkSync(RELAY_SOCKET)
   } catch {}

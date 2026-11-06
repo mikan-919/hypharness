@@ -214,7 +214,8 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text: draft(), version }),
-    })
+      // 通信が失敗しても送信中の印を解除する（開発サーバーの再起動と重なると fetch が失敗する）
+    }).catch(() => Response.json({ error: 'サーバーにつながりません。少し待ってからもう一度送ってください' }, { status: 503 }))
     sending(false)
     conflict(response.status === 409)
     failure(response.ok || response.status === 409 ? '' : `保存できませんでした（${response.status}）`)
@@ -260,7 +261,8 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id: head().id, text }),
-    })
+      // 通信が失敗しても送信中の印を解除する（開発サーバーの再起動と重なると fetch が失敗する）
+    }).catch(() => Response.json({ error: 'サーバーにつながりません。少し待ってからもう一度送ってください' }, { status: 503 }))
     sending(false)
     reply(response.ok ? '' : reply())
     failure(response.ok ? '' : `送れませんでした: ${(await response.json().catch(() => ({}))).error ?? response.status}`)
