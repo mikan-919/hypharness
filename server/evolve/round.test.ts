@@ -607,3 +607,104 @@ test('測ったプロンプトは既存の候補と合わせて Pareto に通し
   // A は B を全課題で同等以上かつ1つで上回るので B は残らない
   expect(readPrompts('context', root).map((p) => p.text)).toEqual(['A'])
 })
+
+test('check が 1 を返した候補だけで holdout が呼ばれ、渡る tasks は committed の課題だけになる', async () => {
+  const root = evo()
+  const calls: { id: string; tasks: string[] }[] = []
+  const result = await runRound({
+    round: 1,
+    dialog: dialog({
+      tasks: [
+        task('t1', 'committed', ''),
+        task('t2', 'held', '保留の理由'),
+        task('t3', 'committed', ''),
+        task('t4', 'solving', ''),
+      ],
+    }),
+    propose: (input) => ({ changes: [`${input.module} の変更`], note: '' }),
+    // tool-use（1-2）と completion（1-5）だけ通す
+    check: (candidate) => (candidate.id === '1-2' || candidate.id === '1-5' ? 1 : 0),
+    spent: () => 0,
+    limitUsd: 100,
+    holdout: (candidate, tasks) => {
+      calls.push({ id: candidate.id, tasks: tasks.map((t) => t.id) })
+      return 1
+    },
+    root,
+  })
+
+  expect(calls.map((c) => c.id)).toEqual(['1-2', '1-5'])
+  expect(calls.every((c) => c.tasks.join(',') === 't1,t3')).toBe(true)
+  // 測定は採否に使わない。score 0 の候補は candidates に残る
+  expect(result.candidates.map((c) => c.score)).toEqual([0, 1, 0, 0, 1])
+  expect(result.candidates.map((c) => c.holdout)).toEqual([undefined, 1, undefined, undefined, 1])
+})
+
+test('score が 0 の候補と、上限で stopped になった後の候補では holdout が呼ばれない', async () => {
+  const root = evo()
+  const called: string[] = []
+  let calls = 0
+  const result = await runRound({
+    round: 3,
+    dialog: dialog(),
+    propose: (input) => ({ changes: [`${input.module} の変更`], note: '' }),
+    check: () => 1,
+    // 最初の1回だけ上限以下、その後は上限を超える
+    spent: () => (calls++ === 0 ? 1 : 100),
+    limitUsd: 50,
+    holdout: (candidate) => {
+      called.push(candidate.id)
+      return 1
+    },
+    root,
+  })
+
+  expect(result.stopped).toBe(true)
+  expect(called).toEqual(['3-1'])
+  expect(result.candidates.map((c) => c.holdout)).toEqual([1, undefined, undefined, undefined, undefined])
+
+  // score 0 の候補だけの周では1度も呼ばない
+  called.length = 0
+  const second = await runRound({
+    round: 4,
+    dialog: dialog(),
+    propose: (input) => ({ changes: [`${input.module} の変更`], note: '' }),
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    holdout: (candidate) => {
+      called.push(candidate.id)
+      return 0
+    },
+    root,
+  })
+  expect(called).toEqual([])
+  expect(second.candidates.map((c) => c.holdout)).toEqual([
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+  ])
+})
+
+test('採用した候補の JSON に holdout が残り、listArchive から読める', async () => {
+  const root = evo()
+  const result = await runRound({
+    round: 1,
+    dialog: dialog(),
+    propose: (input) => ({ changes: [`${input.module} の変更`], note: '' }),
+    check: () => 1,
+    spent: () => 0,
+    limitUsd: 100,
+    holdout: (candidate) => (candidate.module === 'context' ? 0 : 1),
+    root,
+  })
+
+  const archived = listArchive(root)
+  expect(archived).toHaveLength(5)
+  // context（1-4）だけ 0
+  expect(archived.map((c) => c.holdout)).toEqual([1, 1, 1, 0, 1])
+  expect(listCandidates(root)).toEqual([])
+  expect(result.candidates.map((c) => c.holdout)).toEqual([1, 1, 1, 0, 1])
+})

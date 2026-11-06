@@ -1,5 +1,5 @@
 // 自己改良の1周（最終目的の 6 の 1〜9）。弱点を集め、モジュールごとに候補を作り、検証して、通ったものだけを残す。
-import type { Dialog } from '../../shared/dialog.ts'
+import type { Dialog, Task } from '../../shared/dialog.ts'
 import {
   MODULES,
   paretoPrompts,
@@ -39,6 +39,9 @@ export type Proposal = {
 // プロンプトの候補を課題ごとの通過（0 か 1）で測る。渡さないときはモデルを呼ばずに空の結果にする
 export type Pass = (candidate: PromptCandidate) => Record<string, 0 | 1> | Promise<Record<string, 0 | 1>>
 
+// 採用した候補を、提案に使わなかった課題（積んだ課題）で測る。渡さないときは測らない
+export type Holdout = (candidate: Candidate, tasks: Task[]) => 0 | 1
+
 export type RoundOptions = {
   round: number
   dialog: Dialog
@@ -48,6 +51,7 @@ export type RoundOptions = {
   limitUsd: number
   root?: string
   pass?: Pass
+  holdout?: Holdout
   // 失敗したテストの一覧。渡されたときは仕様の候補も作って書く
   failures?: Failure[]
 }
@@ -172,7 +176,7 @@ export function pruner(history: Candidate[]): Set<string> {
 
 // 1周を順に進める。費用が上限を超えたら、残りの検証と採用をせずに止める
 export async function runRound(options: RoundOptions): Promise<RoundResult> {
-  const { round, dialog, propose, check, spent, limitUsd, root, pass, failures } = options
+  const { round, dialog, propose, check, spent, limitUsd, root, pass, holdout, failures } = options
   const weak = weaknesses(dialog)
   // 前の周までの候補。この周で採用した候補を後の提案に混ぜないよう、始めに1回だけ取る
   const archive = listArchive(root)
@@ -190,6 +194,9 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
   const promptLists = new Map<Module, PromptCandidate[]>(
     MODULES.map((module) => [module, readPrompts(module, root)]),
   )
+  // holdout に渡す課題。積んだ（committed）課題だけにする。
+  // 提案の材料の weaknesses は失敗の項目と保留の理由だけなので、積んだ課題は提案に使っていない
+  const committed = dialog.tasks.filter((task) => task.state === 'committed')
   const candidates: Candidate[] = []
   const rejected: { module: Module; reason: string }[] = []
   let stopped = false
@@ -253,6 +260,10 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
         const before = spent()
         candidate.score = await check(candidate)
         candidate.cost = spent() - before
+        // 採用した候補だけを、提案に使わなかった課題で測る。採否は score だけで決める
+        if (candidate.score === 1 && holdout) {
+          candidate.holdout = holdout(candidate, committed)
+        }
         writeCandidate(candidate, root)
         if (candidate.score === 1) archiveCandidate(candidate.id, root)
       }

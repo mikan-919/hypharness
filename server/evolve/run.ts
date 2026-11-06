@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
 import { sandboxed } from '../../harness/sandbox.ts'
-import type { Dialog } from '../../shared/dialog.ts'
+import type { Dialog, Task } from '../../shared/dialog.ts'
 import { MODULE_SUMMARY, type Candidate } from '../../shared/evolve.ts'
 import { deepinfra } from '../model.ts'
 import { createStore } from '../store.ts'
@@ -20,6 +20,8 @@ export type EvolveOptions = {
   check?: (candidate: Candidate) => 0 | 1 | Promise<0 | 1>
   spent?: () => number
   limitUsd?: number
+  // 採用した候補を、提案に使わなかった課題で測る。渡さないときは測らない
+  holdout?: (candidate: Candidate, tasks: Task[]) => 0 | 1
 }
 
 const defaultRoot = () => process.env.HYPH_EVO || join(homedir(), '.hyph', 'evo')
@@ -134,6 +136,7 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
     spent,
     limitUsd,
     root,
+    holdout: options.holdout,
   })
   return { ...result, spent: spent() }
 }
@@ -149,7 +152,9 @@ if (import.meta.main) {
       const result = await runEvolve()
       console.log(`周: ${result.round}`)
       console.log(`出発点: ${result.start?.id ?? 'なし'}`)
-      for (const c of result.candidates) console.log(`候補: ${c.id} ${c.module} score ${c.score}`)
+      for (const c of result.candidates) {
+        console.log(`候補: ${c.id} ${c.module} score ${c.score} holdout ${c.holdout ?? '未測定'}`)
+      }
       console.log(`stopped: ${result.stopped}`)
       console.log(`費用: ${result.spent}`)
     } catch (e) {

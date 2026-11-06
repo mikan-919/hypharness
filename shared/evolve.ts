@@ -13,7 +13,8 @@ export const MODULE_SUMMARY: Record<Module, string> = {
   completion: '課題を終えたか諦めたかの判定と、その結果の返し方',
 }
 
-// 1つの変更案。round は周の番号、score は回帰テストの報酬（0 か 1）、cost は検証に使った費用（ドル）
+// 1つの変更案。round は周の番号、score は回帰テストの報酬（0 か 1）、cost は検証に使った費用（ドル）。
+// holdout は採用した候補を提案に使わなかった課題で測った結果（0 か 1）。未測定は undefined
 export type Candidate = {
   id: string
   round: number
@@ -22,6 +23,7 @@ export type Candidate = {
   score: 0 | 1
   note: string
   cost: number
+  holdout?: 0 | 1
 }
 
 // モジュールごとのプロンプトの候補（最終目的の 6 の 8）。
