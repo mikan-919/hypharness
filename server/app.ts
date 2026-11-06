@@ -25,11 +25,6 @@ app.get('/api/usage', (c) =>
   }),
 )
 
-app.get('/style.css', async (c) => {
-  c.header('content-type', 'text/css')
-  return c.body(await Bun.file(new URL('../routes/style.css', import.meta.url)).text())
-})
-
 app.route(
   '/',
   createFileRouter('./routes', {

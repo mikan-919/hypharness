@@ -1,3 +1,4 @@
+export const css = `
 :root {
   --bg: #f6f5f2;
   --panel: #ffffff;
@@ -109,3 +110,4 @@ button:disabled { opacity: 0.5; cursor: default; }
 @media (max-width: 900px) {
   .shell { grid-template-columns: 1fr; height: auto; }
 }
+`
