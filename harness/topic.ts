@@ -7,13 +7,21 @@ import type { Store } from './store.ts'
 
 export type Call = (body: { topicId: string; taskId: string; context: Context }) => Promise<AssistantMessage>
 
+// 中継が費用の上限に達してモデルの呼び出しを断った（ADR 0011、0012）
+export class CostLimitError extends Error {}
+
 // 中継の Unix ソケットを呼び、流れてくるイベントの最後（done か error）の応答を返す。
 // onText には、書いている途中の文（考えている途中の文を含む）を、届くたびにそれまでの全体で渡す
 export const relayCall =
   (socket: string, onText?: (topicId: string, text: string) => void): Call =>
   async (body) => {
     const response = await fetch('http://relay/', { unix: socket, method: 'POST', body: JSON.stringify(body) })
-    if (!response.ok || !response.body) throw new Error(((await response.json()) as { error: string }).error)
+    if (!response.ok || !response.body) {
+      const error = ((await response.json()) as { error: string }).error
+      // 423 は費用の上限による停止。ほかの失敗とは扱いを分ける
+      if (response.status === 423) throw new CostLimitError(error)
+      throw new Error(error)
+    }
     let buffer = ''
     let text = ''
     let last: any = {}

@@ -5,6 +5,7 @@ import type { Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import { answerPending, inside, listFiles, object, READ_TOOLS, readFile, runAgent } from './agent.ts'
 import { sandboxed } from './sandbox.ts'
 import type { Store } from './store.ts'
+import { CostLimitError } from './topic.ts'
 import type { Call } from './topic.ts'
 
 export const BRANCH = 'hypharness/integration'
@@ -67,7 +68,14 @@ const SOLVE_TOOLS = [
 
 const arg = (call: ToolCall, name: string) => String((call.arguments as Record<string, unknown>)[name] ?? '')
 
-export type PipelineOptions = { worktrees: string; setup?: string; check?: string }
+export type PipelineOptions = {
+  worktrees: string
+  setup?: string
+  check?: string
+  // 中継が持つ、課題1つあたりに使った費用（ドル）と、その上限（ADR 0011）。保留の理由に使う
+  spent?: (taskId: string) => number
+  limitUsd?: number
+}
 
 // 統合ブランチに課題を積み続ける。finish か保留で終わる。止めた理由を store.halted に残す
 export async function runPipeline(store: Store, call: Call, repo: string, options: PipelineOptions) {
@@ -132,7 +140,7 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
       const setup = Bun.spawnSync(['sh', '-c', options.setup], { cwd: tree, stdout: 'pipe', stderr: 'pipe' })
       if (setup.exitCode !== 0) throw new Error(`準備のコマンドが失敗しました: ${setup.stderr.toString().slice(-2000)}`)
     }
-    await solve(store, call, tree, taskId, next.statement, options.check)
+    await solve(store, call, tree, taskId, next.statement, options)
     const commit = git(tree, 'rev-parse', 'HEAD')
     git(repo, 'branch', '-f', BRANCH, commit)
     store.setTask(taskId, { state: 'committed', commit })
@@ -144,7 +152,7 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
   }
 }
 
-async function solve(store: Store, call: Call, tree: string, taskId: string, statement: string, check?: string) {
+async function solve(store: Store, call: Call, tree: string, taskId: string, statement: string, options: PipelineOptions) {
   const messages: Message[] = [{ role: 'user', content: `課題 ${taskId}:\n${statement}`, timestamp: Date.now() }]
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     store.setTask(taskId, { state: 'solving', attempts: attempt })
@@ -170,13 +178,19 @@ async function solve(store: Store, call: Call, tree: string, taskId: string, sta
         throw new Error(`未知のツールです: ${c.name}`)
       },
       stop: (c) => (c.name === 'done' ? arg(c, 'summary') : undefined),
+    }).catch((e: Error) => {
+      // 中継が費用の上限に達して断ったときは、この課題を保留にし、課題 id・使った費用・上限を残して流れを止める
+      if (!(e instanceof CostLimitError)) throw e
+      store.setTask(taskId, { state: 'held' })
+      const spent = options.spent?.(taskId) ?? 0
+      throw new Error(`課題 ${taskId} が費用の上限 ${options.limitUsd} ドルに達しました（使った費用 ${spent} ドル）。保留にして流れを止めました`)
     })
     store.setTask(taskId, { state: 'checking' })
     git(tree, 'add', '-A')
     const failure = !git(tree, 'status', '--porcelain')
       ? '作業ツリーに変更がありません'
-      : check
-        ? await sandboxed(tree, check).then(({ code, output }) => (code === 0 ? '' : `検査が終了コード ${code} で落ちました\n${output}`))
+      : options.check
+        ? await sandboxed(tree, options.check).then(({ code, output }) => (code === 0 ? '' : `検査が終了コード ${code} で落ちました\n${output}`))
         : ''
     if (!failure) {
       git(tree, '-c', 'user.name=hypharness', '-c', 'user.email=hypharness@localhost', 'commit', '-q', '-m', `${taskId}: ${statement.split('\n')[0]}`)

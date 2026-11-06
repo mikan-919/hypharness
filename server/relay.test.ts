@@ -50,6 +50,16 @@ test('課題が上限に達したら、どの課題の呼び出しも断る', as
   expect((await post(relay, 't2')).status).toBe(423)
 })
 
+test('停止を解くと、また呼び出しを受け付け、停止の理由は空になる', async () => {
+  const relay = createRelay(fake(7, 0.6), 1)
+  await (await post(relay, 't1')).text()
+  await (await post(relay, 't1')).text()
+  expect((await post(relay, 't2')).status).toBe(423)
+  relay.resume()
+  expect(relay.halted()).toBe('')
+  expect((await post(relay, 't2')).status).not.toBe(423)
+})
+
 test('形の違う要求は断る', async () => {
   const relay = createRelay(fake(1, 0), 1)
   const response = await relay.handle(new Request('http://relay/', { method: 'POST', body: '{}' }))

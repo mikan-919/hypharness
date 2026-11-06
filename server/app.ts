@@ -97,10 +97,14 @@ app.post('/api/start', (c) => {
   if (topics.filter((t) => t.ready).length * 2 <= topics.length) {
     return c.json({ error: '論点エージェントの過半数が開始可になっていません' }, 409)
   }
+  // 費用の上限で止まっていたら、開始の合図で中継の停止を解いてから流れを始める（ADR 0012）
+  relay.resume()
   void runPipeline(store, call, REPO, {
     worktrees: join(homedir(), '.hyph', 'worktrees', REPO.replaceAll('/', '_')),
     setup: process.env.SETUP_COMMAND,
     check: process.env.CHECK_COMMAND,
+    spent: relay.spent,
+    limitUsd: relay.limitUsd,
   })
   return c.json({ ok: true })
 })

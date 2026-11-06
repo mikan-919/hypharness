@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { AssistantMessage } from '@earendil-works/pi-ai'
 import { BRANCH, runPipeline } from './pipeline.ts'
 import { createStore } from './store.ts'
+import { CostLimitError } from './topic.ts'
 import type { Call } from './topic.ts'
 
 const reply = (name: string, args: object) =>
@@ -59,5 +60,22 @@ test('検査に3回落ちたら保留にして流れを止め、統合ブラン�
   expect(store.snapshot().tasks[0]).toMatchObject({ state: 'held', attempts: 3 })
   expect(store.snapshot().started).toBe(false)
   expect(store.snapshot().halted).toContain('保留')
+  expect(log()).toBe('init')
+})
+
+test('費用の上限で断られたら課題を保留にして流れを止め、統合ブランチには積まない', async () => {
+  const { dir, log } = repo()
+  const store = createStore()
+  // 分解役は課題を1つ出し、解答役のモデルの呼び出しは中継に断られる
+  const call: Call = async ({ topicId }) => {
+    if (topicId === 'decompose') return reply('submit_task', { statement: 'out.txt に ok と書く' })
+    throw new CostLimitError('停止中です: 課題 t1 が費用の上限 1 に達しました')
+  }
+  await runPipeline(store, call, dir, { ...options(), spent: (taskId) => (taskId === 't1' ? 1.2 : 0), limitUsd: 1 })
+  expect(store.snapshot().tasks[0]).toMatchObject({ state: 'held' })
+  expect(store.snapshot().started).toBe(false)
+  expect(store.snapshot().halted).toContain('t1')
+  expect(store.snapshot().halted).toContain('1.2')
+  expect(store.snapshot().halted).toContain('上限 1')
   expect(log()).toBe('init')
 })

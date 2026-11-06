@@ -78,7 +78,7 @@ export function createRelay(stream: Stream, limitUsd: number) {
     if (request.method !== 'POST') return Response.json({ error: 'POST で送ってください' }, { status: 405 })
     if (halted) return Response.json({ error: `停止中です: ${halted}` }, { status: 423 })
     const body = (await request.json().catch(() => null)) as Call | null
-    if (!body?.topicId || !body.taskId || !Array.isArray(body.context?.messages)) {
+    if (!body?.topicId || !body?.taskId || !Array.isArray(body.context?.messages)) {
       return Response.json({ error: 'topicId・taskId と messages を持つ context を送ってください' }, { status: 400 })
     }
     const events = call(body)
@@ -102,6 +102,13 @@ export function createRelay(stream: Stream, limitUsd: number) {
     handle,
     listen: (socket: string) => Bun.serve({ unix: socket, fetch: handle }),
     totals,
+    // 課題1つあたりに使った費用（ドル）。ハーネスは保留の理由に使う
+    spent: (taskId: string) => spent.get(taskId) ?? 0,
+    limitUsd,
+    // 停止を解く。開始の合図を受けたときに呼ぶ
+    resume: () => {
+      halted = ''
+    },
     subscribe(listener: (totals: Record<string, Usage>) => void) {
       listeners.add(listener)
       return () => void listeners.delete(listener)
