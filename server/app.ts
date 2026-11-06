@@ -5,7 +5,7 @@ import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import { createFileRouter } from 'irisout/hono'
 import { startDialog } from '../harness/index.ts'
-import { runPipeline } from '../harness/pipeline.ts'
+import { holdUnfinished, runPipeline } from '../harness/pipeline.ts'
 import { createStore } from '../harness/store.ts'
 import { relayCall } from '../harness/topic.ts'
 import { deepinfra } from './model.ts'
@@ -40,7 +40,10 @@ export function boot() {
   if (shared.booted) return RELAY_SOCKET
   shared.booted = true
   // 前の起動で流れが動いていたら、止まったことにする。利用者が開始の合図を出し直す
-  if (store.snapshot().started) store.setRun({ started: false, halted: 'サーバーが再起動したため流れが止まりました' })
+  if (store.snapshot().started) {
+    holdUnfinished(store)
+    store.setRun({ started: false, halted: 'サーバーが再起動したため流れが止まりました' })
+  }
   try {
     unlinkSync(RELAY_SOCKET)
   } catch {}

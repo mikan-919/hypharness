@@ -14,6 +14,8 @@ const estimate = (text: string) => {
   return tokens
 }
 
+const HEARTBEAT_MS = 5_000
+
 const zero = (topicId: string): Usage => ({ topicId, input: 0, output: 0, cacheRead: 0, costUsd: 0 })
 
 export function createRelay(stream: Stream, limitUsd: number) {
@@ -83,11 +85,18 @@ export function createRelay(stream: Stream, limitUsd: number) {
     }
     const events = call(body)
     const encoder = new TextEncoder()
+    // モデルが最初のトークンを返すまでに 10 秒以上かかることがあり、Bun.serve は 10 秒流れない接続を切る。
+    // 待っている間は 5 秒ごとに空行を流して接続を保つ。受け取る側は空行を読み飛ばす
+    let next: Promise<IteratorResult<AssistantMessageEvent>> | undefined
     // 1行に1つのイベントを JSON で流す。partial は応答の途中の全文で大きいため送らない
     return new Response(
       new ReadableStream({
         async pull(controller) {
-          const { value, done } = await events.next()
+          next ??= events.next()
+          const result = await Promise.race([next, Bun.sleep(HEARTBEAT_MS).then(() => undefined)])
+          if (!result) return controller.enqueue(encoder.encode('\n'))
+          next = undefined
+          const { value, done } = result
           if (done) return controller.close()
           const { partial: _, ...event } = value as AssistantMessageEvent & { partial?: unknown }
           controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`))

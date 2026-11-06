@@ -1,6 +1,10 @@
 import { expect, test } from 'bun:test'
 import type { AssistantMessage, AssistantMessageEvent } from '@earendil-works/pi-ai'
 import type { Usage } from '../shared/dialog.ts'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { relayCall } from '../harness/topic.ts'
 import { createRelay } from './relay.ts'
 
 const message = (output: number, cost: number) =>
@@ -55,3 +59,16 @@ test('形の違う要求は断る', async () => {
   const response = await relay.handle(new Request('http://relay/', { method: 'POST', body: '{}' }))
   expect(response.status).toBe(400)
 })
+
+test('最初のトークンまで 10 秒以上かかっても、Unix ソケットの接続が切れない', async () => {
+  const slow = async function* (): AsyncIterable<AssistantMessageEvent> {
+    await Bun.sleep(25_000)
+    yield { type: 'done', reason: 'stop', message: message(3, 0.001) }
+  }
+  const relay = createRelay(slow, 1)
+  const socket = join(mkdtempSync(join(tmpdir(), 'hyph-relay-')), 'relay.sock')
+  const server = relay.listen(socket)
+  const reply = await relayCall(socket)({ topicId: 'ui', taskId: 't1', context: { messages: [] } })
+  server.stop(true)
+  expect(reply.usage.output).toBe(3)
+}, 60_000)

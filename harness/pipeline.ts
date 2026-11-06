@@ -20,7 +20,7 @@ function git(repo: string, ...args: string[]) {
 const DECOMPOSE = `あなたは hypharness の分解役です。FINAL_GOAL.md（最終目的）と docs/adr の決定を読み、統合ブランチの今のコードと比べて、次にやる課題を1つだけ課題文にします。
 
 - list_files と read_file で、FINAL_GOAL.md、docs/adr、関係するコードを読む。
-- 課題文は submit_task で出す。1つの課題は、1回のコミットで終わる大きさにする。変える振る舞い、受け入れの条件、やらないことを書く。
+- 課題は submit_task で出す。title に 40 文字以内の題名を付ける。1つの課題は、1回のコミットで終わる大きさにする。変える振る舞い、受け入れの条件、やらないことを書く。
 - 既に終えた課題と同じことは出さない。
 - 最終目的を満たしていると判断したら finish を呼ぶ。理由を書く。
 - 日本語で書く。修飾表現を使わず、事実を書く。`
@@ -36,8 +36,11 @@ const DECOMPOSE_TOOLS = [
   ...READ_TOOLS,
   {
     name: 'submit_task',
-    description: '次の課題文を出す',
-    parameters: object({ statement: { type: 'string' } }, ['statement']),
+    description: '次の課題を出す。title はコミットの件名になる',
+    parameters: object(
+      { title: { type: 'string', description: '40 文字以内の題名' }, statement: { type: 'string' } },
+      ['title', 'statement'],
+    ),
   },
   {
     name: 'finish',
@@ -91,7 +94,15 @@ export async function runPipeline(store: Store, call: Call, repo: string, option
   } catch (e) {
     const reason = (e as Error).message
     store.act('solve', 'fail', reason)
+    holdUnfinished(store)
     store.setRun({ started: false, halted: reason })
+  }
+}
+
+// 途中で止まった課題を保留にする。「解いている」のまま残さない
+export function holdUnfinished(store: Store) {
+  for (const t of store.snapshot().tasks) {
+    if (t.state === 'solving' || t.state === 'checking') store.setTask(t.id, { state: 'held' })
   }
 }
 
@@ -121,7 +132,7 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
       run: async (c) => (c.name === 'list_files' ? listFiles(tree, arg(c, 'path')) : readFile(tree, arg(c, 'path'))),
       stop: (c) =>
         c.name === 'submit_task'
-          ? { statement: arg(c, 'statement') }
+          ? { statement: `${arg(c, 'title') || arg(c, 'statement').split('\n')[0]}\n\n${arg(c, 'statement')}` }
           : c.name === 'finish'
             ? { finish: arg(c, 'reason') }
             : undefined,
