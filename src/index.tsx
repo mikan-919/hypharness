@@ -191,7 +191,7 @@ const routes = app
       }
       cursor = page.truncated ? page.cursor : undefined
     } while (cursor)
-    await relay(c.env, c.var.user.id).reset()
+    await relay(c.env, c.var.user.id).wipe()
     return c.json({ ok: true })
   })
   .get('/tasks/:id/history', auth, async (c) => {

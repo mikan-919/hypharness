@@ -122,7 +122,7 @@ export class Relay extends DurableObject<Env> {
   }
 
   // 利用者の記録（タスク・履歴・費用・進化の記録・承認の依頼）をすべて消す。接続中のノードは切り、再接続させる
-  async reset() {
+  async wipe() {
     for (const ws of this.ctx.getWebSockets())
       ws.close(1000, '記録を消しました')
     await this.ctx.storage.deleteAll()
