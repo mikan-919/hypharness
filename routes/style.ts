@@ -88,8 +88,9 @@ button:disabled { opacity: 0.5; cursor: default; }
 .chip.answered { opacity: 0.6; }
 .question.head { border-left: 3px solid var(--wait); padding-left: 12px; }
 .options { list-style: none; padding: 0; display: grid; gap: 8px; }
-.options li { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; display: grid; }
-.options li.recommended { border-color: var(--accent); }
+.option { width: 100%; text-align: left; display: grid; padding: 8px 12px; }
+.option:hover:not(:disabled) { border-color: var(--accent); }
+.option.recommended { border-color: var(--accent); }
 .options span, .recommendation { color: var(--muted); }
 .answer { background: var(--bg); border-radius: 8px; padding: 8px 12px; }
 .reply { display: grid; gap: 8px; }

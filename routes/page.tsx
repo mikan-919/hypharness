@@ -95,9 +95,17 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
               <h2>{head().text}</h2>
               <ul class="options">
                 {head().options.map((option) => (
-                  <li key={option.label} class={option.recommended ? 'recommended' : ''}>
-                    <strong>{option.label}</strong>
-                    <span>{option.description}</span>
+                  <li key={option.label}>
+                    <button
+                      type="button"
+                      class={option.recommended ? 'option recommended' : 'option'}
+                      data-label={option.label}
+                      disabled={sending()}
+                      onClick={choose}
+                    >
+                      <strong>{option.recommended ? `${option.label}（推奨）` : option.label}</strong>
+                      <span>{option.description}</span>
+                    </button>
                   </li>
                 ))}
               </ul>
@@ -236,13 +244,22 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     })
   }
 
-  async function answer(event) {
+  function answer(event) {
     event.preventDefault()
+    sendAnswer(reply())
+  }
+
+  // 選択肢を押したら、その名前を答えとして送る
+  function choose(event) {
+    sendAnswer(event.currentTarget.dataset.label)
+  }
+
+  async function sendAnswer(text) {
     sending(true)
     const response = await fetch('/api/answer', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: head().id, text: reply() }),
+      body: JSON.stringify({ id: head().id, text }),
     })
     sending(false)
     reply(response.ok ? '' : reply())
