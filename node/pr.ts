@@ -60,7 +60,7 @@ ${patch.slice(0, PATCH_LIMIT)}`,
   )
 }
 
-// 試行の差分を、課題のコミットから切ったブランチに当てて push し、PR を作る。作った PR の URL を返す
+// 計測の試行の差分を PR にする。作った PR の URL を返す
 export async function pr(m: Measure, run: number, complete: Complete) {
   const done = m.meta(`pr:${run}`)
   if (done) return done
@@ -81,7 +81,27 @@ export async function pr(m: Measure, run: number, complete: Complete) {
   if (!row?.patch || !row.workspace) {
     throw new Error(`試行 ${run} に作業領域の差分がありません`)
   }
-  const w = JSON.parse(row.workspace) as Workspace
+  const url = await submit(
+    JSON.parse(row.workspace) as Workspace,
+    row.statement,
+    row.patch,
+    `hyph/run-${run}`,
+    `hypharness の試行 ${run}（課題 ${row.task}）で、隠しテストと判定を通った変更です。`,
+    complete,
+  )
+  m.setMeta(`pr:${run}`, url)
+  return url
+}
+
+// 差分を作業領域のコミットから切ったブランチに当てて push し、PR を作る。作った PR の URL を返す
+export async function submit(
+  w: Workspace,
+  statement: string,
+  patch: string,
+  branch: string,
+  footer: string,
+  complete: Complete,
+) {
   const remote = (
     await Bun.$`git -C ${w.repo} remote get-url origin`.text()
   ).trim()
@@ -101,23 +121,21 @@ export async function pr(m: Measure, run: number, complete: Complete) {
       `課題のコミット ${w.commit.slice(0, 7)} がリモートの ${base} にありません。先に ${w.repo} で push してください`,
     )
   }
-  const branch = `hyph/run-${run}`
   const dir = await mkdtemp(join(tmpdir(), 'hyph-pr-'))
   try {
     await Bun.$`git clone -q ${w.repo} ${dir}`.quiet()
     await Bun.$`git -C ${dir} checkout -q -b ${branch} ${w.commit}`.quiet()
     const file = join(dir, '.git', 'hyph.patch')
-    await Bun.write(file, row.patch)
+    await Bun.write(file, patch)
     await Bun.$`git -C ${dir} apply --index ${file}`.quiet()
-    const { title, body } = await summarize(row.statement, row.patch, complete)
+    const { title, body } = await summarize(statement, patch, complete)
     await Bun.$`git -C ${dir} commit -q -m ${title}`.quiet()
     await Bun.$`git -C ${dir} push -q ${remote} ${branch}`.quiet()
     const url = (
-      await Bun.$`gh pr create -R ${name} --base ${base} --head ${branch} --title ${title} --body ${`${body}\n\n---\nhypharness の試行 ${run}（課題 ${row.task}）で、隠しテストと判定を通った変更です。`}`
+      await Bun.$`gh pr create -R ${name} --base ${base} --head ${branch} --title ${title} --body ${`${body}\n\n---\n${footer}`}`
         .cwd(dir)
         .text()
     ).trim()
-    m.setMeta(`pr:${run}`, url)
     return url
   } finally {
     await rm(dir, { recursive: true, force: true })
