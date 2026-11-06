@@ -29,8 +29,12 @@ export default function Home({ user, status }: PageProps<'Home'>) {
       )
     )
       return
-    await post('/reset')
-    router.reload()
+    try {
+      await post('/reset')
+      router.reload()
+    } catch (e) {
+      alert(`消せませんでした: ${e instanceof Error ? e.message : e}`)
+    }
   }
   const names = new Map(status.nodes.map((n) => [n.id, n.name]))
 
