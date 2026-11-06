@@ -1,12 +1,13 @@
 import { Readable } from 'node:stream'
 import { defineConfig } from 'vite-plus'
 import { irisoutHono } from 'irisout/hono/vite'
-import { app } from './server/app.ts'
+import { app, listenRelay } from './server/app.ts'
 
 // irisoutHono は開発時にページの GET だけを Hono へ渡す。API は SSE を流し続けられるよう本文をそのまま中継する
 const honoDevelopment = {
   name: 'hono-development',
   configureServer(server) {
+    listenRelay()
     server.middlewares.use(async (request, response, next) => {
       if (!request.url?.startsWith('/api/')) return next()
       try {

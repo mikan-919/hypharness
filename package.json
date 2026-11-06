@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "^1.5.0",
     "hono": "^4.13.16",
     "irisout": "0.3.7",
     "vite-plus": "0.3.0"
