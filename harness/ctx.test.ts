@@ -308,9 +308,87 @@ test('runAgent は毎ターン文脈ファイルを組み立て、パスをシ�
     },
   })
   expect(summary).toBe('終えた')
-  expect(systems[0]).toBe(`システムプロンプト\n文脈ファイル: ${contextPath('solve')}`)
+  expect(systems[0].startsWith(`システムプロンプト\n文脈ファイル: ${contextPath('solve')}\n文脈ブロック:\n`)).toBe(true)
   expect(results[0]).toContain('要約ノード 1')
   const text = contextText('solve')
   expect(text).toContain('置き換えた後の文を含む本文')
   expect(ctx('solve').summaries().map((s) => s.text).join('')).toContain('置き換えた後の文を含む本文')
+})
+
+// システムプロンプトの、あるブロックの行を取り出す
+const blockLine = (systemPrompt: string, kind: string, id: number) =>
+  systemPrompt.split('\n').find((line) => line.startsWith(`- id ${id}, 種別 ${kind},`))
+
+test('runAgent のシステムプロンプトには、文脈のブロックごとの行が入る', async () => {
+  const store = createStore()
+  const replies = [reply('done', {}, 'c1')]
+  const systems: string[] = []
+  const call: Call = async (body) => {
+    systems.push(body.context.systemPrompt)
+    return replies.shift()!
+  }
+  const messages: Message[] = [message('はじめての指示'), message('アルファの本文')]
+  const summary = await runAgent<string>({
+    store,
+    call,
+    agent: 'solve',
+    taskId: 't1',
+    system: 'システムプロンプト',
+    tools: [],
+    messages,
+    run: async () => '結果です',
+    stop: (c) => (c.name === 'done' ? '終えた' : undefined),
+  })
+  expect(summary).toBe('終えた')
+  // 生のブロックの行。本文は 7 文字なので 2 トークン、文脈ファイル全体も 2 トークン
+  expect(blockLine(systems[0], '生', 2)).toBe(
+    '- id 2, 種別 生, トークン数 2, 最後の参照から 0 ターン, 参照回数 1, 残り予算 1048574',
+  )
+})
+
+test('ターンが進むと、参照されていないブロックの最後の参照からのターン数が増える', async () => {
+  const store = createStore()
+  const messages: Message[] = [message('はじめての指示')]
+  ctx('solve').append(messages[0])
+  const id = ctx('solve').addSummary('まとめの本文', [])
+  const replies = [
+    reply('read_file', { path: 'a' }, 'c1'),
+    reply('read_file', { path: 'a' }, 'c2'),
+    reply('done', {}, 'c3'),
+  ]
+  const systems: string[] = []
+  const call: Call = async (body) => {
+    systems.push(body.context.systemPrompt)
+    return replies.shift()!
+  }
+  const summary = await runAgent<string>({
+    store,
+    call,
+    agent: 'solve',
+    taskId: 't1',
+    system: '',
+    tools: [],
+    messages,
+    run: async () => '結果です',
+    stop: (c) => (c.name === 'done' ? '終えた' : undefined),
+  })
+  expect(summary).toBe('終えた')
+  const gaps = systems.map((systemPrompt) => Number(/最後の参照から (\d+) ターン/.exec(blockLine(systemPrompt, '要約', id)!)![1]))
+  expect(gaps).toEqual([1, 2, 3])
+})
+
+test('recall で一致したブロックの参照回数が1増える', () => {
+  const store = ctx('solve')
+  store.append(message('はじめての指示'))
+  const id = store.addSummary('アルファワードを含む要約', [])
+  ctx('solve').beginTurn()
+  const refs = (kind: string) => {
+    const line = blockLine(ctx('solve').contextStatus().join('\n'), kind, id)
+    return Number(/参照回数 (\d+)/.exec(line!)![1])
+  }
+  expect(refs('要約')).toBe(0)
+  recall('solve', 'アルファワード')
+  expect(refs('要約')).toBe(1)
+  recall('solve', 'アルファワード')
+  expect(refs('要約')).toBe(2)
 })

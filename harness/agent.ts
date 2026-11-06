@@ -101,11 +101,14 @@ export const EDIT_CONTEXT_TOOL = {
   ),
 } as Tool
 
-// recall の結果を文にする。一致が無ければその旨を返す
+// recall の結果を文にする。一致が無ければその旨を返す。一致したブロックは参照したものとして数える
 export function recall(agent: string, query: unknown, maxResults?: unknown) {
   const n = Number(maxResults)
-  const found = ctx(agent).search(String(query ?? ''), Number.isFinite(n) && n > 0 ? n : undefined)
+  const store = ctx(agent)
+  const found = store.search(String(query ?? ''), Number.isFinite(n) && n > 0 ? n : undefined)
   if (found.messages.length === 0 && found.summaries.length === 0) return '一致するメッセージや要約はありません。'
+  for (const message of found.messages) store.markReferenced('生', message.id)
+  for (const summary of found.summaries) store.markReferenced('要約', summary.id)
   const lines: string[] = []
   for (const message of found.messages) {
     const inSummaries = message.summaries.length > 0 ? `（要約 ${message.summaries.join(', ')} に含まれる）` : ''
@@ -192,10 +195,17 @@ export async function runAgent<T>(options: {
     }
   }
   for (let turn = 0; turn < MAX_TURNS; turn++) {
-    // 毎ターンのモデルの呼び出しの前に文脈ファイルを組み立て、そのパスをシステムプロンプトの末尾に書く
+    // 毎ターンのモデルの呼び出しの前に文脈ファイルを組み立て、そのパスとブロックごとの状態をシステムプロンプトの末尾に書く
     let systemPrompt = system
     try {
-      systemPrompt = `${system}\n文脈ファイル: ${ctx(agent).buildContextFile()}`
+      const context = ctx(agent)
+      context.beginTurn()
+      const path = context.buildContextFile()
+      const lines = context.contextStatus()
+      systemPrompt =
+        lines.length > 0
+          ? `${system}\n文脈ファイル: ${path}\n文脈ブロック:\n${lines.join('\n')}`
+          : `${system}\n文脈ファイル: ${path}`
     } catch {
       // 文脈ファイルを作れなくてもエージェントの実行は止めない
     }

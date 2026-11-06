@@ -8,6 +8,12 @@ import type { Message, TextContent } from '@earendil-works/pi-ai'
 // 保存先のルート。テストは HYPH_CTX_DIR で差し替える
 export const root = () => process.env.HYPH_CTX_DIR || join(homedir(), '.hyph', 'ctx')
 
+// モデルの文脈の大きさ（トークン）。server/model.ts の contextWindow に合わせる
+export const CONTEXT_WINDOW = 1_048_576
+
+// 本文の文字数からトークン数を見積もる。モデルは呼ばず、4 文字を 1 トークンとする
+export const estimateTokens = (text: string) => Math.ceil(text.length / 4)
+
 // メッセージの本文。文字列の content と、text の部分を順につなぐ
 export function messageText(message: Message): string {
   const content = message.content
@@ -26,6 +32,9 @@ export type SearchResult = {
 
 export type Summary = { id: number; text: string; messageIds: number[] }
 
+// 文脈ファイルに入れるブロック。種別は 要約 か 生
+export type Block = { kind: '要約' | '生'; id: number; text: string }
+
 // 要約ノードの本文に入れる、1件のメッセージの本文の上限
 const MAX_SUMMARY_PART = 500
 
@@ -43,6 +52,12 @@ export function ctx(agent: string) {
   db.run(
     'CREATE TABLE IF NOT EXISTS summaries(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, message_ids TEXT NOT NULL)',
   )
+  // ブロックごとの参照回数と、最後に参照されたターン。実行をまたいで残す
+  db.run(
+    'CREATE TABLE IF NOT EXISTS block_refs(kind TEXT NOT NULL, block_id INTEGER NOT NULL, refs INTEGER NOT NULL, last_turn INTEGER NOT NULL, PRIMARY KEY(kind, block_id))',
+  )
+  db.run('CREATE TABLE IF NOT EXISTS turn_counter(id INTEGER PRIMARY KEY CHECK (id = 1), turn INTEGER NOT NULL)')
+  db.query('INSERT OR IGNORE INTO turn_counter(id, turn) VALUES (1, 0)').run()
   const messagesWithIds = (): { id: number; message: Message }[] => {
     const rows = db.query('SELECT seq, message FROM messages ORDER BY seq').all() as { seq: number; message: string }[]
     return rows.map((row) => ({ id: row.seq, message: JSON.parse(row.message) as Message }))
@@ -62,19 +77,61 @@ export function ctx(agent: string) {
       .get(text, JSON.stringify(messageIds)) as { id: number }
     return row.id
   }
-  // 文脈ファイルを組み立てて書き、そのパスを返す。中身は直近の生メッセージ（keep 件）と要約ノードの全部。
+  // 文脈ファイルに入れるブロック。要約ノードの全部と、直近の生メッセージ（keep 件）。
   // 最初の課題文（messages の先頭）は入れない
-  const buildContextFile = (keep = CONTEXT_KEEP) => {
-    const blocks: string[] = []
-    for (const summary of summaries()) blocks.push(`## 要約 ${summary.id}\n\n${summary.text}`)
+  const blocks = (keep = CONTEXT_KEEP): Block[] => {
+    const list: Block[] = summaries().map((s) => ({ kind: '要約', id: s.id, text: s.text }))
     const raw = messagesWithIds().slice(1).slice(-Math.max(0, Math.floor(keep)))
-    for (const { id, message } of raw) blocks.push(`## 生 ${id}\n\n${messageText(message)}`)
+    for (const { id, message } of raw) list.push({ kind: '生', id, text: messageText(message) })
+    return list
+  }
+  // ターンの番号。実行をまたいで数える
+  const currentTurn = () => (db.query('SELECT turn FROM turn_counter WHERE id = 1').get() as { turn: number }).turn
+  const lastTurnOf = (kind: string, id: number) =>
+    db.query('SELECT refs, last_turn FROM block_refs WHERE kind = ? AND block_id = ?').get(kind, id) as {
+      refs: number
+      last_turn: number
+    } | null
+  // ブロックを参照したものとして数える。参照回数を1増やし、最後に参照されたターンを今のターンにする
+  const markReferenced = (kind: string, id: number) => {
+    const turn = currentTurn()
+    db.query(
+      `INSERT INTO block_refs(kind, block_id, refs, last_turn) VALUES (?, ?, 1, ?)
+       ON CONFLICT(kind, block_id) DO UPDATE SET refs = block_refs.refs + 1, last_turn = excluded.last_turn`,
+    ).run(kind, id, turn)
+  }
+  // 文脈ファイルを組み立てて書き、そのパスを返す。中身は blocks() と同じ集合
+  const buildContextFile = (keep = CONTEXT_KEEP) => {
+    const written = blocks(keep).map((b) => `## ${b.kind} ${b.id}\n\n${b.text}`)
     mkdirSync(dir, { recursive: true })
-    writeFileSync(filePath, blocks.length > 0 ? `${blocks.join('\n\n')}\n` : '')
+    writeFileSync(filePath, written.length > 0 ? `${written.join('\n\n')}\n` : '')
     return filePath
+  }
+  // 文脈のブロックごとの1行を返す。直近に残した生のブロックはそのターンに参照したものとして数える
+  const contextStatus = (keep = CONTEXT_KEEP) => {
+    const list = blocks(keep)
+    const turn = currentTurn()
+    for (const b of list) if (b.kind === '生') markReferenced(b.kind, b.id)
+    const tokens = list.reduce((n, b) => n + estimateTokens(b.text), 0)
+    const remaining = CONTEXT_WINDOW - tokens
+    return list.map((b) => {
+      const row = lastTurnOf(b.kind, b.id)
+      return `- id ${b.id}, 種別 ${b.kind}, トークン数 ${estimateTokens(b.text)}, 最後の参照から ${turn - (row?.last_turn ?? 0)} ターン, 参照回数 ${row?.refs ?? 0}, 残り予算 ${remaining}`
+    })
   }
   return {
     buildContextFile,
+    // ターンを1つ進め、進めた後のターンの番号を返す
+    beginTurn() {
+      const row = db.query('UPDATE turn_counter SET turn = turn + 1 WHERE id = 1 RETURNING turn').get() as {
+        turn: number
+      }
+      return row.turn
+    },
+    // 文脈のブロックごとの1行
+    contextStatus,
+    // ブロックを参照したものとして数える
+    markReferenced,
     append(message: Message) {
       db.query('INSERT INTO messages(message) VALUES (?)').run(JSON.stringify(message))
     },
@@ -86,6 +143,8 @@ export function ctx(agent: string) {
     messagesWithIds,
     // 要約ノードを全部返す
     summaries,
+    // 文脈ファイルに入れるブロック
+    blocks,
     // 要約ノードを1件足し、その id を返す。元のメッセージは消さない
     addSummary,
     // まだどの要約ノードにも入っていないメッセージのうち、直近 keep 件より前のものを1つの要約ノードにまとめる。
