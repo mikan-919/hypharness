@@ -8,6 +8,7 @@
     "node": "bun run node/index.ts",
     "measure": "bun run node/measure.ts",
     "dashboard": "bun run node/dashboard.ts",
+    "auto": "bun run node/auto.ts",
     "test": "bun test",
     "dev": "vite",
     "build": "vite build",
