@@ -15,12 +15,16 @@ const taskLabel = { solving: '解いている', checking: '検査中', committed
 
 const agentLabel = { decompose: '分解役', solve: '解答役', host: '固定部' }
 
+const tabLabel = { context: '共有文脈', history: '書き換えの履歴', cost: '費用' }
+
 export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping }: Dialog) {
   const topicList = signal(topics)
   const items = signal(questions)
   const pending = signal(queue)
   const entryList = signal(entries)
   const editList = signal(edits)
+  // 右列で選んでいるタブ。通知が届いても変えない
+  const tab = signal<keyof typeof tabLabel>('context')
   // 保存済みの本文と版。保存の要求にはこの版を渡す
   const savedText = signal(goal.text)
   const savedVersion = signal(goal.version)
@@ -178,54 +182,79 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
         </main>
 
         <aside class="context">
-          <section class="metrics">
-            <h2>トークン</h2>
-            <p class="big">{totalOutput()}</p>
-            <p>出力の合計（ストリーミング中）</p>
-            <p>${totalCost()}</p>
-          </section>
-          <h2>動き</h2>
-          {writing().map((w) => (
-            <div key={w.agent} class="activity live">
-              <strong>{`${agentLabel[w.agent] ?? topicList().find((t) => t.id === w.agent)?.title ?? w.agent} が書いている`}</strong>
-              <p>{w.text}</p>
-            </div>
-          ))}
-          {recent().map((a) => (
-            <div key={a.id} class={`activity ${a.kind}`}>
-              <strong>{agentLabel[a.agent] ?? topicList().find((t) => t.id === a.agent)?.title ?? a.agent}</strong>
-              <p>{a.text}</p>
-            </div>
-          ))}
-          <h2>書き換えの履歴</h2>
-          {history().map((edit) => (
-            <div key={edit.id} class={`edit ${edit.author === 'user' ? 'user' : 'agent'}`}>
-              <div class="edit-head">
-                <strong>
-                  {edit.author === 'user' ? '利用者' : (topicList().find((t) => t.id === edit.author)?.title ?? edit.author)}
-                </strong>
-                <span class="hint">版 {edit.version}</span>
-                <button type="button" data-id={edit.id} onClick={revert}>
-                  この前に戻す
-                </button>
+          <div class="tabs">
+            {(Object.keys(tabLabel) as (keyof typeof tabLabel)[]).map((name) => (
+              <button
+                key={name}
+                type="button"
+                class={`tab ${tab() === name ? 'current' : ''}`}
+                data-tab={name}
+                onClick={pickTab}
+              >
+                {tabLabel[name]}
+              </button>
+            ))}
+          </div>
+          <div class="tab-body">
+            {tab() === 'context' && (
+              <div>
+                <h2>動き</h2>
+                {writing().map((w) => (
+                  <div key={w.agent} class="activity live">
+                    <strong>{`${agentLabel[w.agent] ?? topicList().find((t) => t.id === w.agent)?.title ?? w.agent} が書いている`}</strong>
+                    <p>{w.text}</p>
+                  </div>
+                ))}
+                {recent().map((a) => (
+                  <div key={a.id} class={`activity ${a.kind}`}>
+                    <strong>{agentLabel[a.agent] ?? topicList().find((t) => t.id === a.agent)?.title ?? a.agent}</strong>
+                    <p>{a.text}</p>
+                  </div>
+                ))}
+                <h2>共有文脈</h2>
+                {entryList().map((entry) => (
+                  <div key={entry.id} class={`entry ${entry.kind}`}>
+                    <span class="kind">{kindLabel[entry.kind]}</span>
+                    <p>{entry.text}</p>
+                    <small>{entry.evidence}</small>
+                  </div>
+                ))}
               </div>
-              <p>{edit.reason}</p>
-              <pre class="diff">
-                {edit.diff
-                  .filter((l) => l.op !== ' ')
-                  .map((l) => `${l.op} ${l.line}`)
-                  .join('\n')}
-              </pre>
-            </div>
-          ))}
-          <h2>共有文脈</h2>
-          {entryList().map((entry) => (
-            <div key={entry.id} class={`entry ${entry.kind}`}>
-              <span class="kind">{kindLabel[entry.kind]}</span>
-              <p>{entry.text}</p>
-              <small>{entry.evidence}</small>
-            </div>
-          ))}
+            )}
+            {tab() === 'history' && (
+              <div>
+                <h2>書き換えの履歴</h2>
+                {history().map((edit) => (
+                  <div key={edit.id} class={`edit ${edit.author === 'user' ? 'user' : 'agent'}`}>
+                    <div class="edit-head">
+                      <strong>
+                        {edit.author === 'user' ? '利用者' : (topicList().find((t) => t.id === edit.author)?.title ?? edit.author)}
+                      </strong>
+                      <span class="hint">版 {edit.version}</span>
+                      <button type="button" data-id={edit.id} onClick={revert}>
+                        この前に戻す
+                      </button>
+                    </div>
+                    <p>{edit.reason}</p>
+                    <pre class="diff">
+                      {edit.diff
+                        .filter((l) => l.op !== ' ')
+                        .map((l) => `${l.op} ${l.line}`)
+                        .join('\n')}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            )}
+            {tab() === 'cost' && (
+              <section class="metrics">
+                <h2>トークン</h2>
+                <p class="big">{totalOutput()}</p>
+                <p>出力の合計（ストリーミング中）</p>
+                <p>${totalCost()}</p>
+              </section>
+            )}
+          </div>
         </aside>
       </div>
     </Layout>,
@@ -262,6 +291,10 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
       dialogSource.close()
     }
   })
+
+  function pickTab(event) {
+    tab(event.currentTarget.dataset.tab)
+  }
 
   function updateDraft(event) {
     draft(event.currentTarget.value)

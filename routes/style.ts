@@ -46,6 +46,20 @@ h2 { font-size: 12px; color: var(--muted); letter-spacing: 0.08em; margin: 16px 
   padding: 12px;
   overflow-y: auto;
 }
+.context {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+}
+.tabs .tab { flex: 1; padding: 6px 4px; font-size: 12px; }
+.tabs .tab.current { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tab-body { flex: 1; min-height: 0; overflow-y: auto; }
 .thread {
   display: grid;
   grid-template-columns: 32px 1fr auto;
