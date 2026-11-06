@@ -21,10 +21,10 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const pending = signal(queue)
   const entryList = signal(entries)
   const editList = signal(edits)
-  const goalText = signal(goal.text)
-  const goalVersion = signal(goal.version)
+  // 保存済みの本文と版。保存の要求にはこの版を渡す
+  const savedText = signal(goal.text)
+  const savedVersion = signal(goal.version)
   const draft = signal(goal.text)
-  const dirty = signal(false)
   const conflict = signal(false)
   const failure = signal('')
   const reply = signal('')
@@ -151,7 +151,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
           )}
           <div class="goal-head">
             <h1>FINAL_GOAL.md</h1>
-            <span class="hint">版 {goalVersion()}</span>
+            <span class="hint">版 {savedVersion()}</span>
           </div>
           <form class="goal" onSubmit={save}>
             <textarea
@@ -170,7 +170,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                 </button>
               </p>
             ) : (
-              <button type="submit" disabled={sending()}>
+              <button type="submit" disabled={sending() || draft() === savedText()}>
                 保存
               </button>
             )}
@@ -249,10 +249,13 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
       liveText(next.live)
       haltedReason(next.halted)
       isStopping(next.stopping)
-      goalText(next.goal.text)
-      goalVersion(next.goal.version)
-      // 書きかけでなければ、他の書き手の書き換えをそのまま映す
-      draft(dirty() ? draft() : next.goal.text)
+      // 書きかけでなければ、他の書き手の書き換えをそのまま映す。書きかけなら入力中の本文を変えない。
+      // 保存の応答を待つ間に届いた古い版は映さない（保存済みの版を巻き戻さない）
+      if (draft() === savedText() && next.goal.version >= savedVersion()) {
+        draft(next.goal.text)
+        savedText(next.goal.text)
+        savedVersion(next.goal.version)
+      }
     }
     return () => {
       usageSource.close()
@@ -262,40 +265,44 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
 
   function updateDraft(event) {
     draft(event.currentTarget.value)
-    dirty(event.currentTarget.value !== goalText())
   }
 
   function updateReply(event) {
     reply(event.currentTarget.value)
   }
 
-  async function send(version) {
+  async function send() {
     sending(true)
     const response = await fetch('/api/goal', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text: draft(), version }),
+      body: JSON.stringify({ text: draft(), version: savedVersion() }),
       // 通信が失敗しても送信中の印を解除する（開発サーバーの再起動と重なると fetch が失敗する）
     }).catch(() => Response.json({ error: 'サーバーにつながりません。少し待ってからもう一度送ってください' }, { status: 503 }))
+    const body = await response.json().catch(() => ({}))
     sending(false)
+    // 200 と 409 のどちらでも、応答の本文と版を保存済みの値にする
+    if (response.ok || response.status === 409) {
+      savedText(body.text)
+      savedVersion(body.version)
+    }
     conflict(response.status === 409)
     failure(response.ok || response.status === 409 ? '' : `保存できませんでした（${response.status}）`)
-    dirty(response.ok ? false : dirty())
   }
 
   function save(event) {
     event.preventDefault()
     draft(event.currentTarget.querySelector('textarea').value)
-    send(goalVersion())
+    void send()
   }
 
   function overwrite() {
-    send(goalVersion())
+    // 競合の応答で受け取った版のまま、入力中の本文で送り直す
+    void send()
   }
 
   function loadLatest() {
-    draft(goalText())
-    dirty(false)
+    draft(savedText())
     conflict(false)
   }
 
