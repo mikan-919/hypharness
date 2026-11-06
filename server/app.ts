@@ -10,6 +10,11 @@ import { relayCall } from '../harness/topic.ts'
 import { deepinfra } from './model.ts'
 import { createRelay } from './relay.ts'
 
+// Vite の開発サーバーには Bun が .env を読み込まないため、ここで読む。既にある環境変数は上書きしない
+try {
+  process.loadEnvFile('.env')
+} catch {}
+
 export const relay = createRelay(deepinfra(), Number(process.env.TASK_LIMIT_USD ?? 1))
 const RELAY_SOCKET = join(homedir(), '.hyph', 'relay.sock')
 const REPO = process.env.TARGET_REPO ?? process.cwd()

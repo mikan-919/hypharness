@@ -22,6 +22,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const draft = signal(goal.text)
   const dirty = signal(false)
   const conflict = signal(false)
+  const failure = signal('')
   const reply = signal('')
   const sending = signal(false)
   const isStarted = signal(started)
@@ -88,6 +89,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
               </button>
             )}
           </form>
+          {failure() && <p class="conflict">{failure()}</p>}
           {head() && (
             <article class="question head">
               <h2>{head().text}</h2>
@@ -207,6 +209,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     })
     sending(false)
     conflict(response.status === 409)
+    failure(response.ok || response.status === 409 ? '' : `保存できませんでした（${response.status}）`)
     dirty(response.ok ? false : dirty())
   }
 
@@ -243,6 +246,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     })
     sending(false)
     reply(response.ok ? '' : reply())
+    failure(response.ok ? '' : `送れませんでした: ${(await response.json().catch(() => ({}))).error ?? response.status}`)
   }
 
   // ponytail: 開始の合図は表示を変えるだけ。分解役ができたら固定部へ送る

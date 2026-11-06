@@ -106,6 +106,14 @@ export function createStore(file?: string, goalFile?: string) {
       resolve(text)
       return true
     },
+    // 答えを待つ者のいない質問を待ち行列から外す（keep は待っている質問の key）
+    dropOrphans(keep: Set<string>) {
+      const orphans = dialog.questions.filter((q) => !q.answer && !keep.has(q.key)).map((q) => q.id)
+      if (orphans.length === 0) return
+      dialog.questions = dialog.questions.filter((q) => !orphans.includes(q.id))
+      dialog.queue = dialog.queue.filter((id) => !orphans.includes(id))
+      changed()
+    },
     record(entry: Omit<Entry, 'id'>) {
       dialog.entries = [...dialog.entries, { ...entry, id: `e${dialog.entries.length + 1}` }]
       changed()
