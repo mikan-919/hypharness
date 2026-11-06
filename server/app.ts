@@ -5,6 +5,7 @@ import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import { createFileRouter } from 'irisout/hono'
 import { startDialog } from '../harness/index.ts'
+import { runPipeline } from '../harness/pipeline.ts'
 import { createStore } from '../harness/store.ts'
 import { relayCall } from '../harness/topic.ts'
 import { deepinfra } from './model.ts'
@@ -38,6 +39,8 @@ const store = shared.store
 export function boot() {
   if (shared.booted) return RELAY_SOCKET
   shared.booted = true
+  // 前の起動で流れが動いていたら、止まったことにする。利用者が開始の合図を出し直す
+  if (store.snapshot().started) store.setRun({ started: false, halted: 'サーバーが再起動したため流れが止まりました' })
   try {
     unlinkSync(RELAY_SOCKET)
   } catch {}
@@ -46,11 +49,14 @@ export function boot() {
   return RELAY_SOCKET
 }
 
+// 書いている途中の文を画面へ流す
+const call = relayCall(RELAY_SOCKET, (agent, text) => store.setLive(agent, text.slice(-600)))
+
 // 論点エージェントを動かす。止まっていたら、保存した対話の続きから動かし直せる
 function dialog() {
   if (shared.running) return
   shared.running = true
-  void startDialog(store, relayCall(RELAY_SOCKET), REPO).finally(() => {
+  void startDialog(store, call, REPO).finally(() => {
     shared.running = false
   })
 }
@@ -82,6 +88,21 @@ app.post('/api/goal', async (c) => {
   const { text, version } = await c.req.json<{ text: string; version: number }>()
   const result = store.editGoal(text, version, 'user', '画面で書き換えた')
   return c.json(result, result.ok ? 200 : 409)
+})
+
+// 開始の合図（ADR 0021）。論点エージェントの過半数が開始可のときだけ受け付ける
+app.post('/api/start', (c) => {
+  const { topics, started } = store.snapshot()
+  if (started) return c.json({ error: '既に動いています' }, 409)
+  if (topics.filter((t) => t.ready).length * 2 <= topics.length) {
+    return c.json({ error: '論点エージェントの過半数が開始可になっていません' }, 409)
+  }
+  void runPipeline(store, call, REPO, {
+    worktrees: join(homedir(), '.hyph', 'worktrees', REPO.replaceAll('/', '_')),
+    setup: process.env.SETUP_COMMAND,
+    check: process.env.CHECK_COMMAND,
+  })
+  return c.json({ ok: true })
 })
 
 app.post('/api/revert', async (c) => {

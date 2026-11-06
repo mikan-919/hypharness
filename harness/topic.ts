@@ -1,19 +1,33 @@
 // 論点エージェント。中継を通してモデルを呼び、利用者に1問ずつ聞いて最終目的を詰める（ADR 0003、0012）
-import { readdir } from 'node:fs/promises'
-import { relative, resolve } from 'node:path'
+import { relative } from 'node:path'
 import type { AssistantMessage, Context, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { Edit } from '../shared/dialog.ts'
+import { inside, listFiles, noteReply, object, readFile } from './agent.ts'
 import type { Store } from './store.ts'
 
 export type Call = (body: { topicId: string; taskId: string; context: Context }) => Promise<AssistantMessage>
 
-// 中継の Unix ソケットを呼び、流れてくるイベントの最後（done か error）の応答を返す
+// 中継の Unix ソケットを呼び、流れてくるイベントの最後（done か error）の応答を返す。
+// onText には、書いている途中の文（考えている途中の文を含む）を、届くたびにそれまでの全体で渡す
 export const relayCall =
-  (socket: string): Call =>
+  (socket: string, onText?: (topicId: string, text: string) => void): Call =>
   async (body) => {
     const response = await fetch('http://relay/', { unix: socket, method: 'POST', body: JSON.stringify(body) })
-    if (!response.ok) throw new Error(((await response.json()) as { error: string }).error)
-    const last = JSON.parse((await response.text()).trim().split('\n').at(-1) ?? '{}')
+    if (!response.ok || !response.body) throw new Error(((await response.json()) as { error: string }).error)
+    let buffer = ''
+    let text = ''
+    let last: any = {}
+    const decoder = new TextDecoder()
+    for await (const bytes of response.body as unknown as AsyncIterable<Uint8Array>) {
+      const chunk = decoder.decode(bytes, { stream: true })
+      const lines = (buffer + chunk).split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines.filter(Boolean)) {
+        last = JSON.parse(line)
+        if (last.type === 'text_delta' || last.type === 'thinking_delta') onText?.(body.topicId, (text += last.delta))
+      }
+    }
+    if (buffer.trim()) last = JSON.parse(buffer)
     if (last.type === 'error') throw new Error(last.error.errorMessage ?? 'モデルの呼び出しに失敗しました')
     return last.message
   }
@@ -32,7 +46,6 @@ const SYSTEM = `あなたは hypharness の論点エージェントです。利�
 - 本文が課題に分けられるところまで具体的になり、決定を ADR に書いたら ready を呼んで終える。ADR を1つも書いていないと ready は断られる。
 - 日本語で書く。修飾表現を使わず、事実を書く。`
 
-const object = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required })
 
 const TOOLS = [
   {
@@ -91,16 +104,6 @@ const TOOLS = [
   { name: 'ready', description: '最終目的が課題に分けられるところまで決まったときに呼ぶ', parameters: object({}, []) },
 ] as Tool[]
 
-// ponytail: 1ファイルは先頭の 20,000 文字まで。長いファイルを読む必要が出たら範囲の指定を足す
-const MAX_FILE = 20_000
-
-// リポジトリの外を読ませない
-function inside(repo: string, path: unknown) {
-  const full = resolve(repo, String(path ?? '.'))
-  if (relative(repo, full).startsWith('..')) throw new Error(`リポジトリの外です: ${path}`)
-  return full
-}
-
 // 論点エージェントが書けるのは ADR と用語集だけ（読むだけの他のファイルは変えさせない）
 const WRITABLE = /^docs\/(adr\/[\w.-]+\.md|glossary\.md)$/
 
@@ -135,14 +138,8 @@ async function run(store: Store, topicId: string, repo: string, call: ToolCall) 
     store.record({ topicId, kind: a.kind, text: a.text, evidence: a.evidence })
     return '追記した'
   }
-  if (call.name === 'list_files') {
-    const entries = await readdir(inside(repo, a.path), { withFileTypes: true })
-    return entries
-      .filter((e) => e.name !== '.git' && e.name !== 'node_modules')
-      .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
-      .join('\n')
-  }
-  if (call.name === 'read_file') return (await Bun.file(inside(repo, a.path)).text()).slice(0, MAX_FILE)
+  if (call.name === 'list_files') return listFiles(repo, a.path)
+  if (call.name === 'read_file') return readFile(repo, a.path)
   throw new Error(`未知のツールです: ${call.name}`)
 }
 
@@ -181,7 +178,9 @@ export async function runTopic(store: Store, call: Call, topicId: string, repo: 
           store.setSeen(topicId, store.snapshot().goal.version)
         }
         // ponytail: 対話は1つの課題として費用の上限を受ける。論点が増えたら論点ごとに分ける
-        messages.push(await call({ topicId, taskId: 'dialog', context: { systemPrompt: SYSTEM, messages, tools: TOOLS } }))
+        const reply = await call({ topicId, taskId: 'dialog', context: { systemPrompt: SYSTEM, messages, tools: TOOLS } })
+        messages.push(reply)
+        noteReply(store, topicId, reply)
         save()
       }
       const reply = messages.at(-1) as AssistantMessage
@@ -209,6 +208,7 @@ export async function runTopic(store: Store, call: Call, topicId: string, repo: 
                 (e: Error) => ({ text: e.message, isError: true }),
               )
         store.setTopic(topicId, { state: 'researching' })
+        store.act(topicId, 'result', `${toolCall.name}: ${result.text.replace(/\s+/g, ' ').slice(0, 160)}`)
         messages.push({
           role: 'toolResult',
           toolCallId: toolCall.id,

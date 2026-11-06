@@ -128,6 +128,19 @@ button:disabled { opacity: 0.5; cursor: default; }
 .edit-head { display: flex; gap: 8px; align-items: center; }
 .edit-head button { margin-left: auto; padding: 2px 8px; font-size: 12px; }
 .diff { margin: 4px 0 0; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; color: var(--muted); max-height: 160px; overflow: auto; }
+.tasks { margin-bottom: 16px; }
+.task { border-left: 3px solid var(--line); padding: 4px 8px; margin-bottom: 6px; }
+.task .state { margin-left: 8px; font-size: 12px; color: var(--muted); }
+.task p { margin: 2px 0; }
+.task.solving, .task.checking { border-color: var(--accent); }
+.task.committed { border-color: var(--done); }
+.task.held { border-color: var(--fail); }
+.activity { border-left: 2px solid var(--line); padding: 2px 8px; margin-bottom: 4px; font-size: 12px; }
+.activity p { margin: 0; color: var(--muted); word-break: break-all; }
+.activity.live { border-color: var(--accent); }
+.activity.live p { color: var(--ink); }
+.activity.fail { border-color: var(--fail); }
+.activity.commit, .activity.check { border-color: var(--done); }
 @media (max-width: 900px) {
   .shell { grid-template-columns: 1fr; height: auto; }
 }

@@ -60,9 +60,37 @@ export type Dialog = {
   queue: string[]
   questions: Question[]
   entries: Entry[]
+  // 開始の合図の後の流れが動いているか（ADR 0021）
   started: boolean
   goal: { text: string; version: number }
   edits: Edit[]
+  tasks: Task[]
+  activity: Activity[]
+  // エージェントごとの、書いている途中の文
+  live: Record<string, string>
+  // 流れを止めた理由。動いているときや止まっていないときは空
+  halted: string
+}
+
+export type TaskState = 'solving' | 'checking' | 'committed' | 'held'
+
+// 分解役が作った課題1つ分
+export type Task = {
+  id: string
+  statement: string
+  state: TaskState
+  attempts: number
+  // 統合ブランチに積んだコミット
+  commit: string
+}
+
+// エージェントの動き1つ分。agent は論点の id か 'decompose'・'solve'
+export type Activity = {
+  id: string
+  agent: string
+  kind: 'tool' | 'result' | 'text' | 'check' | 'commit' | 'fail'
+  text: string
+  at: number
 }
 
 // 中継が SSE で配信するトークン数（ADR 0016）。ハーネスを経由しない

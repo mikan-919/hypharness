@@ -11,7 +11,11 @@ const stateLabel = {
 
 const kindLabel = { fact: '事実', fail: '失敗', done: '完了' }
 
-export function DialogPage({ topics, queue, questions, entries, started, goal, edits }: Dialog) {
+const taskLabel = { solving: '解いている', checking: '検査中', committed: '統合ブランチに積んだ', held: '保留' }
+
+const agentLabel = { decompose: '分解役', solve: '解答役' }
+
+export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted }: Dialog) {
   const topicList = signal(topics)
   const items = signal(questions)
   const pending = signal(queue)
@@ -27,11 +31,28 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const picked = signal('')
   const sending = signal(false)
   const isStarted = signal(started)
+  const taskList = signal(tasks)
+  const activityList = signal(activity)
+  const liveText = signal(live)
+  const haltedReason = signal(halted)
+  const recent = derived(() => [...activityList()].reverse().slice(0, 60))
+  const writing = derived(() =>
+    Object.entries(liveText())
+      .filter((entry) => entry[1])
+      .map((entry) => ({ agent: entry[0], text: entry[1].slice(-240) })),
+  )
   const usage = signal<Record<string, Usage>>({})
   const head = derived(() => items().find((q) => q.id === pending()[0]))
   const history = derived(() => [...editList()].reverse())
   const readyCount = derived(() => topicList().filter((t) => t.ready).length)
   const majority = derived(() => readyCount() * 2 > topicList().length)
+  const startHint = derived(() =>
+    isStarted()
+      ? '分解役と解答役が課題を進めている'
+      : majority()
+        ? '過半数の論点が開始可になった。押すと課題を進め始める'
+        : '論点の過半数が開始可になると押せる',
+  )
   const totalOutput = derived(() => Object.values(usage()).reduce((sum, u) => sum + u.output, 0))
   const totalCost = derived(() =>
     Object.values(usage())
@@ -56,15 +77,30 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
             <p>
               開始のツール {readyCount()} / {topicList().length}
             </p>
-            <button type="button" disabled={isStarted()} onClick={start}>
-              {isStarted() ? '開始の合図を出した' : '開始の合図'}
+            <button type="button" disabled={isStarted() || !majority()} onClick={start}>
+              {isStarted() ? '流れが動いている' : '開始の合図'}
             </button>
-            <p class="hint">{majority() ? '過半数に届いている' : '過半数に届いていない'}</p>
+            <p class="hint">{startHint()}</p>
           </div>
         </aside>
 
         <main class="conversation">
+          {haltedReason() && <p class="conflict">{`流れが止まりました: ${haltedReason()}`}</p>}
           {failure() && <p class="conflict">{failure()}</p>}
+          {taskList().length > 0 && (
+            <section class="tasks">
+              <h2>課題</h2>
+              {taskList().map((task) => (
+                <div key={task.id} class={`task ${task.state}`}>
+                  <strong>{task.id}</strong>
+                  <span class="state">
+                    {`${taskLabel[task.state]}${task.attempts > 1 ? `（${task.attempts} 回目）` : ''} ${task.commit.slice(0, 8)}`}
+                  </span>
+                  <p>{task.statement.split('\n')[0]}</p>
+                </div>
+              ))}
+            </section>
+          )}
           {head() && (
             <article class="question head">
               <h2>{head().text}</h2>
@@ -140,6 +176,19 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
             <p>出力の合計（ストリーミング中）</p>
             <p>${totalCost()}</p>
           </section>
+          <h2>動き</h2>
+          {writing().map((w) => (
+            <div key={w.agent} class="activity live">
+              <strong>{`${agentLabel[w.agent] ?? topicList().find((t) => t.id === w.agent)?.title ?? w.agent} が書いている`}</strong>
+              <p>{w.text}</p>
+            </div>
+          ))}
+          {recent().map((a) => (
+            <div key={a.id} class={`activity ${a.kind}`}>
+              <strong>{agentLabel[a.agent] ?? topicList().find((t) => t.id === a.agent)?.title ?? a.agent}</strong>
+              <p>{a.text}</p>
+            </div>
+          ))}
           <h2>書き換えの履歴</h2>
           {history().map((edit) => (
             <div key={edit.id} class={`edit ${edit.author === 'user' ? 'user' : 'agent'}`}>
@@ -187,6 +236,10 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
       entryList(next.entries)
       editList(next.edits)
       isStarted(next.started)
+      taskList(next.tasks)
+      activityList(next.activity)
+      liveText(next.live)
+      haltedReason(next.halted)
       goalText(next.goal.text)
       goalVersion(next.goal.version)
       // 書きかけでなければ、他の書き手の書き換えをそのまま映す
@@ -272,8 +325,10 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     failure(response.ok ? '' : `送れませんでした: ${(await response.json().catch(() => ({}))).error ?? response.status}`)
   }
 
-  // ponytail: 開始の合図は表示を変えるだけ。分解役ができたら固定部へ送る
-  function start() {
-    isStarted(true)
+  async function start() {
+    const response = await fetch('/api/start', { method: 'POST' }).catch(() =>
+      Response.json({ error: 'サーバーにつながりません' }, { status: 503 }),
+    )
+    failure(response.ok ? '' : `開始できませんでした: ${(await response.json().catch(() => ({}))).error ?? response.status}`)
   }
 }

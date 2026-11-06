@@ -2,7 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { Message } from '@earendil-works/pi-ai'
-import type { Dialog, Entry, Question, Topic } from '../shared/dialog.ts'
+import type { Activity, Dialog, Entry, Question, Task, Topic } from '../shared/dialog.ts'
 import { diffLines } from '../shared/diff.ts'
 
 // seen は論点ごとの、エージェントが既に知っている本文の版
@@ -16,7 +16,14 @@ const EMPTY: Dialog = {
   started: false,
   goal: { text: '', version: 0 },
   edits: [],
+  tasks: [],
+  activity: [],
+  live: {},
+  halted: '',
 }
+
+// ponytail: 動きは新しい 200 件だけを残す。遡って見る必要が出たら別のファイルに全件を書く
+const MAX_ACTIVITY = 200
 
 function load(file: string | undefined): Saved {
   try {
@@ -38,6 +45,14 @@ export function createStore(file?: string, goalFile?: string) {
       writeFileSync(file, JSON.stringify({ dialog, transcripts, seen }))
     }
     for (const listener of listeners) listener(dialog)
+  }
+  // 書いている途中の文は保存せず、250 ミリ秒に1回だけ画面へ流す
+  let liveTimer: ReturnType<typeof setTimeout> | undefined
+  const broadcastSoon = () => {
+    liveTimer ??= setTimeout(() => {
+      liveTimer = undefined
+      for (const listener of listeners) listener(dialog)
+    }, 250)
   }
 
   // 読んだ版の番号が今の版と違えば断る（ADR 0018）。断ったときは最新の本文を返す
@@ -115,6 +130,30 @@ export function createStore(file?: string, goalFile?: string) {
       if (orphans.length === 0) return
       dialog.questions = dialog.questions.filter((q) => !orphans.includes(q.id))
       dialog.queue = dialog.queue.filter((id) => !orphans.includes(id))
+      changed()
+    },
+    act(agent: string, kind: Activity['kind'], text: string) {
+      const id = `a${Number(dialog.activity.at(-1)?.id.slice(1) ?? 0) + 1}`
+      dialog.activity = [...dialog.activity, { id, agent, kind, text, at: Date.now() }].slice(-MAX_ACTIVITY)
+      dialog.live = { ...dialog.live, [agent]: '' }
+      changed()
+    },
+    setLive(agent: string, text: string) {
+      dialog.live = { ...dialog.live, [agent]: text }
+      broadcastSoon()
+    },
+    addTask(statement: string) {
+      const task: Task = { id: `t${dialog.tasks.length + 1}`, statement, state: 'solving', attempts: 0, commit: '' }
+      dialog.tasks = [...dialog.tasks, task]
+      changed()
+      return task.id
+    },
+    setTask(id: string, patch: Partial<Task>) {
+      dialog.tasks = dialog.tasks.map((t) => (t.id === id ? { ...t, ...patch } : t))
+      changed()
+    },
+    setRun(patch: { started?: boolean; halted?: string }) {
+      Object.assign(dialog, patch)
       changed()
     },
     record(entry: Omit<Entry, 'id'>) {
