@@ -95,8 +95,13 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                   placeholder={picked() ? '補足があれば書く' : '選択肢を選ぶか、答えを書く'}
                 />
                 <button type="submit" disabled={sending()}>
-                  送る
+                  {picked() ? `「${picked()}」で答える` : '書いた答えを送る'}
                 </button>
+                <p class="hint">
+                  {picked()
+                    ? '欄に書いた補足は、選んだ選択肢と一緒に送る'
+                    : '選択肢を選ばずに送ると、欄に書いた文がそのまま答えになる'}
+                </p>
               </form>
             </article>
           )}
