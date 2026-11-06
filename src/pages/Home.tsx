@@ -69,7 +69,8 @@ export default function Home({ user, status }: PageProps<'Home'>) {
         <h2 className='text-lg font-bold'>タスク</h2>
         <NewTask />
         <div className='overflow-x-auto'>
-          <table className='w-full text-left'>
+          {/* 課題文以外の列は折り返さない。長い課題文が他の列を押し縮めないよう、課題文は3行で切り、全文は title で見せる */}
+          <table className='w-full text-left [&_td]:whitespace-nowrap [&_th]:whitespace-nowrap'>
             <thead>
               <tr>
                 <th>番号</th>
@@ -87,10 +88,15 @@ export default function Home({ user, status }: PageProps<'Home'>) {
                   <td>
                     <History id={t.id} />
                   </td>
-                  <td className='break-all whitespace-pre-wrap'>
-                    {t.kind === 'trial'
-                      ? '（計測の試行。中身は暗号化してノードだけが読む）'
-                      : t.statement}
+                  <td className='w-full min-w-48 whitespace-normal!'>
+                    <span
+                      className='line-clamp-3 break-words whitespace-pre-wrap'
+                      title={t.kind === 'trial' ? undefined : t.statement}
+                    >
+                      {t.kind === 'trial'
+                        ? '（計測の試行。中身は暗号化してノードだけが読む）'
+                        : t.statement}
+                    </span>
                     {t.check_command && (
                       <span className='block font-mono text-muted-foreground'>
                         判定: {t.check_command}
