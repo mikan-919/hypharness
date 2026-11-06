@@ -23,7 +23,9 @@ import { chmod, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
-import { createModels } from '@earendil-works/pi-ai/models'
+import { envApiKeyAuth } from '@earendil-works/pi-ai'
+import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
+import { createModels, createProvider } from '@earendil-works/pi-ai/models'
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
 import type { Arm } from './evolve'
 import { KINDS, type Kind, metered, openLedger } from './ledger'
@@ -43,7 +45,11 @@ import {
 import { unpack } from './vault'
 
 export const DIR = join(homedir(), '.hyph')
-const solverModel = () => process.env.MODEL || 'gpt-6.1-sol'
+// モデルの提供元は PROVIDER で選ぶ（deepinfra か openai）
+const PROVIDER = process.env.PROVIDER || 'deepinfra'
+const DEEPINFRA_MODEL = 'deepseek-ai/DeepSeek-V4.1-Flash-1017'
+const solverModel = () =>
+  process.env.MODEL || (PROVIDER === 'openai' ? 'gpt-6.1-sol' : DEEPINFRA_MODEL)
 export const REPO = join(import.meta.dir, '..')
 // ponytail: 解答役は、並べた計測すべてを合わせて同時に8つまで動かす。待ち時間の大半はモデルの応答で、
 // 4つでは CPU の9割が空いていた。ノードの CPU・メモリとモデルの流量制限を見て変える
@@ -708,10 +714,18 @@ export const summary = (rates: number[]) => {
 // onCost を渡すと、呼び出しのたびに費用を知らせる（段階5の資源配分の記録）
 export async function models(onCost?: (cost: number) => void) {
   const m = createModels({ credentials: fileStore(join(DIR, 'auth.json')) })
-  m.setProvider(openaiProvider())
-  if (!(await m.getAuth('openai'))) {
+  if (PROVIDER === 'openai') {
+    m.setProvider(openaiProvider())
+  } else if (PROVIDER === 'deepinfra') {
+    m.setProvider(deepinfraProvider())
+  } else {
+    throw new Error(`PROVIDER は deepinfra か openai です: ${PROVIDER}`)
+  }
+  if (!(await m.getAuth(PROVIDER))) {
     throw new Error(
-      `${DIR} で bunx @earendil-works/pi-ai login openai を実行してサインインしてください`,
+      PROVIDER === 'openai'
+        ? `${DIR} で bunx @earendil-works/pi-ai login openai を実行してサインインしてください`
+        : '.env に DEEPINFRA_API_KEY を設定してください',
     )
   }
   // timeoutMs は1回の呼び出しの上限。SDK の既定は10分で、候補の制限時間（10分）と同じため、止まった呼び出しが1回あると試行全体が時間切れになる。
@@ -722,7 +736,7 @@ export async function models(onCost?: (cost: number) => void) {
     reasoning?: string,
     timeoutMs?: number,
   ): Complete => {
-    const model = m.getModel('openai', name)
+    const model = m.getModel(PROVIDER, name)
     if (!model) throw new Error(`未対応のモデルです: ${name}`)
     console.log(`${role}: ${name}、推論の深さ: ${reasoning ?? '既定'}`)
     const complete: Complete = (context, options) =>
@@ -1034,6 +1048,39 @@ if (import.meta.main) {
       '使い方: bun run measure <セッション> generate|review|run|evolve|promote|deploy|ideas|ideas-check|budget|ledger|harden|flag|proposals|approve|reject',
     )
   }
+}
+
+// SDK に DeepInfra の定義がないため、OpenAI 互換の接続として定義する。料金は DeepInfra の公開値（100万トークンあたりのドル）
+function deepinfraProvider() {
+  return createProvider({
+    id: 'deepinfra',
+    name: 'DeepInfra',
+    baseUrl: 'https://api.deepinfra.com/v1/openai',
+    auth: {
+      apiKey: envApiKeyAuth('DeepInfra API key', ['DEEPINFRA_API_KEY']),
+    },
+    models: [
+      {
+        id: DEEPINFRA_MODEL,
+        name: 'DeepSeek V4.1 Flash 1017',
+        api: 'openai-completions',
+        baseUrl: 'https://api.deepinfra.com/v1/openai',
+        provider: 'deepinfra',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.2, output: 0.6, cacheRead: 0.006, cacheWrite: 0 },
+        contextWindow: 1_048_576,
+        maxTokens: 65_536,
+        compat: {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          maxTokensField: 'max_tokens',
+          requiresReasoningContentOnAssistantMessages: true,
+        },
+      },
+    ],
+    api: openAICompletionsApi(),
+  })
 }
 
 // refresh token は更新のたびに入れ替わるため、書き込みを直列にして古い値で上書きしない

@@ -26,7 +26,7 @@ bun run node <セッション>  # ノードを起動する。別の URL に接�
 
 ## 候補を測る
 
-最終目的はセッションごとに変わるため、課題と予算の基準はセッション名ごとに `~/.hyph/sessions/<セッション>.sqlite` に分けて保存する。候補（解答役・改善役）のモデルは `MODEL`・`REASONING` の環境変数で選ぶ。課題の生成役と関連性の判定役は `GENERATOR_MODEL`・`GENERATOR_REASONING` で別に選べ、未設定なら候補と同じモデルを使う。候補と同じモデルでは、候補がときどき解けない正しい課題を作りにくい。サインインは `~/.hyph` で `bunx @earendil-works/pi-ai login openai` を実行して行う。
+最終目的はセッションごとに変わるため、課題と予算の基準はセッション名ごとに `~/.hyph/sessions/<セッション>.sqlite` に分けて保存する。モデルの提供元は `PROVIDER`（`deepinfra` が既定、ほかに `openai`）で選び、DeepInfra は `.env` の `DEEPINFRA_API_KEY` を使う。DeepInfra の既定のモデルは `deepseek-ai/DeepSeek-V4.1-Flash-1017`。候補（解答役・改善役）のモデルは `MODEL`・`REASONING` の環境変数で選ぶ。課題の生成役と関連性の判定役は `GENERATOR_MODEL`・`GENERATOR_REASONING` で別に選べ、未設定なら候補と同じモデルを使う。候補と同じモデルでは、候補がときどき解けない正しい課題を作りにくい。OpenAI のサインインは `~/.hyph` で `bunx @earendil-works/pi-ai login openai` を実行して行う。
 
 ```sh
 bun run measure <セッション> generate <最終目的のファイル> [検証用の数] [成績用の数]  # 課題を生成して選別する
