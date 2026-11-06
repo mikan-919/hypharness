@@ -10,12 +10,14 @@ import {
   attempt,
   BUDGET_MARGIN,
   checkout,
+  currentWorkspace,
   DIR,
   models,
   openMeasure,
   withMemory,
 } from './measure'
 import type { Budget } from './model'
+import { submit } from './pr'
 import { loadKey, pack, seal, sha256, unseal } from './vault'
 
 // 旧ランナーの config.json はアカウント単位のトークンで使えないため、別の名前にする
@@ -218,6 +220,8 @@ async function run(task: Grant) {
   try {
     // ponytail: 再開したタスクも、版はその時点で選び直す。試験版の比較で版をまたぐタスクが問題になったら、版もチェックポイントに残す
     const restore = task.checkpoint ? await restoreFrom(task) : undefined
+    // セッションの作業領域（hibana など）の今のコミットで解く。成功した差分はそのリポジトリへの PR にする
+    const workspace = await currentWorkspace(m)
     const result = await attempt(
       {
         // 経済のループで採用された方針（記憶）を課題文の前に置く
@@ -226,6 +230,7 @@ async function run(task: Grant) {
         check: task.check ?? 'true',
         check_files: {},
         solution: {},
+        workspace,
       },
       await checkout(version),
       solver,
@@ -252,6 +257,23 @@ async function run(task: Grant) {
         join(STATE, 'outcome.json'),
         JSON.stringify({ ok, cost: budget.spent, limit: budget.limit }),
       )
+    }
+    // ponytail: PR は判定を通ったか判定のないタスクで、差分があるときだけ作る。中身の確認は PR を見る人に任せる
+    if (workspace && result.patch && !abort.signal.aborted) {
+      submit(
+        workspace,
+        task.statement,
+        result.patch,
+        `hyph/task-${task.id}-${task.generation}`,
+        `hypharness のタスク ${task.id} の変更です。${ok ? '判定コマンドを通りました。' : '判定コマンドはありません。'}`,
+        solver,
+      )
+        .then((url) =>
+          console.log(`タスク ${task.id} の PR を作りました: ${url}`),
+        )
+        .catch((e) =>
+          console.error(`タスク ${task.id} を PR にできません: ${e.message}`),
+        )
     }
     if (!abort.signal.aborted) {
       deploy.record(task.id, version, role, ok, budget.spent)
