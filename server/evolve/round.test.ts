@@ -57,6 +57,20 @@ const putArchive = (root: string, id: string) => {
   return c
 }
 
+// candidates に候補を置く
+const putCandidate = (root: string, id: string, changes: string[], score: 0 | 1) => {
+  const c: Candidate = {
+    id,
+    round: Number(id.split('-')[0]),
+    module: 'context',
+    changes,
+    score,
+    note: '',
+  }
+  writeCandidate(c, root)
+  return c
+}
+
 // 1周ぶんの候補を置く。score が 1 のものは archive に移す
 const putRound = (root: string, round: number, modules: readonly Module[], score: 0 | 1) => {
   for (const module of modules) {
@@ -290,4 +304,60 @@ test('未探索が複数あるとき、周の番号を1つ進めると選ばれ�
   expect(first).toEqual([MODULES[2 + (4 % 3)]])
   expect(second).toEqual([MODULES[2 + (5 % 3)]])
   expect(first).not.toEqual(second)
+})
+
+test('score が 0 の候補の changes が propose の failed に入り、同じ文字列は1つになる', async () => {
+  const root = evo()
+  putCandidate(root, '1-1', ['A', 'B'], 0)
+  putCandidate(root, '1-2', ['B', 'C'], 0)
+  putArchive(root, '1-3')
+  const seen: ProposeInput[] = []
+  await runRound({
+    round: 2,
+    dialog: dialog(),
+    propose: (input) => {
+      seen.push(input)
+      return { changes: [`${input.module} の変更`], note: '' }
+    },
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  expect(seen.every((i) => i.failed.join(',') === 'A,B,C')).toBe(true)
+})
+
+test('周の番号が 10 以下のとき、changes が4個以上でも候補に残るのは先頭3個', async () => {
+  const root = evo()
+  const result = await runRound({
+    round: 10,
+    dialog: dialog(),
+    propose: () => ({ changes: ['a', 'b', 'c', 'd', 'e'], note: 'メモ' }),
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  expect(result.candidates.map((c) => c.changes)).toEqual(MODULES.map(() => ['a', 'b', 'c']))
+  // note は提案の値をそのまま使う
+  expect(result.candidates.map((c) => c.note)).toEqual(MODULES.map(() => 'メモ'))
+  expect(listCandidates(root).map((c) => c.changes)).toEqual(MODULES.map(() => ['a', 'b', 'c']))
+})
+
+test('周の番号が 11 以上のとき、候補に残るのは先頭1個', async () => {
+  const root = evo()
+  const result = await runRound({
+    round: 11,
+    dialog: dialog(),
+    propose: (input) => {
+      expect(input.maxChanges).toBe(1)
+      return { changes: ['a', 'b', 'c', 'd'], note: '' }
+    },
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  expect(result.candidates.map((c) => c.changes)).toEqual(MODULES.map(() => ['a']))
+  expect(listCandidates(root).map((c) => c.changes)).toEqual(MODULES.map(() => ['a']))
 })

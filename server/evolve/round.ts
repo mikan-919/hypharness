@@ -3,13 +3,16 @@ import type { Dialog } from '../../shared/dialog.ts'
 import { MODULES, type Candidate, type Module } from '../../shared/evolve.ts'
 import { archiveCandidate, listArchive, listCandidates, writeCandidate } from './store.ts'
 
-// 提案に渡す材料。archive は前の周までの採用済みの候補、start はこの周の出発点
+// 提案に渡す材料。archive は前の周までの採用済みの候補、start はこの周の出発点。
+// failed は検証に通らなかった変更の履歴、maxChanges は1つの候補に残す変更の数の上限
 export type ProposeInput = {
   module: Module
   weaknesses: string[]
   archive: Candidate[]
   round: number
   start?: Candidate
+  failed: string[]
+  maxChanges: number
 }
 
 // 提案の返り値。id・round・module・score は runRound が入れる
@@ -53,6 +56,26 @@ export function weaknesses(dialog: Dialog): string[] {
   return out
 }
 
+// 1つの候補に残す変更の数の上限。周の番号が 10 以下なら 3、11 以上なら 1
+export function changeLimit(round: number): number {
+  return round <= 10 ? 3 : 1
+}
+
+// 検証に通らなかった候補（score が 0）の変更を順につなぐ。同じ文字列は1つにする
+export function failedChanges(history: Candidate[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const candidate of history) {
+    if (candidate.score !== 0) continue
+    for (const change of candidate.changes) {
+      if (seen.has(change)) continue
+      seen.add(change)
+      out.push(change)
+    }
+  }
+  return out
+}
+
 // archive から周の番号で巡回して出発点を1つ選ぶ。archive が空なら選ばない
 export function pickStart(archive: Candidate[], round: number): Candidate | undefined {
   if (archive.length === 0) return undefined
@@ -88,6 +111,8 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
   const archive = listArchive(root)
   const history = [...listCandidates(root), ...archive]
   const start = pickStart(archive, round)
+  const failed = failedChanges(history)
+  const maxChanges = changeLimit(round)
   // 直前の3周に改善が無ければ、未探索のモジュールに回す
   const targets = stuckModules(history, round) ? pickUnstuck(archive, round) : [...MODULES]
   const candidates: Candidate[] = []
@@ -95,12 +120,12 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
 
   for (const module of targets) {
     const id = `${round}-${MODULES.indexOf(module) + 1}`
-    const proposal = await propose({ module, weaknesses: weak, archive, round, start })
+    const proposal = await propose({ module, weaknesses: weak, archive, round, start, failed, maxChanges })
     const candidate: Candidate = {
       id,
       round,
       module,
-      changes: proposal.changes,
+      changes: proposal.changes.slice(0, maxChanges),
       score: 0,
       note: proposal.note ?? '',
     }

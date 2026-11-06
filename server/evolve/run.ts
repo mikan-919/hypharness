@@ -41,10 +41,15 @@ const SYSTEM = `あなたは hypharness の自己改良の提案役です。指�
 - 応答は JSON だけにする。形は {"changes": string[], "note": string}。
 - 日本語で書く。修飾表現を使わず、事実を書く。`
 
-async function askModel(stream: ReturnType<typeof deepinfra>, user: string) {
+// システムプロンプト。失敗した変更を繰り返さないことと、変更の数の上限を書く。上限は入力の maxChanges
+const systemPrompt = (maxChanges: number) => `${SYSTEM}
+- 失敗した変更（failed）を繰り返さない。
+- 変更は指定の個数までにする。個数は ${maxChanges} 個。`
+
+async function askModel(stream: ReturnType<typeof deepinfra>, user: string, system: string) {
   const messages: Message[] = [{ role: 'user', content: user, timestamp: Date.now() }]
   let answer: AssistantMessage | undefined
-  for await (const event of stream({ systemPrompt: SYSTEM, messages, tools: [] })) {
+  for await (const event of stream({ systemPrompt: system, messages, tools: [] })) {
     if (event.type === 'done') answer = event.message
     if (event.type === 'error') throw new Error(event.error.errorMessage ?? 'モデルの呼び出しに失敗しました')
   }
@@ -92,10 +97,12 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
         weaknesses: input.weaknesses,
         start: input.start?.changes ?? [],
         archive: input.archive.map((c) => ({ id: c.id, module: c.module, changes: c.changes })),
+        failed: input.failed,
+        maxChanges: input.maxChanges,
       }
       try {
         if (!stream) throw new Error('モデルの呼び出し先を作れませんでした')
-        const answer = await askModel(stream, JSON.stringify(material))
+        const answer = await askModel(stream, JSON.stringify(material), systemPrompt(input.maxChanges))
         cost += answer.costUsd
         return readProposal(answer.text)
       } catch (e) {
