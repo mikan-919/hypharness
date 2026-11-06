@@ -3,11 +3,21 @@
 // 予算を使い切ったら次の期（UTC の翌日）まで待つ。
 // 使い方: bun run auto <セッション> <リポジトリ> <最終目的のファイル> <1日の予算ドル> [読み取り専用で見せるディレクトリ...]
 import { existsSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { counts, openLineage, promote, rounds } from './evolve'
 import { openLedger, periodOf } from './ledger'
-import { budgetKey, DIR, mine, models, openMeasure, REPO } from './measure'
+import {
+  budgetKey,
+  currentWorkspace,
+  DIR,
+  mine,
+  models,
+  openMeasure,
+  REPO,
+} from './measure'
+import { prepare, sandboxFor } from './tasks'
 
 // ponytail: 1回のループの周回数・測り直す候補の数と回数・課題の数は、これまでの手動の運用の値。
 // 採用の頻度と費用を見て変える
@@ -20,6 +30,8 @@ const MINE_LINES = 400
 // ponytail: 課題を作り直すのは、最も新しい課題のコミットから main が10コミット以上進んだとき。
 // 作り直すと課題の組が変わり、基準版を測り直すため、コミットのたびには作り直さない。開発の速さを見て変える
 const REFRESH_COMMITS = 10
+// ponytail: どの版も解けない課題とみなす試行の数。基準版の3回と候補2件の3回ずつに当たる
+const UNSOLVED_RUNS = 9
 
 const [session = '', repo = '', goalFile = '', dollars = '', ...mounts] =
   process.argv.slice(2)
@@ -59,19 +71,50 @@ const sync = async () => {
   return (await Bun.$`git -C ${clone} rev-parse HEAD`.text()).trim()
 }
 await sync()
-if (!m.meta('workspace')) {
-  // 開発環境の設定は、リポジトリの nix の開発環境から作る
-  const prelude = join(DIR, 'sessions', `${session}.env.sh`)
-  await Bun.write(prelude, await Bun.$`nix print-dev-env ${clone}`.text())
-  m.setMeta(
-    'workspace',
-    JSON.stringify({
-      repo: clone,
-      prelude,
-      mounts: mounts.map((p) => resolve(p)),
-    }),
-  )
-  console.log(`作業領域: ${clone}`)
+// 開発環境の設定は、起動のたびにリポジトリの nix の開発環境から作り直す。隔離環境にはネットワークがないため、
+// 読み取り専用で見せる ~/.cargo/registry があれば、cargo がそこから依存を読むように CARGO_HOME とオフラインを足す
+const prelude = join(DIR, 'sessions', `${session}.env.sh`)
+const registry = mounts
+  .map((p) => resolve(p))
+  .find((p) => p.endsWith('/.cargo/registry'))
+await Bun.write(
+  prelude,
+  `${await Bun.$`nix print-dev-env ${clone}`.text()}${registry ? `\nexport CARGO_HOME=${dirname(registry)} CARGO_NET_OFFLINE=true\n` : ''}`,
+)
+m.setMeta(
+  'workspace',
+  JSON.stringify({
+    repo: clone,
+    prelude,
+    mounts: mounts.map((p) => resolve(p)),
+  }),
+)
+console.log(`作業領域: ${clone}`)
+// モデルを呼ぶ前に、隔離環境でビルドが通ることを確かめる。通らない環境で課題を作らせると、
+// 生成役が環境の原因を探し回り、課題ができないまま費用だけを使う
+// ponytail: ビルドの確かめは Cargo.toml があるリポジトリだけ。ほかの言語のリポジトリを扱うときに足す
+if (existsSync(join(clone, 'Cargo.toml'))) {
+  const dir = await mkdtemp(join(tmpdir(), 'hyph-preflight-'))
+  const workspace = await currentWorkspace(m)
+  try {
+    await prepare(dir, { files: {}, workspace })
+    const child = Bun.spawn(
+      sandboxFor(workspace, dir, 'exec 2>&1; cargo build -q'),
+      { stdout: 'pipe' },
+    )
+    const [output, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      child.exited,
+    ])
+    if (code !== 0) {
+      throw new Error(
+        `隔離環境でビルドできません。課題を作らずに止めます:\n${output.slice(-2000)}`,
+      )
+    }
+    console.log('隔離環境でのビルド: 成功')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 }
 const goal = await Bun.file(goalFile).text()
 const saved = m.meta('goal')
@@ -104,11 +147,21 @@ const retireSolved = () => {
       .filter(([, c]) => c.n >= REPEATS && c.ok === c.n)
       .map(([task]) => task),
   )
-  if (solved.length) {
-    console.log(
-      `基準版が毎回解いた課題 ${solved.length} 件を外し、次のループで最新の履歴から作り直します`,
+  // どの版も一度も解けない課題も、差を見分けられず試行を使うだけなので外す。課題の不備（判定が厳しすぎるなど）もここで外れる
+  const unsolved = m.db
+    .query<{ task: number }, [number]>(
+      `SELECT r.task_id AS task FROM runs r JOIN tasks t ON t.id = r.task_id
+        JOIN measurements ms ON ms.id = r.measurement_id
+        WHERE t.split IN ('val', 'test') AND ms.memory = ''
+        GROUP BY r.task_id HAVING COUNT(*) >= ? AND SUM(r.ok) = 0`,
     )
-    retire(solved)
+    .all(UNSOLVED_RUNS)
+    .map((r) => r.task)
+  if (solved.length || unsolved.length) {
+    console.log(
+      `基準版が毎回解いた課題 ${solved.length} 件と、${UNSOLVED_RUNS} 回以上どの版も解けなかった課題 ${unsolved.length} 件を外し、次のループで最新の履歴から作り直します`,
+    )
+    retire([...solved, ...unsolved])
   }
 }
 const refresh = async (head: string) => {
