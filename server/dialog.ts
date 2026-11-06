@@ -14,10 +14,19 @@ export async function startDialog(store: Store, run: (job: Job) => Promise<unkno
   if (!store.snapshot().goal.text.trim()) await waitFor(store, (d) => Boolean(d.goal.text.trim()))
   while (true) {
     if (!store.snapshot().topics.find((t) => t.id === 'goal')?.ready) {
+      // 実行を始める時点の版。この版より後に利用者の書き換えがあれば、実行が終わった後にもう一度動かす
+      const started = store.snapshot().goal.version
       await run({ role: 'topic', topicId: 'goal', repo }).catch((e: Error) => {
         store.record({ topicId: 'goal', kind: 'fail', text: e.message, evidence: '固定部' })
         store.setTopic('goal', { state: 'blocked' })
       })
+      // 実行の間の利用者の書き換えでは、モデルの呼び出しを打ち切らずに、実行が終わってから1回だけ動かし直す。
+      // 何度保存されても再始動は1回で、届いていない差分は論点エージェントが seen の版から受け取る
+      const { edits } = store.snapshot()
+      if (edits.some((e) => e.version > started && e.author === 'user')) {
+        restart(store)
+        continue
+      }
     }
     const { goal, questions } = store.snapshot()
     const answered = questions.filter((q) => q.answer).length
@@ -38,6 +47,12 @@ function pendingCalls(store: Store) {
   return last?.role === 'assistant'
     ? last.content.filter((c): c is ToolCall => c.type === 'toolCall' && !answered.has(c.id))
     : []
+}
+
+// 実行の間に利用者が書き換えたときの再始動。開始可を取り消し、答えを待っていた質問を外してから動かし直す
+function restart(store: Store) {
+  reopen(store)
+  store.dropOrphans(new Set())
 }
 
 // 開始可を取り消して、論点エージェントが続きから動けるようにする。結果のない呼び出し（ready など）に結果を返さないと、
