@@ -5,7 +5,7 @@
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { openLineage, promote, rounds } from './evolve'
+import { counts, openLineage, promote, rounds } from './evolve'
 import { openLedger, periodOf } from './ledger'
 import { budgetKey, DIR, mine, models, openMeasure, REPO } from './measure'
 
@@ -83,6 +83,34 @@ if (saved !== null && saved !== goal) {
 m.setMeta('goal', goal)
 // 課題。main が課題のコミットから REFRESH_COMMITS 以上進んでいたら、今の課題を外して最新の履歴から作り直す。
 // 足りない分は作業領域の過去のコミットから作る
+// 課題を外す。外した課題の計測は残す。課題の組が変わると計測の条件も変わり、基準版と予算の基準はこのモデルで測り直す
+const retire = (ids: number[]) => {
+  if (!ids.length) return
+  m.db.run(
+    `UPDATE tasks SET split = 'retired' WHERE split IN ('val', 'test') AND id IN (${ids.map(() => '?').join(',')})`,
+    ids,
+  )
+  m.db.run('DELETE FROM meta WHERE key IN (?, ?)', [
+    budgetKey('val'),
+    budgetKey('test'),
+  ])
+}
+// 基準版が測り直したすべての回で解いた課題は、候補の差を見分けられないため外す。外した分は次のループで最新の履歴から作る
+const retireSolved = () => {
+  const base = m.meta('base')
+  if (!base) return
+  const solved = (['val', 'test'] as const).flatMap((split) =>
+    [...counts(m, base, split)]
+      .filter(([, c]) => c.n >= REPEATS && c.ok === c.n)
+      .map(([task]) => task),
+  )
+  if (solved.length) {
+    console.log(
+      `基準版が毎回解いた課題 ${solved.length} 件を外し、次のループで最新の履歴から作り直します`,
+    )
+    retire(solved)
+  }
+}
 const refresh = async (head: string) => {
   const commits = [...m.tasks('val'), ...m.tasks('test')]
     .map((t) => t.workspace?.commit)
@@ -105,13 +133,7 @@ const refresh = async (head: string) => {
       `main が課題のコミットから ${behind} コミット進んだため、課題を作り直します`,
     )
     // 外した課題の計測は残す。課題の組が変わると計測の条件も変わり、基準版と予算の基準はこのモデルで測り直す
-    m.db.run(
-      "UPDATE tasks SET split = 'retired' WHERE split IN ('val', 'test')",
-    )
-    m.db.run('DELETE FROM meta WHERE key IN (?, ?)', [
-      budgetKey('val'),
-      budgetKey('test'),
-    ])
+    retire([...m.tasks('val'), ...m.tasks('test')].map((t) => t.id))
   }
   const missing = (split: 'val' | 'test', want: number) =>
     Math.max(0, want - m.tasks(split).length)
@@ -154,6 +176,7 @@ for (let cycle = 1; ; cycle++) {
   if (exhausted()) continue
   const adopted = await promote(m, self.solver, TOP, REPEATS)
   if (adopted) ledger.improved('self', adopted.delta, adopted.commit)
+  retireSolved()
   const lineage = openLineage(m).pool()
   console.log(
     `ループ ${cycle} 終了: 候補 ${lineage.length} 件、基準版 ${m.meta('base')?.slice(0, 7)}、今期の残り $${ledger.remaining('self').toFixed(2)}`,
