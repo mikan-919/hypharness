@@ -10,6 +10,7 @@ import {
   gate,
   openProposals,
   paired,
+  planArms,
   rate,
   ucb,
 } from './evolve'
@@ -246,4 +247,15 @@ test('課題ごとに対にした検定は、毎回同じ課題で差が出れ�
   expect(some.delta).toBeLessThan(some.margin)
   // 共通の課題がなければ比べない
   expect(paired(of([5]), new Map()).margin).toBe(Number.POSITIVE_INFINITY)
+})
+
+test('並べる周回の改善対象は、統計が同じでも重ならないように先に決める', () => {
+  expect(planArms([], 6)).toEqual([
+    'prompt',
+    'module',
+    'spec',
+    'code',
+    'prompt',
+    'module',
+  ])
 })
