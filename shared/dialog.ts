@@ -84,6 +84,12 @@ export type Task = {
   attempts: number
   // 統合ブランチに積んだコミット
   commit: string
+  // 保留にした理由。保留でなければ空文字
+  reason: string
+  // この課題で使った費用（ドル）
+  spent: number
+  // 積んだコミットの差分。積んでいなければ空文字
+  diff: string
 }
 
 // エージェントの動き1つ分。agent は論点の id か 'decompose'・'solve'

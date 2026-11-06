@@ -5,11 +5,14 @@ import type { Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import { answerPending, inside, listFiles, object, READ_TOOLS, readFile, runAgent } from './agent.ts'
 import { sandboxed } from './sandbox.ts'
 import type { Store } from './store.ts'
+import { CostLimitError } from './topic.ts'
 import type { Call } from './topic.ts'
 
 export const BRANCH = 'hypharness/integration'
 // ADR 0010: 検査に落ちたら差し戻し、この回数落ちたら保留にして流れを止める
 const MAX_ATTEMPTS = 3
+// 課題の記録に残す差分の長さ。超える分は末尾を残して先頭を切る
+const MAX_DIFF = 8000
 
 function git(repo: string, ...args: string[]) {
   const result = Bun.spawnSync(['git', '-C', repo, ...args], { stdout: 'pipe', stderr: 'pipe' })
@@ -33,6 +36,24 @@ const SOLVE = `あなたは hypharness の解答役です。課題文の内容�
 - 課題文の受け入れの条件を満たす最小の変更をする。条件に書かれていない機能、抽象化、設定は足さない。
 - 終えたら done を呼び、何を変えたかを summary に書く。done の後に検査を動かし、落ちたら出力を返す。
 - 日本語で書く。修飾表現を使わず、事実を書く。`
+
+// 経験の一覧に入れる項目の根拠の形。パイプラインが実行の結果から書いた項目だけに合う
+const EXECUTION = /^課題 t\d+ の(コミット \S+|検査の終了コード \S+)$/
+
+// プロンプトが課題の数だけ伸びないための上限
+const MAX_EXPERIENCE = 20
+
+// 解答役のシステムプロンプトに付ける、共有文脈から作った経験の一覧（ADR 0004）
+function experience(store: Store) {
+  const entries = store
+    .snapshot()
+    .entries.filter((e) => EXECUTION.test(e.evidence))
+    .slice(-MAX_EXPERIENCE)
+    .reverse()
+  if (entries.length === 0) return ''
+  const lines = entries.map((e) => `- ${e.kind}: ${e.text.split('\n').join(' / ')}（根拠: ${e.evidence}）`)
+  return `\n\n共有文脈から作った経験の一覧（新しい順）:\n${lines.join('\n')}`
+}
 
 const DECOMPOSE_TOOLS = [
   ...READ_TOOLS,
@@ -72,7 +93,29 @@ const SOLVE_TOOLS = [
 
 const arg = (call: ToolCall, name: string) => String((call.arguments as Record<string, unknown>)[name] ?? '')
 
-export type PipelineOptions = { worktrees: string; setup?: string; check?: string }
+// 分解役に渡すユーザーメッセージ。終えた課題、保留にした課題とその理由、保留の割合を入れる（ADR 0010）
+function decomposeMessage(store: Store) {
+  const tasks = store.snapshot().tasks
+  const first = (text: string) => text.split('\n')[0]
+  const done = tasks.filter((t) => t.state === 'committed')
+  const held = tasks.filter((t) => t.state === 'held')
+  const lines = [
+    `既に終えた課題:\n${done.map((t) => `- ${first(t.statement)}`).join('\n') || '（なし）'}`,
+    `保留にした課題:\n${held.map((t) => `- ${t.id}: ${first(t.statement)}（保留の理由: ${first(t.reason)}）`).join('\n') || '（なし）'}`,
+  ]
+  if (tasks.length > 0) lines.push(`保留 ${held.length} / 課題 ${tasks.length}`)
+  lines.push('本文をすべて満たしていれば finish を、まだなら次の課題を1つ出してください。')
+  return lines.join('\n\n')
+}
+
+export type PipelineOptions = {
+  worktrees: string
+  setup?: string
+  check?: string
+  // 中継が持つ、課題1つあたりに使った費用（ドル）と、その上限（ADR 0011）。保留の理由に使う
+  spent?: (taskId: string) => number
+  limitUsd?: number
+}
 
 // 統合ブランチに課題を積み続ける。finish か保留で終わる。止めた理由を store.halted に残す
 export async function runPipeline(store: Store, call: Call, repo: string, options: PipelineOptions) {
@@ -124,7 +167,6 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
     // 最終目的の本文は対話の状態にある（画面で書き換えたもの）。作業ツリーにも書き、最初の課題のコミットに入れる（ADR 0003）
     const goal = store.snapshot().goal.text
     writeFileSync(join(tree, 'FINAL_GOAL.md'), goal)
-    const done = store.snapshot().tasks.filter((t) => t.state === 'committed')
     const next = await runAgent<{ statement: string } | { finish: string }>({
       store,
       call,
@@ -135,7 +177,7 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
       messages: [
         {
           role: 'user',
-          content: `最終目的（FINAL_GOAL.md）の本文:\n\n${goal}\n\n既に終えた課題:\n${done.map((t) => `- ${t.statement.split('\n')[0]}`).join('\n') || '（なし）'}\n\n本文をすべて満たしていれば finish を、まだなら次の課題を1つ出してください。`,
+          content: `最終目的（FINAL_GOAL.md）の本文:\n\n${goal}\n\n${decomposeMessage(store)}`,
           timestamp: Date.now(),
         },
       ],
@@ -154,11 +196,21 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
       const setup = Bun.spawnSync(['sh', '-c', options.setup], { cwd: tree, stdout: 'pipe', stderr: 'pipe' })
       if (setup.exitCode !== 0) throw new Error(`準備のコマンドが失敗しました: ${setup.stderr.toString().slice(-2000)}`)
     }
-    await solve(store, call, tree, taskId, next.statement, options.check)
+    const summary = await solve(store, call, tree, taskId, next.statement, options)
     const commit = git(tree, 'rev-parse', 'HEAD')
     // 作業ツリーを作った後に統合ブランチが動いていたら、上書きせずに止める（その間のコミットを消さない）
-    git(repo, 'update-ref', `refs/heads/${BRANCH}`, commit, base)
-    store.setTask(taskId, { state: 'committed', commit })
+    try {
+      git(repo, 'update-ref', `refs/heads/${BRANCH}`, commit, base)
+    } catch (e) {
+      store.setTask(taskId, { state: 'held', reason: (e as Error).message })
+      throw e
+    }
+    store.record({
+      topicId: 'solve',
+      kind: 'fact',
+      text: `${next.statement.split('\n')[0]}\n変えた点: ${summary}`,
+      evidence: `課題 ${taskId} のコミット ${commit.slice(0, 8)}`,
+    })
     store.act('solve', 'commit', `${taskId} を ${commit.slice(0, 8)} として統合ブランチに積んだ`)
     if (git(repo, 'remote').split('\n').includes('origin')) git(repo, 'push', 'origin', BRANCH)
     return undefined
@@ -167,16 +219,19 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
   }
 }
 
-async function solve(store: Store, call: Call, tree: string, taskId: string, statement: string, check?: string) {
+// 課題を解く。検査が通れば done の summary を返す
+async function solve(store: Store, call: Call, tree: string, taskId: string, statement: string, options: PipelineOptions) {
   const messages: Message[] = [{ role: 'user', content: `課題 ${taskId}:\n${statement}`, timestamp: Date.now() }]
+  // 最後の検査の失敗の出力。保留にしたときの理由に使う
+  let reason = ''
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     store.setTask(taskId, { state: 'solving', attempts: attempt })
-    await runAgent({
+    const summary = await runAgent<string>({
       store,
       call,
       agent: 'solve',
       taskId,
-      system: SOLVE,
+      system: SOLVE + experience(store),
       tools: SOLVE_TOOLS,
       messages,
       run: async (c) => {
@@ -193,24 +248,47 @@ async function solve(store: Store, call: Call, tree: string, taskId: string, sta
         throw new Error(`未知のツールです: ${c.name}`)
       },
       stop: (c) => (c.name === 'done' ? arg(c, 'summary') : undefined),
+    }).catch((e: Error) => {
+      // 中継が費用の上限に達して断ったときは、この課題を保留にし、断りの文と使った費用を残して流れを止める
+      if (!(e instanceof CostLimitError)) throw e
+      const spent = options.spent?.(taskId) ?? 0
+      store.setTask(taskId, { state: 'held', reason: e.message, spent })
+      throw new Error(
+        `課題 ${taskId} が費用の上限 ${options.limitUsd} ドルに達しました（使った費用 ${spent} ドル）。保留にして流れを止めました。理由: ${e.message}`,
+      )
     })
     store.setTask(taskId, { state: 'checking' })
     git(tree, 'add', '-A')
-    const failure = !git(tree, 'status', '--porcelain')
-      ? '作業ツリーに変更がありません'
-      : check
-        ? await sandboxed(tree, check).then(({ code, output }) => (code === 0 ? '' : `検査が終了コード ${code} で落ちました\n${output}`))
-        : ''
+    let failure: { text: string; code: string } | undefined
+    if (!git(tree, 'status', '--porcelain')) failure = { text: '作業ツリーに変更がありません', code: 'なし' }
+    else if (options.check) {
+      const { code, output } = await sandboxed(tree, options.check)
+      if (code !== 0) failure = { text: `検査が終了コード ${code} で落ちました\n${output}`, code: String(code) }
+    }
     if (!failure) {
       // 件名は課題文の最初の文（72 文字まで）、本文に課題文の全体を置く
       const subject = `${taskId}: ${statement.split(/\n|。/)[0].slice(0, 72)}`
       git(tree, '-c', 'user.name=hypharness', '-c', 'user.email=hypharness@localhost', 'commit', '-q', '-m', subject, '-m', statement)
       store.act('solve', 'check', `${taskId} の検査が通った`)
-      return
+      const commit = git(tree, 'rev-parse', 'HEAD')
+      const patch = git(tree, 'show', '--format=', '--patch', commit)
+      store.setTask(taskId, { state: 'committed', commit, diff: patch.slice(-MAX_DIFF) })
+      return summary
     }
-    store.act('solve', 'check', failure.split('\n')[0])
-    answerPending(messages, `${failure}\n\n直してから、もう一度 done を呼んでください。`)
+    reason = failure.text
+    store.act('solve', 'check', failure.text.split('\n')[0])
+    // 差し戻し1回ごとに、検査の失敗を共有文脈に残す。3回落ちて保留にしたときは、この最後の記録が残る
+    store.record({
+      topicId: 'solve',
+      kind: 'fail',
+      text: failure.text.split('\n')[0],
+      evidence: `課題 ${taskId} の検査の終了コード ${failure.code}`,
+    })
+    answerPending(messages, `${failure.text}\n\n直してから、もう一度 done を呼んでください。`)
   }
-  store.setTask(taskId, { state: 'held' })
-  throw new Error(`${taskId} が検査に ${MAX_ATTEMPTS} 回落ちたため保留にし、流れを止めました`)
+  const spent = options.spent?.(taskId) ?? 0
+  store.setTask(taskId, { state: 'held', reason, spent })
+  throw new Error(
+    `${taskId} が検査に ${MAX_ATTEMPTS} 回落ちたため保留にし、流れを止めました。理由: ${reason.slice(-1000)}`,
+  )
 }

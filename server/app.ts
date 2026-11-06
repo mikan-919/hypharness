@@ -7,7 +7,7 @@ import { createFileRouter } from 'irisout/hono'
 import { startDialog } from '../harness/index.ts'
 import { holdUnfinished, runPipeline } from '../harness/pipeline.ts'
 import { createStore } from '../harness/store.ts'
-import { relayCall } from '../harness/topic.ts'
+import { relayCall, relayCharge } from '../harness/topic.ts'
 import { deepinfra } from './model.ts'
 import { createRelay } from './relay.ts'
 
@@ -55,11 +55,14 @@ export function boot() {
 // 書いている途中の文を画面へ流す
 const call = relayCall(RELAY_SOCKET, (agent, text) => store.setLive(agent, text.slice(-600)))
 
+// 検索などの、モデルの利用料以外の費用を中継へ知らせる
+const charge = relayCharge(RELAY_SOCKET)
+
 // 論点エージェントを動かす。止まっていたら、保存した対話の続きから動かし直せる
 function dialog() {
   if (shared.running) return
   shared.running = true
-  void startDialog(store, call, REPO).finally(() => {
+  void startDialog(store, call, REPO, charge).finally(() => {
     shared.running = false
   })
 }
@@ -100,10 +103,14 @@ app.post('/api/start', (c) => {
   if (topics.filter((t) => t.ready).length * 2 <= topics.length) {
     return c.json({ error: '論点エージェントの過半数が開始可になっていません' }, 409)
   }
+  // 費用の上限で止まっていたら、開始の合図で中継の停止を解いてから流れを始める（ADR 0012）
+  relay.resume()
   void runPipeline(store, call, REPO, {
     worktrees: join(homedir(), '.hyph', 'worktrees', REPO.replaceAll('/', '_')),
     setup: process.env.SETUP_COMMAND,
     check: process.env.CHECK_COMMAND,
+    spent: relay.spent,
+    limitUsd: relay.limitUsd,
   })
   return c.json({ ok: true })
 })
