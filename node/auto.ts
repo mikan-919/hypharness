@@ -7,7 +7,7 @@ import { mkdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { openLineage, promote, rounds } from './evolve'
 import { openLedger, periodOf } from './ledger'
-import { DIR, mine, models, openMeasure, REPO } from './measure'
+import { budgetKey, DIR, mine, models, openMeasure, REPO } from './measure'
 
 // ponytail: 1回のループの周回数・測り直す候補の数と回数・課題の数は、これまでの手動の運用の値。
 // 採用の頻度と費用を見て変える
@@ -17,6 +17,9 @@ const REPEATS = 3
 const VAL_TASKS = 27
 const TEST_TASKS = 10
 const MINE_LINES = 400
+// ponytail: 課題を作り直すのは、最も新しい課題のコミットから main が10コミット以上進んだとき。
+// 作り直すと課題の組が変わり、基準版を測り直すため、コミットのたびには作り直さない。開発の速さを見て変える
+const REFRESH_COMMITS = 10
 
 const [session = '', repo = '', goalFile = '', dollars = '', ...mounts] =
   process.argv.slice(2)
@@ -40,22 +43,35 @@ m.setMeta('budget:period', String(Number(dollars)))
 const self = await models((cost) => ledger.record('self', cost))
 const verify = await models((cost) => ledger.record('verify', cost))
 
-// 作業領域。開発環境の設定は、リポジトリの nix の開発環境から作る
+// 作業領域は、リポジトリの origin を複製した専用のディレクトリにする。利用者の作業ツリーには触れず、
+// ループのたびに origin の既定のブランチの最新に合わせる（マージされた PR を課題とタスクに取り込む）
+const clone = join(DIR, 'repos', session)
+if (!existsSync(join(clone, '.git'))) {
+  const origin = (
+    await Bun.$`git -C ${repo} remote get-url origin`.text()
+  ).trim()
+  await mkdir(join(DIR, 'repos'), { recursive: true, mode: 0o700 })
+  await Bun.$`git clone -q ${origin} ${clone}`.quiet()
+}
+const sync = async () => {
+  await Bun.$`git -C ${clone} fetch -q origin`.quiet()
+  await Bun.$`git -C ${clone} reset -q --hard origin/HEAD`.quiet()
+  return (await Bun.$`git -C ${clone} rev-parse HEAD`.text()).trim()
+}
+await sync()
 if (!m.meta('workspace')) {
+  // 開発環境の設定は、リポジトリの nix の開発環境から作る
   const prelude = join(DIR, 'sessions', `${session}.env.sh`)
-  await Bun.write(
-    prelude,
-    await Bun.$`nix print-dev-env ${resolve(repo)}`.text(),
-  )
+  await Bun.write(prelude, await Bun.$`nix print-dev-env ${clone}`.text())
   m.setMeta(
     'workspace',
     JSON.stringify({
-      repo: resolve(repo),
+      repo: clone,
       prelude,
       mounts: mounts.map((p) => resolve(p)),
     }),
   )
-  console.log(`作業領域: ${resolve(repo)}`)
+  console.log(`作業領域: ${clone}`)
 }
 const goal = await Bun.file(goalFile).text()
 const saved = m.meta('goal')
@@ -65,20 +81,52 @@ if (saved !== null && saved !== goal) {
   )
 }
 m.setMeta('goal', goal)
-// 課題。足りない分を作業領域の過去のコミットから作る
-const missing = (split: 'val' | 'test', want: number) =>
-  Math.max(0, want - m.tasks(split).length)
-if (missing('val', VAL_TASKS) || missing('test', TEST_TASKS)) {
-  await mine(
-    m,
-    verify.generator,
-    missing('val', VAL_TASKS),
-    missing('test', TEST_TASKS),
-    MINE_LINES,
-  )
-}
-if (!m.tasks('val').length || !m.tasks('test').length) {
-  throw new Error('課題を作れませんでした')
+// 課題。main が課題のコミットから REFRESH_COMMITS 以上進んでいたら、今の課題を外して最新の履歴から作り直す。
+// 足りない分は作業領域の過去のコミットから作る
+const refresh = async (head: string) => {
+  const commits = [...m.tasks('val'), ...m.tasks('test')]
+    .map((t) => t.workspace?.commit)
+    .filter((c): c is string => Boolean(c))
+  const behind = commits.length
+    ? Math.min(
+        ...(await Promise.all(
+          commits.map(async (c) =>
+            Number(
+              (
+                await Bun.$`git -C ${clone} rev-list --count ${c}..${head}`.text()
+              ).trim(),
+            ),
+          ),
+        )),
+      )
+    : 0
+  if (behind >= REFRESH_COMMITS) {
+    console.log(
+      `main が課題のコミットから ${behind} コミット進んだため、課題を作り直します`,
+    )
+    // 外した課題の計測は残す。課題の組が変わると計測の条件も変わり、基準版と予算の基準はこのモデルで測り直す
+    m.db.run(
+      "UPDATE tasks SET split = 'retired' WHERE split IN ('val', 'test')",
+    )
+    m.db.run('DELETE FROM meta WHERE key IN (?, ?)', [
+      budgetKey('val'),
+      budgetKey('test'),
+    ])
+  }
+  const missing = (split: 'val' | 'test', want: number) =>
+    Math.max(0, want - m.tasks(split).length)
+  if (missing('val', VAL_TASKS) || missing('test', TEST_TASKS)) {
+    await mine(
+      m,
+      verify.generator,
+      missing('val', VAL_TASKS),
+      missing('test', TEST_TASKS),
+      MINE_LINES,
+    )
+  }
+  if (!m.tasks('val').length || !m.tasks('test').length) {
+    throw new Error('課題を作れませんでした')
+  }
 }
 
 const start = (await Bun.$`git -C ${REPO} rev-parse HEAD`.text()).trim()
@@ -93,6 +141,7 @@ for (let cycle = 1; ; cycle++) {
     continue
   }
   console.log(`--- ループ ${cycle}（${new Date().toISOString()}）`)
+  await refresh(await sync())
   await rounds(
     m,
     start,
