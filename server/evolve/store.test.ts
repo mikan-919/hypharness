@@ -19,6 +19,7 @@ const candidate = (id: string, over: Partial<Candidate> = {}): Candidate => ({
   changes: ['要約の間隔を変える'],
   score: 1,
   note: 'メモ',
+  cost: 0,
   ...over,
 })
 

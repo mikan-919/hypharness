@@ -15,7 +15,7 @@ export type ProposeInput = {
   maxChanges: number
 }
 
-// 提案の返り値。id・round・module・score は runRound が入れる
+// 提案の返り値。id・round・module・score・cost は runRound が入れる
 export type Proposal = {
   changes: string[]
   note?: string
@@ -36,6 +36,7 @@ export type RoundResult = {
   candidates: Candidate[]
   stopped: boolean
   start?: Candidate
+  rejected: { module: Module; reason: string }[]
 }
 
 // 対話の状態から失敗の型を集める。entries の失敗の項目が先、保留の課題の理由が後。同じ文字列は1つにする
@@ -103,6 +104,51 @@ export function pickUnstuck(archive: Candidate[], round: number): Module[] {
   return [unexplored[round % unexplored.length]]
 }
 
+// 提案が課題に固有すぎないかを文字列の規則だけで判定する。空の変更も弾く。
+// 課題文（8 文字以上）をそのまま含む変更と、課題の id（t + 数字）を含む変更を弾く
+export function critic(changes: string[], tasks: Dialog['tasks']): { ok: boolean; reason: string } {
+  if (changes.length === 0) return { ok: false, reason: '変更が空です' }
+  for (const change of changes) {
+    for (const task of tasks) {
+      if (task.statement.length >= 8 && change.includes(task.statement)) {
+        return { ok: false, reason: `課題 ${task.id} の課題文を含みます` }
+      }
+      if (change.includes(task.id)) {
+        return { ok: false, reason: `課題 ${task.id} の id を含みます` }
+      }
+    }
+  }
+  return { ok: true, reason: '' }
+}
+
+// これまでの候補から、捨てる変更の文字列の集合を返す。規則は3つ。
+// 改善が無い（その変更を持つ候補がすべて score 0）、費用が増える（score 0 の候補の費用が
+// 同じモジュールの score 1 の候補の費用より大きい）、後で不要になった（同じモジュールに後の周の score 1 の候補がある）
+export function pruner(history: Candidate[]): Set<string> {
+  const dropped = new Set<string>()
+  for (const candidate of history) {
+    // 同じモジュールの、より後の周の score 1 の候補
+    const superseded = history.some(
+      (c) => c.module === candidate.module && c.score === 1 && c.round > candidate.round,
+    )
+    if (superseded) {
+      for (const change of candidate.changes) dropped.add(change)
+      continue
+    }
+    // 同じモジュールの score 1 の候補の費用の最大
+    const succeeded = history.filter((c) => c.module === candidate.module && c.score === 1)
+    const successCost = succeeded.length === 0 ? undefined : Math.max(...succeeded.map((c) => c.cost))
+    for (const change of candidate.changes) {
+      const owners = history.filter((c) => c.changes.includes(change))
+      const neverImproved = owners.every((c) => c.score === 0)
+      const costsMore =
+        candidate.score === 0 && successCost !== undefined && candidate.cost > successCost
+      if (neverImproved || costsMore) dropped.add(change)
+    }
+  }
+  return dropped
+}
+
 // 1周を順に進める。費用が上限を超えたら、残りの検証と採用をせずに止める
 export async function runRound(options: RoundOptions): Promise<RoundResult> {
   const { round, dialog, propose, check, spent, limitUsd, root } = options
@@ -113,21 +159,37 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
   const start = pickStart(archive, round)
   const failed = failedChanges(history)
   const maxChanges = changeLimit(round)
+  // この周の提案から除く変更。始めの候補の一覧から1回だけ求める
+  const pruned = pruner(history)
   // 直前の3周に改善が無ければ、未探索のモジュールに回す
   const targets = stuckModules(history, round) ? pickUnstuck(archive, round) : [...MODULES]
   const candidates: Candidate[] = []
+  const rejected: { module: Module; reason: string }[] = []
   let stopped = false
 
   for (const module of targets) {
     const id = `${round}-${MODULES.indexOf(module) + 1}`
     const proposal = await propose({ module, weaknesses: weak, archive, round, start, failed, maxChanges })
+    // 課題に固有すぎる提案は候補を書かずに弾く
+    const judgement = critic(proposal.changes, dialog.tasks)
+    if (!judgement.ok) {
+      rejected.push({ module, reason: judgement.reason })
+      continue
+    }
+    // pruner が捨てる変更を除いてから上限で切る
+    const kept = proposal.changes.filter((change) => !pruned.has(change)).slice(0, maxChanges)
+    if (kept.length === 0) {
+      rejected.push({ module, reason: 'pruner がすべての変更を捨てた' })
+      continue
+    }
     const candidate: Candidate = {
       id,
       round,
       module,
-      changes: proposal.changes.slice(0, maxChanges),
+      changes: kept,
       score: 0,
       note: proposal.note ?? '',
+      cost: 0,
     }
     writeCandidate(candidate, root)
 
@@ -135,7 +197,9 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
       if (spent() > limitUsd) {
         stopped = true
       } else {
+        const before = spent()
         candidate.score = await check(candidate)
+        candidate.cost = spent() - before
         writeCandidate(candidate, root)
         if (candidate.score === 1) archiveCandidate(candidate.id, root)
       }
@@ -144,5 +208,5 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
     candidates.push(candidate)
   }
 
-  return { round, candidates, stopped, start }
+  return { round, candidates, stopped, start, rejected }
 }

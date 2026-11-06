@@ -13,7 +13,7 @@ export const MODULE_SUMMARY: Record<Module, string> = {
   completion: '課題を終えたか諦めたかの判定と、その結果の返し方',
 }
 
-// 1つの変更案。round は周の番号、score は回帰テストの報酬（0 か 1）
+// 1つの変更案。round は周の番号、score は回帰テストの報酬（0 か 1）、cost は検証に使った費用（ドル）
 export type Candidate = {
   id: string
   round: number
@@ -21,4 +21,5 @@ export type Candidate = {
   changes: string[]
   score: 0 | 1
   note: string
+  cost: number
 }

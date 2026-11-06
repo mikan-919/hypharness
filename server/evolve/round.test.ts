@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Dialog, Entry, Task } from '../../shared/dialog.ts'
 import { MODULES, type Candidate, type Module } from '../../shared/evolve.ts'
-import { runRound, weaknesses, type ProposeInput } from './round.ts'
+import { critic, pruner, runRound, weaknesses, type ProposeInput } from './round.ts'
 import { archiveCandidate, listArchive, listCandidates, writeCandidate } from './store.ts'
 
 // HYPH_EVO を一時ディレクトリにした置き場を作る
@@ -49,41 +49,39 @@ const dialog = (over: Partial<Dialog> = {}): Dialog => ({
   ...over,
 })
 
-// archive に候補を置く
-const putArchive = (root: string, id: string) => {
-  const c: Candidate = { id, round: Number(id.split('-')[0]), module: 'context', changes: [id], score: 1, note: '' }
+// 候補を candidates に置く。score が 1 のものは archive に移す
+const put = (root: string, over: Partial<Candidate> & { id: string }) => {
+  const c: Candidate = {
+    round: Number(over.id.split('-')[0]),
+    module: 'context',
+    changes: [],
+    score: 0,
+    note: '',
+    cost: 0,
+    ...over,
+  }
   writeCandidate(c, root)
-  archiveCandidate(c.id, root)
+  if (c.score === 1) archiveCandidate(c.id, root)
   return c
 }
 
+// archive に候補を置く
+const putArchive = (root: string, id: string) => put(root, { id, changes: [id], score: 1 })
+
 // candidates に候補を置く
-const putCandidate = (root: string, id: string, changes: string[], score: 0 | 1) => {
-  const c: Candidate = {
-    id,
-    round: Number(id.split('-')[0]),
-    module: 'context',
-    changes,
-    score,
-    note: '',
-  }
-  writeCandidate(c, root)
-  return c
-}
+const putCandidate = (root: string, id: string, changes: string[], score: 0 | 1) =>
+  put(root, { id, changes, score })
 
 // 1周ぶんの候補を置く。score が 1 のものは archive に移す
 const putRound = (root: string, round: number, modules: readonly Module[], score: 0 | 1) => {
   for (const module of modules) {
-    const c: Candidate = {
+    put(root, {
       id: `${round}-${MODULES.indexOf(module) + 1}`,
       round,
       module,
       changes: ['変更'],
       score,
-      note: '',
-    }
-    writeCandidate(c, root)
-    if (score === 1) archiveCandidate(c.id, root)
+    })
   }
 }
 
@@ -137,9 +135,7 @@ test('propose は5つのモジュールについて1回ずつ呼ばれ、archive
   const root = process.env.HYPH_EVO!
   const seen: ProposeInput[] = []
   // 前の周の候補を archive に置く
-  const before: Candidate = { id: '1-1', round: 1, module: 'context', changes: ['前'], score: 1, note: '' }
-  writeCandidate(before, root)
-  archiveCandidate(before.id, root)
+  putArchive(root, '1-1')
 
   const result = await runRound({
     round: 2,
@@ -360,4 +356,106 @@ test('周の番号が 11 以上のとき、候補に残るのは先頭1個', asy
   })
   expect(result.candidates.map((c) => c.changes)).toEqual(MODULES.map(() => ['a']))
   expect(listCandidates(root).map((c) => c.changes)).toEqual(MODULES.map(() => ['a']))
+})
+
+test('空の changes は critic が弾く', () => {
+  expect(critic([], []).ok).toBe(false)
+})
+
+test('課題文を含む提案は rejected に入り、候補が作られない', async () => {
+  const root = evo()
+  const statement = '保存した本文を画面に出す'
+  const result = await runRound({
+    round: 1,
+    dialog: dialog({ tasks: [{ ...task('t1', 'solving', ''), statement }] }),
+    propose: () => ({ changes: [`${statement} ようにする`], note: '' }),
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  expect(result.candidates).toEqual([])
+  expect(result.rejected.map((r) => r.reason)).toEqual(MODULES.map(() => '課題 t1 の課題文を含みます'))
+  expect(listCandidates(root)).toEqual([])
+})
+
+test('課題 id を含む提案は rejected に入る', async () => {
+  const root = evo()
+  const result = await runRound({
+    round: 1,
+    dialog: dialog({ tasks: [task('t12', 'solving', '')] }),
+    propose: () => ({ changes: ['t12 の修正を入れる'], note: '' }),
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  expect(result.candidates).toEqual([])
+  expect(result.rejected.map((r) => r.reason)).toEqual(MODULES.map(() => '課題 t12 の id を含みます'))
+  expect(listCandidates(root)).toEqual([])
+})
+
+test('score が 0 の候補にしか出てこない変更は次の周の changes から除かれる', async () => {
+  const root = evo()
+  putCandidate(root, '1-4', ['X'], 0)
+  const result = await runRound({
+    round: 2,
+    dialog: dialog(),
+    propose: () => ({ changes: ['X', 'Y'], note: '' }),
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  expect(result.candidates.every((c) => c.changes.join(',') === 'Y')).toBe(true)
+  expect(pruner([put(root, { id: '9-4', changes: ['X'], score: 0 })]).has('X')).toBe(true)
+})
+
+test('同じモジュールの後の周に score が 1 の候補があれば、前の候補の変更が除かれる', async () => {
+  const root = evo()
+  put(root, { id: '1-4', round: 1, module: 'context', changes: ['X'], score: 0 })
+  put(root, { id: '2-4', round: 2, module: 'context', changes: ['W'], score: 1 })
+  const result = await runRound({
+    round: 3,
+    dialog: dialog(),
+    propose: () => ({ changes: ['X', 'Y'], note: '' }),
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  expect(result.candidates.every((c) => c.changes.join(',') === 'Y')).toBe(true)
+})
+
+test('score が 0 の候補の費用が同じモジュールの score が 1 の候補より大きいとき、その変更が除かれる', async () => {
+  const root = evo()
+  put(root, { id: '1-4', round: 1, module: 'context', changes: ['C'], score: 0, cost: 10 })
+  put(root, { id: '1-5', round: 1, module: 'context', changes: ['C'], score: 1, cost: 1 })
+  const result = await runRound({
+    round: 2,
+    dialog: dialog(),
+    propose: () => ({ changes: ['C', 'E'], note: '' }),
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  expect(result.candidates.every((c) => c.changes.join(',') === 'E')).toBe(true)
+})
+
+test('check の前後で spent の差を取り、候補の cost に書く', async () => {
+  const root = evo()
+  let calls = 0
+  const result = await runRound({
+    round: 1,
+    dialog: dialog(),
+    propose: () => ({ changes: ['a'], note: '' }),
+    check: () => 0,
+    // 1件目の検証の前は 0、後は 2。以降は 2 のまま
+    spent: () => (calls++ < 2 ? 0 : 2),
+    limitUsd: 100,
+    root,
+  })
+  expect(result.candidates.map((c) => c.cost)).toEqual([2, 0, 0, 0, 0])
+  expect(listCandidates(root).map((c) => c.cost)).toEqual([2, 0, 0, 0, 0])
 })

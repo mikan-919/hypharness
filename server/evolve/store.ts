@@ -16,6 +16,12 @@ const ensure = (dir: string) => mkdirSync(dir, { recursive: true })
 
 const fileOf = (dir: string, id: string) => join(dir, `${id}.json`)
 
+// 費用の無い古い候補は 0 として読む
+const parse = (text: string): Candidate => {
+  const c = JSON.parse(text) as Candidate
+  return { ...c, cost: typeof c.cost === 'number' ? c.cost : 0 }
+}
+
 // 候補を candidates/<id>.json に書く
 export function writeCandidate(c: Candidate, root = defaultRoot()): void {
   const { candidates } = evoPaths(root)
@@ -24,7 +30,7 @@ export function writeCandidate(c: Candidate, root = defaultRoot()): void {
 }
 
 export function readCandidate(id: string, root = defaultRoot()): Candidate {
-  return JSON.parse(readFileSync(fileOf(evoPaths(root).candidates, id), 'utf8')) as Candidate
+  return parse(readFileSync(fileOf(evoPaths(root).candidates, id), 'utf8'))
 }
 
 // id の昇順。文字列の比較で並べる
@@ -36,7 +42,7 @@ const listOf = (dir: string): Candidate[] => {
     .filter((name) => name.endsWith('.json'))
     .map((name) => name.slice(0, -'.json'.length))
     .sort(byId)
-    .map((id) => JSON.parse(readFileSync(fileOf(dir, id), 'utf8')) as Candidate)
+    .map((id) => parse(readFileSync(fileOf(dir, id), 'utf8')))
 }
 
 export function listCandidates(root = defaultRoot()): Candidate[] {

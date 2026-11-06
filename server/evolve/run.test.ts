@@ -49,7 +49,7 @@ test('検証が 1 の候補だけ archive に移り、0 の候補は candidates 
 
 test('周の番号は候補とアーカイブにある周の最大に1を足す', async () => {
   const root = evo()
-  const prior: Candidate = { id: '3-2', round: 3, module: 'tool-use', changes: ['前'], score: 1, note: '' }
+  const prior: Candidate = { id: '3-2', round: 3, module: 'tool-use', changes: ['前'], score: 1, note: '', cost: 0 }
   writeCandidate(prior, root)
   archiveCandidate(prior.id, root)
 
