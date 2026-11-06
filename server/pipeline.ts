@@ -68,7 +68,7 @@ export async function runPipeline(store: Store, roles: Roles, repo: string, opti
 // 途中で止まった課題を保留にする。「解いている」のまま残さない
 export function holdUnfinished(store: Store) {
   for (const t of store.snapshot().tasks) {
-    if (t.state === 'solving' || t.state === 'checking') store.setTask(t.id, { state: 'held' })
+    if (t.state === 'solving' || t.state === 'checking') store.setTask(t.id, { state: 'held', reason: t.reason || '流れが途中で止まった' })
   }
 }
 

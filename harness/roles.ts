@@ -81,7 +81,7 @@ const arg = (call: ToolCall, name: string) => String((call.arguments as Record<s
 
 // 分解役に渡すユーザーメッセージ。最終目的の本文、終えた課題、保留にした課題とその理由、保留の割合を入れる（ADR 0010）
 function decomposeMessage(dialog: Dialog) {
-  const first = (text: string) => text.split('\n')[0]
+  const first = (text = '') => text.split('\n')[0]
   const done = dialog.tasks.filter((t) => t.state === 'committed')
   const held = dialog.tasks.filter((t) => t.state === 'held')
   const lines = [
