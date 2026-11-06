@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Dialog } from '../../shared/dialog.ts'
 import type { Candidate } from '../../shared/evolve.ts'
-import { runEvolve, readProposal } from './run.ts'
-import { archiveCandidate, listArchive, listCandidates, writeCandidate } from './store.ts'
+import { proposeMaterial, runEvolve, readProposal } from './run.ts'
+import type { ProposeInput } from './round.ts'
+import { archiveCandidate, evoPaths, listArchive, listCandidates, writeCandidate } from './store.ts'
 
 // HYPH_EVO を一時ディレクトリにした置き場を作る
 const evo = () => {
@@ -89,6 +90,101 @@ test('費用が上限を超えた後の候補は検証されず candidates に�
   expect(result.spent).toBe(100)
   expect(listArchive(root).map((c) => c.id)).toEqual(['1-1'])
   expect(listCandidates(root).map((c) => c.id)).toEqual(['1-2', '1-3', '1-4', '1-5'])
+})
+
+test('archive に置いた候補の score・cost・note が propose に届く', async () => {
+  const root = evo()
+  const prior: Candidate = {
+    id: '1-2',
+    round: 1,
+    module: 'tool-use',
+    changes: ['前の変更'],
+    score: 1,
+    note: '前の注記',
+    cost: 0.5,
+  }
+  writeCandidate(prior, root)
+  archiveCandidate(prior.id, root)
+
+  let seen: ProposeInput | undefined
+  await runEvolve({
+    repo: mkdtempSync(join(tmpdir(), 'hyph-evo-repo-')),
+    dialog: emptyDialog(),
+    propose: (input) => {
+      if (!seen) seen = input
+      return { changes: [`${input.module} の変更`], note: '' }
+    },
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+  })
+
+  expect(seen?.archive.map((c) => [c.id, c.score, c.cost, c.note])).toEqual([['1-2', 1, 0.5, '前の注記']])
+  expect(seen?.start?.score).toBe(1)
+  expect(seen?.start?.cost).toBe(0.5)
+  expect(seen?.start?.note).toBe('前の注記')
+})
+
+test('材料の archive と start に score・cost・holdout・note が入り、holdout が未測定なら入らない', () => {
+  const root = evo()
+  const measured: Candidate = {
+    id: '1-1',
+    round: 1,
+    module: 'tool-use',
+    changes: ['a'],
+    score: 1,
+    note: 'n',
+    cost: 0.5,
+    holdout: 1,
+  }
+  const unmeasured: Candidate = {
+    id: '1-2',
+    round: 1,
+    module: 'context',
+    changes: ['b'],
+    score: 0,
+    note: '',
+    cost: 0,
+  }
+  const input: ProposeInput = {
+    module: 'tool-use',
+    weaknesses: [],
+    archive: [measured, unmeasured],
+    round: 2,
+    start: unmeasured,
+    failed: [],
+    maxChanges: 3,
+    prompts: [],
+    code: [{ id: '1-1', text: 'code text' }],
+  }
+
+  const material = proposeMaterial(input, root)
+
+  expect(material.archive[0]).toEqual({
+    id: '1-1',
+    module: 'tool-use',
+    changes: ['a'],
+    score: 1,
+    cost: 0.5,
+    note: 'n',
+    holdout: 1,
+  })
+  expect(material.archive[1]).toEqual({
+    id: '1-2',
+    module: 'context',
+    changes: ['b'],
+    score: 0,
+    cost: 0,
+    note: '',
+  })
+  expect(Array.isArray(material.start)).toBe(false)
+  const start = material.start as { score: number }
+  expect('holdout' in start).toBe(false)
+  expect(start.score).toBe(0)
+  expect(material.paths).toEqual(evoPaths(root))
+  expect(material.paths.candidates.endsWith(join('candidates'))).toBe(true)
+  expect(material.paths.archive.endsWith(join('archive'))).toBe(true)
+  expect(material.code).toEqual([{ id: '1-1', text: 'code text' }])
 })
 
 test('JSON として読めない応答は changes を空にし、理由を note に書く', () => {

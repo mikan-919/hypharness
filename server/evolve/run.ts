@@ -8,7 +8,7 @@ import { MODULE_SUMMARY, type Candidate } from '../../shared/evolve.ts'
 import { deepinfra } from '../model.ts'
 import { createStore } from '../store.ts'
 import { runRound, type Proposal, type ProposeInput, type RoundResult } from './round.ts'
-import { listArchive, listCandidates } from './store.ts'
+import { evoPaths, listArchive, listCandidates } from './store.ts'
 
 export type EvolveResult = RoundResult & { spent: number }
 
@@ -36,10 +36,37 @@ const nextRound = (root: string) => {
   return rounds.length === 0 ? 1 : Math.max(...rounds) + 1
 }
 
+// 提案の材料に入れる候補の形。holdout が未測定のときは入れない
+const candidateMaterial = (c: Candidate) => ({
+  id: c.id,
+  module: c.module,
+  changes: c.changes,
+  score: c.score,
+  cost: c.cost,
+  note: c.note,
+  ...(c.holdout === undefined ? {} : { holdout: c.holdout }),
+})
+
+// モデルに渡す材料。候補の JSON とコードの場所も入れる
+export function proposeMaterial(input: ProposeInput, root: string) {
+  return {
+    module: input.module,
+    summary: MODULE_SUMMARY[input.module],
+    weaknesses: input.weaknesses,
+    start: input.start ? candidateMaterial(input.start) : [],
+    archive: input.archive.map(candidateMaterial),
+    failed: input.failed,
+    maxChanges: input.maxChanges,
+    paths: evoPaths(root),
+    code: input.code,
+  }
+}
+
 const SYSTEM = `あなたは hypharness の自己改良の提案役です。指定されたモジュールの変更案を1つ作ります。
 
 - 弱点と、出発点・archive の候補を参考にする。
 - 変更は、そのモジュールのコードに加える具体的な変更を文字列の配列で書く。
+- 候補の JSON は \`~/.hyph/evo/candidates/<id>.json\` と \`~/.hyph/evo/archive/<id>.json\` にあり、材料の \`paths\` に場所が入っている。
 - コードは \`~/.hyph/evo/code/<id>.md\` にあり、材料の \`code\` に本文が入っている。
 - 応答は JSON だけにする。形は {"changes": string[], "note": string}。
 - 日本語で書く。修飾表現を使わず、事実を書く。`
@@ -94,16 +121,7 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
   const propose =
     options.propose ??
     (async (input: ProposeInput): Promise<Proposal> => {
-      const material = {
-        module: input.module,
-        summary: MODULE_SUMMARY[input.module],
-        weaknesses: input.weaknesses,
-        start: input.start?.changes ?? [],
-        archive: input.archive.map((c) => ({ id: c.id, module: c.module, changes: c.changes })),
-        failed: input.failed,
-        maxChanges: input.maxChanges,
-        code: input.code,
-      }
+      const material = proposeMaterial(input, root)
       try {
         if (!stream) throw new Error('モデルの呼び出し先を作れませんでした')
         const answer = await askModel(stream, JSON.stringify(material), systemPrompt(input.maxChanges))
