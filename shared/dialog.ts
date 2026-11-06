@@ -26,6 +26,8 @@ export type Question = {
   answer: string
   // 依存する論点の決定待ちで保留している答えか
   held: boolean
+  // 質問を出したツールの呼び出しの id。再起動の後、同じ呼び出しの質問を出し直さないために使う
+  key: string
 }
 
 export type EntryKind = 'fact' | 'fail' | 'done'

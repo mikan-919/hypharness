@@ -12,7 +12,9 @@ import { createRelay } from './relay.ts'
 
 export const relay = createRelay(deepinfra(), Number(process.env.TASK_LIMIT_USD ?? 1))
 const RELAY_SOCKET = join(homedir(), '.hyph', 'relay.sock')
-const store = createStore()
+const REPO = process.env.TARGET_REPO ?? process.cwd()
+// 対話は対象のリポジトリごとに1つ保存する
+const store = createStore(join(homedir(), '.hyph', 'dialogs', `${REPO.replaceAll('/', '_')}.json`))
 
 // 中継を開き、対話を始める。待受は起動ファイルと開発サーバーから呼ぶ（Vite の設定の読み込みでは開かない）
 export function boot() {
@@ -20,7 +22,7 @@ export function boot() {
     unlinkSync(RELAY_SOCKET)
   } catch {}
   relay.listen(RELAY_SOCKET)
-  void startDialog(store, relayCall(RELAY_SOCKET), process.env.TARGET_REPO ?? process.cwd())
+  void startDialog(store, relayCall(RELAY_SOCKET), REPO)
   return RELAY_SOCKET
 }
 
