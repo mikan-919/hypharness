@@ -1,6 +1,6 @@
 // エージェントの会話の置き場。エージェントごとの SQLite に、モデルへ渡したメッセージを追記だけする
 import { Database } from 'bun:sqlite'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Message, TextContent } from '@earendil-works/pi-ai'
@@ -29,11 +29,16 @@ export type Summary = { id: number; text: string; messageIds: number[] }
 // 要約ノードの本文に入れる、1件のメッセージの本文の上限
 const MAX_SUMMARY_PART = 500
 
+// 文脈ファイルに入れる、生のまま残す直近のメッセージの件数
+const CONTEXT_KEEP = 8
+
 // エージェントの id ごとに1つのファイルを開き、追記と読み出しを返す
 export function ctx(agent: string) {
   const dir = root()
   mkdirSync(dir, { recursive: true })
   const db = new Database(join(dir, `${agent}.sqlite`))
+  // モデルが edit_context で書き換える文脈ファイル
+  const filePath = join(dir, `${agent}.md`)
   db.run('CREATE TABLE IF NOT EXISTS messages(seq INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL)')
   db.run(
     'CREATE TABLE IF NOT EXISTS summaries(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, message_ids TEXT NOT NULL)',
@@ -57,7 +62,19 @@ export function ctx(agent: string) {
       .get(text, JSON.stringify(messageIds)) as { id: number }
     return row.id
   }
+  // 文脈ファイルを組み立てて書き、そのパスを返す。中身は直近の生メッセージ（keep 件）と要約ノードの全部。
+  // 最初の課題文（messages の先頭）は入れない
+  const buildContextFile = (keep = CONTEXT_KEEP) => {
+    const blocks: string[] = []
+    for (const summary of summaries()) blocks.push(`## 要約 ${summary.id}\n\n${summary.text}`)
+    const raw = messagesWithIds().slice(1).slice(-Math.max(0, Math.floor(keep)))
+    for (const { id, message } of raw) blocks.push(`## 生 ${id}\n\n${messageText(message)}`)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(filePath, blocks.length > 0 ? `${blocks.join('\n\n')}\n` : '')
+    return filePath
+  }
   return {
+    buildContextFile,
     append(message: Message) {
       db.query('INSERT INTO messages(message) VALUES (?)').run(JSON.stringify(message))
     },
@@ -116,4 +133,24 @@ export function ctx(agent: string) {
       return found
     },
   }
+}
+
+// 文脈ファイルを読み、old が1回だけ現れるときその1箇所を next に置き換え、置き換えた後の本文を
+// 新しい要約ノードとして保存し、文脈ファイルも書き直す。変えられないときは理由を返す。元のメッセージは消さない
+export function editContext(agent: string, old: string, next: string) {
+  const store = ctx(agent)
+  if (next === '') return 'new が空文字のため、文脈ファイルを変えませんでした。空にする編集はできません。'
+  if (old === '') return 'old が空文字のため、文脈ファイルを変えませんでした。'
+  const path = join(root(), `${agent}.md`)
+  if (!existsSync(path)) store.buildContextFile()
+  const text = readFileSync(path, 'utf8')
+  const first = text.indexOf(old)
+  if (first < 0) return `old が文脈ファイルに1回も現れないため、変えませんでした: ${old}`
+  if (text.indexOf(old, first + old.length) >= 0) {
+    return `old が文脈ファイルに2回以上現れるため、変えませんでした: ${old}`
+  }
+  const edited = text.slice(0, first) + next + text.slice(first + old.length)
+  const id = store.addSummary(edited, [])
+  writeFileSync(path, edited)
+  return `要約ノード ${id} として保存し、文脈ファイルを書き換えました。`
 }

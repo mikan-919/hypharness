@@ -2,7 +2,7 @@
 import { relative } from 'node:path'
 import type { AssistantMessage, Context, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { Edit } from '../shared/dialog.ts'
-import { inside, listFiles, noteReply, object, readFile } from './agent.ts'
+import { EDIT_CONTEXT_TOOL, inside, listFiles, noteReply, object, readFile } from './agent.ts'
 import { webFetch } from './fetch.ts'
 import { type AgentStore, CostLimitError } from '../shared/contract.ts'
 
@@ -149,6 +149,7 @@ const TOOLS_BASE = [
       ['url'],
     ),
   },
+  EDIT_CONTEXT_TOOL,
   { name: 'ready', description: '最終目的が課題に分けられるところまで決まったときに呼ぶ', parameters: object({}, []) },
 ] as Tool[]
 

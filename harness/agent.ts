@@ -3,7 +3,7 @@ import { readdir } from 'node:fs/promises'
 import { relative, resolve } from 'node:path'
 import type { AssistantMessage, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { AgentStore } from '../shared/contract.ts'
-import { ctx } from './ctx.ts'
+import { ctx, editContext } from './ctx.ts'
 import type { Call } from './topic.ts'
 
 const short = (text: string, max = 160) => (text.length > max ? `${text.slice(0, max)}…` : text)
@@ -85,6 +85,19 @@ export const RECALL_TOOL = {
       max_results: { type: 'number', description: '返す件数の上限（既定 5）' },
     },
     ['query'],
+  ),
+} as Tool
+
+// 文脈ファイルを書き換えるツール。old の1箇所だけを new に置き換える
+export const EDIT_CONTEXT_TOOL = {
+  name: 'edit_context',
+  description: 'このエージェントの文脈ファイルを書き換える。old が1回だけ現れるときその1箇所を new に置き換える',
+  parameters: object(
+    {
+      old: { type: 'string', description: '文脈ファイルにある、置き換える前の文' },
+      new: { type: 'string', description: '置き換えた後の文。空文字は不可' },
+    },
+    ['old', 'new'],
   ),
 } as Tool
 
@@ -170,8 +183,23 @@ export async function runAgent<T>(options: {
   const { store, call, agent, taskId, system, tools, messages, run, stop } = options
   const save = recorder(agent)
   save(messages)
+  // ツールの結果を、縮めてエラーを握る形にする
+  const attempt = async (work: () => string | Promise<string>) => {
+    try {
+      return { text: shrinkToolResult(await work()), isError: false }
+    } catch (e) {
+      return { text: shrinkToolResult((e as Error).message), isError: true }
+    }
+  }
   for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const reply = await call({ topicId: agent, taskId, context: { systemPrompt: system, messages, tools } })
+    // 毎ターンのモデルの呼び出しの前に文脈ファイルを組み立て、そのパスをシステムプロンプトの末尾に書く
+    let systemPrompt = system
+    try {
+      systemPrompt = `${system}\n文脈ファイル: ${ctx(agent).buildContextFile()}`
+    } catch {
+      // 文脈ファイルを作れなくてもエージェントの実行は止めない
+    }
+    const reply = await call({ topicId: agent, taskId, context: { systemPrompt, messages, tools } })
     messages.push(reply)
     save(messages)
     noteReply(store, agent, reply)
@@ -183,10 +211,13 @@ export async function runAgent<T>(options: {
       for (const toolCall of calls) {
         const result = stop(toolCall)
         if (result !== undefined) return result
-        const outcome = await run(toolCall).then(
-          (text) => ({ text: shrinkToolResult(text), isError: false }),
-          (e: Error) => ({ text: shrinkToolResult(e.message), isError: true }),
-        )
+        const outcome =
+          toolCall.name === 'edit_context'
+            ? await attempt(() => {
+                const a = toolCall.arguments as Record<string, unknown>
+                return editContext(agent, String(a.old ?? ''), String(a.new ?? ''))
+              })
+            : await attempt(() => run(toolCall))
         store.act(agent, 'result', `${toolCall.name}: ${short(outcome.text.replace(/\s+/g, ' '))}`)
         messages.push({
           role: 'toolResult',
