@@ -60,7 +60,9 @@ export const app = new Hono()
 // トークン数はハーネスを経由させず、中継から画面へ直接流す（ADR 0016）
 app.get('/api/usage', (c) =>
   streamSSE(c, async (stream) => {
-    const unsubscribe = relay.subscribe((usage) => void stream.writeSSE({ data: JSON.stringify(usage) }))
+    const send = (totals: unknown) => void stream.writeSSE({ data: JSON.stringify(totals) })
+    send(relay.totals())
+    const unsubscribe = relay.subscribe(send)
     stream.onAbort(unsubscribe)
     while (!stream.aborted) await stream.sleep(15_000)
   }),

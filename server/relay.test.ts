@@ -27,16 +27,18 @@ const post = (relay: ReturnType<typeof createRelay>, taskId: string) =>
     }),
   )
 
-test('流したトークン数の合計は、完了時に実際の数に合う', async () => {
+test('合計はストリーミング中は見積もりで増え、完了時に実際の数に置き換わり、呼び出しをまたいで足される', async () => {
   const relay = createRelay(fake(7, 0.01), 1)
-  const seen: Usage[] = []
-  relay.subscribe((usage) => seen.push(usage))
+  const seen: Record<string, Usage>[] = []
+  relay.subscribe((totals) => seen.push(totals))
   const lines = (await (await post(relay, 't1')).text()).trim().split('\n').map((line) => JSON.parse(line))
   expect(lines.map((event) => event.type)).toEqual(['text_delta', 'text_delta', 'done'])
   expect(lines[0].partial).toBeUndefined()
-  expect(seen.length).toBe(3)
-  expect(seen.reduce((sum, usage) => sum + usage.output, 0)).toBe(7)
-  expect(seen.reduce((sum, usage) => sum + usage.input, 0)).toBe(10)
+  // こんにちは、世界 は8文字、です は2文字。1文字 1.1 で見積もる
+  expect(seen.map((t) => t.ui.output)).toEqual([9, 11, 7])
+  expect(seen.at(-1)?.ui).toMatchObject({ input: 10, output: 7, cacheRead: 2, costUsd: 0.01 })
+  await (await post(relay, 't1')).text()
+  expect(relay.totals().ui).toMatchObject({ input: 20, output: 14 })
 })
 
 test('課題が上限に達したら、どの課題の呼び出しも断る', async () => {

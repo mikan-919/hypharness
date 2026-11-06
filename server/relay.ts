@@ -6,39 +6,70 @@ import type { Usage } from '../shared/dialog.ts'
 export type Stream = (context: Context) => AsyncIterable<AssistantMessageEvent>
 export type Call = { topicId: string; taskId: string; context: Context }
 
-// ponytail: ストリーミング中のトークン数は文字数の 1/4 で見積もる。完了時に実際の数との差を流し、合計を合わせる
-const estimate = (text: string) => Math.ceil(text.length / 4)
+// ストリーミング中の出力トークン数の見積もり。DeepSeek V4.1 Flash の応答で測った値（2026-11-06）で、
+// ASCII は1文字 0.23、それ以外（日本語など）は1文字 1.1 トークン。応答が終わったら実際の数に置き換える
+const estimate = (text: string) => {
+  let tokens = 0
+  for (const c of text) tokens += c.charCodeAt(0) < 128 ? 0.23 : 1.1
+  return tokens
+}
+
+const zero = (topicId: string): Usage => ({ topicId, input: 0, output: 0, cacheRead: 0, costUsd: 0 })
 
 export function createRelay(stream: Stream, limitUsd: number) {
   const spent = new Map<string, number>()
-  const listeners = new Set<(usage: Usage) => void>()
+  // 論点ごとの、終わった呼び出しの実際の数の合計と、実行中の呼び出しの出力の見積もり
+  const confirmed = new Map<string, Usage>()
+  const inflight = new Map<object, { topicId: string; output: number }>()
+  const listeners = new Set<(totals: Record<string, Usage>) => void>()
   let halted = ''
-  const publish = (usage: Usage) => {
-    for (const listener of listeners) listener(usage)
+
+  // 画面へは増分ではなく合計を送る。画面を開き直しても数が戻らない
+  function totals() {
+    const out: Record<string, Usage> = {}
+    for (const [topicId, usage] of confirmed) out[topicId] = { ...usage }
+    for (const { topicId, output } of inflight.values()) {
+      out[topicId] ??= zero(topicId)
+      out[topicId].output += output
+    }
+    for (const usage of Object.values(out)) usage.output = Math.round(usage.output)
+    return out
+  }
+  const publish = () => {
+    const snapshot = totals()
+    for (const listener of listeners) listener(snapshot)
   }
 
   async function* call({ topicId, taskId, context }: Call) {
-    let estimated = 0
-    for await (const event of stream(context)) {
-      if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') {
-        const output = estimate(event.delta)
-        estimated += output
-        publish({ topicId, input: 0, output, cacheRead: 0, costUsd: 0 })
+    const live = { topicId, output: 0 }
+    inflight.set(live, live)
+    try {
+      for await (const event of stream(context)) {
+        if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') {
+          live.output += estimate(event.delta)
+          publish()
+        }
+        if (event.type === 'done' || event.type === 'error') {
+          const { usage } = event.type === 'done' ? event.message : event.error
+          const sum = confirmed.get(topicId) ?? zero(topicId)
+          confirmed.set(topicId, {
+            topicId,
+            input: sum.input + usage.input,
+            output: sum.output + usage.output,
+            cacheRead: sum.cacheRead + usage.cacheRead,
+            costUsd: sum.costUsd + usage.cost.total,
+          })
+          inflight.delete(live)
+          publish()
+          const total = (spent.get(taskId) ?? 0) + usage.cost.total
+          spent.set(taskId, total)
+          if (total >= limitUsd) halted = `課題 ${taskId} が費用の上限 ${limitUsd} に達しました`
+        }
+        yield event
       }
-      if (event.type === 'done' || event.type === 'error') {
-        const { usage } = event.type === 'done' ? event.message : event.error
-        publish({
-          topicId,
-          input: usage.input,
-          output: usage.output - estimated,
-          cacheRead: usage.cacheRead,
-          costUsd: usage.cost.total,
-        })
-        const total = (spent.get(taskId) ?? 0) + usage.cost.total
-        spent.set(taskId, total)
-        if (total >= limitUsd) halted = `課題 ${taskId} が費用の上限 $${limitUsd} に達しました`
-      }
-      yield event
+    } finally {
+      // 途中で切れた呼び出しの見積もりは合計から外す
+      if (inflight.delete(live)) publish()
     }
   }
 
@@ -70,7 +101,8 @@ export function createRelay(stream: Stream, limitUsd: number) {
   return {
     handle,
     listen: (socket: string) => Bun.serve({ unix: socket, fetch: handle }),
-    subscribe(listener: (usage: Usage) => void) {
+    totals,
+    subscribe(listener: (totals: Record<string, Usage>) => void) {
       listeners.add(listener)
       return () => void listeners.delete(listener)
     },

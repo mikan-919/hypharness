@@ -176,22 +176,8 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
 
   onMount(() => {
     const usageSource = new EventSource('/api/usage')
-    usageSource.onmessage = (event) => {
-      const u = JSON.parse(event.data)
-      usage((prev) => {
-        const old = prev[u.topicId] ?? { topicId: u.topicId, input: 0, output: 0, cacheRead: 0, costUsd: 0 }
-        return {
-          ...prev,
-          [u.topicId]: {
-            topicId: u.topicId,
-            input: old.input + u.input,
-            output: old.output + u.output,
-            cacheRead: old.cacheRead + u.cacheRead,
-            costUsd: old.costUsd + u.costUsd,
-          },
-        }
-      })
-    }
+    // 中継が論点ごとの合計を送ってくる
+    usageSource.onmessage = (event) => usage(JSON.parse(event.data))
     const dialogSource = new EventSource('/api/dialog')
     dialogSource.onmessage = (event) => {
       const next = JSON.parse(event.data)
