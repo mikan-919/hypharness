@@ -61,3 +61,29 @@ test('検査に3回落ちたら保留にして流れを止め、統合ブラン�
   expect(store.snapshot().halted).toContain('保留')
   expect(log()).toBe('init')
 })
+
+test('解いている間に統合ブランチが動いていたら、上書きせずに流れを止める', async () => {
+  const { dir, log } = repo()
+  const store = createStore()
+  const call = script({
+    decompose: [reply('submit_task', { statement: 'out.txt に ok と書く' })],
+    solve: [
+      reply('write_file', { path: 'out.txt', content: 'ok' }),
+      reply('done', { summary: '書いた' }),
+    ],
+  })
+  const moving: Call = async (body) => {
+    // 解答役が終える直前に、別の誰かが統合ブランチにコミットを積む
+    if (body.topicId === 'solve' && body.context.messages.length > 2) {
+      Bun.spawnSync(['git', '-C', dir, 'commit', '--allow-empty', '-qm', 'outside'], {
+        env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' },
+      })
+      Bun.spawnSync(['git', '-C', dir, 'branch', '-f', BRANCH, 'HEAD'])
+    }
+    return call(body)
+  }
+  await runPipeline(store, moving, dir, options())
+  expect(store.snapshot().started).toBe(false)
+  expect(store.snapshot().halted).not.toBe('')
+  expect(log()).toBe('outside\ninit')
+})

@@ -100,7 +100,8 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
   const n = store.snapshot().tasks.length + 1
   const tree = `${options.worktrees}/t${n}-${Date.now()}`
   mkdirSync(dirname(tree), { recursive: true })
-  git(repo, 'worktree', 'add', '--detach', tree, BRANCH)
+  const base = git(repo, 'rev-parse', BRANCH)
+  git(repo, 'worktree', 'add', '--detach', tree, base)
   try {
     const done = store.snapshot().tasks.filter((t) => t.state === 'committed')
     const next = await runAgent<{ statement: string } | { finish: string }>({
@@ -134,7 +135,8 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
     }
     await solve(store, call, tree, taskId, next.statement, options.check)
     const commit = git(tree, 'rev-parse', 'HEAD')
-    git(repo, 'branch', '-f', BRANCH, commit)
+    // 作業ツリーを作った後に統合ブランチが動いていたら、上書きせずに止める（その間のコミットを消さない）
+    git(repo, 'update-ref', `refs/heads/${BRANCH}`, commit, base)
     store.setTask(taskId, { state: 'committed', commit })
     store.act('solve', 'commit', `${taskId} を ${commit.slice(0, 8)} として統合ブランチに積んだ`)
     if (git(repo, 'remote').split('\n').includes('origin')) git(repo, 'push', 'origin', BRANCH)
