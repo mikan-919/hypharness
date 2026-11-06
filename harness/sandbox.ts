@@ -1,5 +1,5 @@
 // bubblewrap の隔離環境でコマンドを動かす（ADR 0021）。システムは読み取り専用、ホームディレクトリは空、
-// dir だけを書き込み可にし、ネットワークを切り、環境変数を消す
+// dir だけを書き込み可にし、環境変数を消す。ネットワークはホストと共有する（ADR 0030）
 // ponytail: メモリの上限（旧実装の systemd-run --user の scope）はまだかけていない。重い検査を動かすようになったら足す
 
 const MAX_OUTPUT = 8_000
@@ -15,6 +15,7 @@ export async function sandboxed(dir: string, command: string, timeoutMs = 300_00
       '--tmpfs', '/home',
       '--bind', dir, dir,
       '--unshare-all',
+      '--share-net',
       '--die-with-parent',
       '--clearenv',
       '--setenv', 'PATH', process.env.PATH ?? '/run/current-system/sw/bin',
