@@ -24,6 +24,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const conflict = signal(false)
   const failure = signal('')
   const reply = signal('')
+  const picked = signal('')
   const sending = signal(false)
   const isStarted = signal(started)
   const usage = signal<Record<string, Usage>>({})
@@ -63,6 +64,42 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
         </aside>
 
         <main class="conversation">
+          {failure() && <p class="conflict">{failure()}</p>}
+          {head() && (
+            <article class="question head">
+              <h2>{head().text}</h2>
+              <ul class="options">
+                {head().options.map((option) => (
+                  <li key={option.label}>
+                    <button
+                      type="button"
+                      class={`option ${option.recommended ? 'recommended' : ''} ${option.label === picked() ? 'picked' : ''}`}
+                      data-label={option.label}
+                      disabled={sending()}
+                      onClick={choose}
+                    >
+                      <strong>
+                        {option.label === picked() ? '✓ ' : ''}
+                        {option.recommended ? `${option.label}（推奨）` : option.label}
+                      </strong>
+                      <span>{option.description}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <p class="recommendation">{head().recommendation}</p>
+              <form class="reply" onSubmit={answer}>
+                <textarea
+                  value={reply()}
+                  onInput={updateReply}
+                  placeholder={picked() ? '補足があれば書く' : '選択肢を選ぶか、答えを書く'}
+                />
+                <button type="submit" disabled={sending()}>
+                  送る
+                </button>
+              </form>
+            </article>
+          )}
           <div class="goal-head">
             <h1>FINAL_GOAL.md</h1>
             <span class="hint">版 {goalVersion()}</span>
@@ -84,40 +121,11 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                 </button>
               </p>
             ) : (
-              <button type="submit" disabled={!dirty() || sending()}>
+              <button type="submit" disabled={sending()}>
                 保存
               </button>
             )}
           </form>
-          {failure() && <p class="conflict">{failure()}</p>}
-          {head() && (
-            <article class="question head">
-              <h2>{head().text}</h2>
-              <ul class="options">
-                {head().options.map((option) => (
-                  <li key={option.label}>
-                    <button
-                      type="button"
-                      class={option.recommended ? 'option recommended' : 'option'}
-                      data-label={option.label}
-                      disabled={sending()}
-                      onClick={choose}
-                    >
-                      <strong>{option.recommended ? `${option.label}（推奨）` : option.label}</strong>
-                      <span>{option.description}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              <p class="recommendation">{head().recommendation}</p>
-              <form class="reply" onSubmit={answer}>
-                <textarea value={reply()} onInput={updateReply} placeholder="答えを書く" />
-                <button type="submit" disabled={sending()}>
-                  送る
-                </button>
-              </form>
-            </article>
-          )}
         </main>
 
         <aside class="context">
@@ -224,6 +232,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
 
   function save(event) {
     event.preventDefault()
+    draft(event.currentTarget.querySelector('textarea').value)
     send(goalVersion())
   }
 
@@ -245,14 +254,17 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     })
   }
 
+  // 欄の文字は送るときに欄から読む。日本語入力の途中の値が状態に届かないブラウザーがあるため
   function answer(event) {
     event.preventDefault()
-    sendAnswer(reply())
+    const note = event.currentTarget.querySelector('textarea').value.trim()
+    sendAnswer(picked() && note ? `${picked()}（${note}）` : picked() || note)
   }
 
-  // 選択肢を押したら、その名前を答えとして送る
+  // 選択肢を押したら選んだ状態にする。もう一度押すと外す。送るのは送るボタンで
   function choose(event) {
-    sendAnswer(event.currentTarget.dataset.label)
+    const label = event.currentTarget.dataset.label
+    picked(picked() === label ? '' : label)
   }
 
   async function sendAnswer(text) {
@@ -265,6 +277,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     }).catch(() => Response.json({ error: 'サーバーにつながりません。少し待ってからもう一度送ってください' }, { status: 503 }))
     sending(false)
     reply(response.ok ? '' : reply())
+    picked(response.ok ? '' : picked())
     failure(response.ok ? '' : `送れませんでした: ${(await response.json().catch(() => ({}))).error ?? response.status}`)
   }
 

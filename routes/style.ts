@@ -91,6 +91,8 @@ button:disabled { opacity: 0.5; cursor: default; }
 .option { width: 100%; text-align: left; display: grid; padding: 8px 12px; }
 .option:hover:not(:disabled) { border-color: var(--accent); }
 .option.recommended { border-color: var(--accent); }
+.option.picked { border-color: var(--wait); box-shadow: inset 0 0 0 1px var(--wait); background: color-mix(in srgb, var(--wait) 12%, var(--panel)); }
+.question { margin-bottom: 16px; }
 .options span, .recommendation { color: var(--muted); }
 .answer { background: var(--bg); border-radius: 8px; padding: 8px 12px; }
 .reply { display: grid; gap: 8px; }
