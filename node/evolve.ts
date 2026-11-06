@@ -490,6 +490,33 @@ const ensure = async (
   return r.ok / r.total
 }
 
+// times 周を回す。周回は互いに独立なので並べて回す。基準版をまだ測っていなければ、最初の周回だけ先に回して基準版と予算の基準を決める。
+// 並べた周回が同じ統計から同じ改善対象を選ばないよう、explore では改善対象を周回ごとに先に決めてから並べる
+export async function rounds(
+  m: Measure,
+  start: string,
+  times: number,
+  complete: Complete,
+  generator: Complete,
+  policy: Policy,
+  exhausted: () => boolean,
+) {
+  const round = async (i: number, arm?: Arm) => {
+    if (exhausted()) return
+    console.log(`周回 ${i}/${times}（${policy}）`)
+    await evolve(m, start, complete, generator, policy, arm)
+  }
+  const base = m.meta('base')
+  let first = 1
+  if (!base || rate(m, base, 'val') === null) await round(first++)
+  const rest = times - first + 1
+  const arms =
+    policy === 'explore' ? planArms(openLineage(m).armStats(), rest) : []
+  await Promise.all(
+    Array.from({ length: rest }, (_, k) => round(first + k, arms[k])),
+  )
+}
+
 // 1周。門番を通った候補を測って系統の記録に残す。1回の計測はぶれが大きいため、ここでは基準版を変えない（DGM と同じく記録から親を選ぶ）
 export async function evolve(
   m: Measure,
