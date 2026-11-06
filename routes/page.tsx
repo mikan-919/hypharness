@@ -116,6 +116,28 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
               ))}
             </section>
           )}
+          <div class="goal-head">
+            <h1>FINAL_GOAL.md</h1>
+            <span class="hint">版 {savedVersion()}</span>
+          </div>
+          <form class="goal" onSubmit={save}>
+            <div class="editor" />
+            {conflict() ? (
+              <p class="conflict">
+                保存の前に本文が書き換えられました。
+                <button type="button" onClick={loadLatest}>
+                  最新を読み込む
+                </button>
+                <button type="button" onClick={overwrite}>
+                  このまま上書きする
+                </button>
+              </p>
+            ) : (
+              <button type="submit" disabled={sending() || draft() === savedText()}>
+                保存
+              </button>
+            )}
+          </form>
           {head() && (
             <article class="question head">
               <h2>{head().text}</h2>
@@ -156,28 +178,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
               </form>
             </article>
           )}
-          <div class="goal-head">
-            <h1>FINAL_GOAL.md</h1>
-            <span class="hint">版 {savedVersion()}</span>
-          </div>
-          <form class="goal" onSubmit={save}>
-            <div class="editor" />
-            {conflict() ? (
-              <p class="conflict">
-                保存の前に本文が書き換えられました。
-                <button type="button" onClick={loadLatest}>
-                  最新を読み込む
-                </button>
-                <button type="button" onClick={overwrite}>
-                  このまま上書きする
-                </button>
-              </p>
-            ) : (
-              <button type="submit" disabled={sending() || draft() === savedText()}>
-                保存
-              </button>
-            )}
-          </form>
+          {!head() && <p class="hint">質問はありません</p>}
         </main>
 
         <aside class="context">
