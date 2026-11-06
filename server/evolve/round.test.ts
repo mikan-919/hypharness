@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Dialog, Entry, Task } from '../../shared/dialog.ts'
-import { MODULES, type Candidate } from '../../shared/evolve.ts'
+import { MODULES, type Candidate, type Module } from '../../shared/evolve.ts'
 import { runRound, weaknesses, type ProposeInput } from './round.ts'
 import { archiveCandidate, listArchive, listCandidates, writeCandidate } from './store.ts'
 
@@ -55,6 +55,40 @@ const putArchive = (root: string, id: string) => {
   writeCandidate(c, root)
   archiveCandidate(c.id, root)
   return c
+}
+
+// 1周ぶんの候補を置く。score が 1 のものは archive に移す
+const putRound = (root: string, round: number, modules: readonly Module[], score: 0 | 1) => {
+  for (const module of modules) {
+    const c: Candidate = {
+      id: `${round}-${MODULES.indexOf(module) + 1}`,
+      round,
+      module,
+      changes: ['変更'],
+      score,
+      note: '',
+    }
+    writeCandidate(c, root)
+    if (score === 1) archiveCandidate(c.id, root)
+  }
+}
+
+// 1周を回して、propose に渡ったモジュールを順に返す
+const modulesOfRound = (round: number, root: string): Module[] => {
+  const seen: Module[] = []
+  runRound({
+    round,
+    dialog: dialog(),
+    propose: (input) => {
+      seen.push(input.module)
+      return { changes: [`${input.module} の変更`], note: '' }
+    },
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  return seen
 }
 
 // 1周だけ回して、propose に渡った start を返す
@@ -210,4 +244,49 @@ test('上限に達していなければ stopped は false で全件検証する'
   expect(result.stopped).toBe(false)
   expect(listArchive(root)).toHaveLength(5)
   expect(listCandidates(root)).toEqual([])
+})
+
+test('直前の3周がすべて改善なしで未探索のモジュールがあるとき、未探索の1つだけを対象にする', () => {
+  const root = evo()
+  for (const round of [1, 2, 3]) putRound(root, round, MODULES, 0)
+  // archive が空なので5つすべてが未探索。周の番号 4 から巡回して MODULES[4]
+  const result = runRound({
+    round: 4,
+    dialog: dialog(),
+    propose: (input) => ({ changes: [`${input.module} の変更`], note: '' }),
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  expect(result.candidates.map((c) => c.module)).toEqual([MODULES[4]])
+  expect(result.candidates.map((c) => c.id)).toEqual([`4-${MODULES.length}`])
+  expect(listCandidates(root).filter((c) => c.round === 4).map((c) => c.id)).toEqual([`4-${MODULES.length}`])
+})
+
+test('直前の3周のどれかに改善があったときは5つすべてを対象にする', () => {
+  const root = evo()
+  putRound(root, 1, MODULES, 0)
+  putRound(root, 2, MODULES, 1)
+  putRound(root, 3, MODULES, 0)
+  expect(modulesOfRound(4, root)).toEqual([...MODULES])
+})
+
+test('未探索のモジュールが無いときは5つすべてを対象にする', () => {
+  const root = evo()
+  putRound(root, 1, MODULES, 1)
+  for (const round of [2, 3, 4]) putRound(root, round, MODULES, 0)
+  expect(modulesOfRound(5, root)).toEqual([...MODULES])
+})
+
+test('未探索が複数あるとき、周の番号を1つ進めると選ばれるモジュールが変わる', () => {
+  const root = evo()
+  // 周 9 で agent-loop と tool-use を探索済みにして、未探索を3つにする
+  putRound(root, 9, [MODULES[0], MODULES[1]], 1)
+  for (const round of [1, 2, 3, 4]) putRound(root, round, MODULES, 0)
+  const first = modulesOfRound(4, root)
+  const second = modulesOfRound(5, root)
+  expect(first).toEqual([MODULES[2 + (4 % 3)]])
+  expect(second).toEqual([MODULES[2 + (5 % 3)]])
+  expect(first).not.toEqual(second)
 })

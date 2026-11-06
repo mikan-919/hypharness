@@ -1,7 +1,7 @@
 // 自己改良の1周（最終目的の 6 の 1〜6）。弱点を集め、モジュールごとに候補を作り、検証して、通ったものだけを残す。
 import type { Dialog } from '../../shared/dialog.ts'
 import { MODULES, type Candidate, type Module } from '../../shared/evolve.ts'
-import { archiveCandidate, listArchive, writeCandidate } from './store.ts'
+import { archiveCandidate, listArchive, listCandidates, writeCandidate } from './store.ts'
 
 // 提案に渡す材料。archive は前の周までの採用済みの候補、start はこの周の出発点
 export type ProposeInput = {
@@ -59,18 +59,42 @@ export function pickStart(archive: Candidate[], round: number): Candidate | unde
   return archive[round % archive.length]
 }
 
+// 直前の3周がすべて改善の無い周か。改善は score が 1 の候補が1つでもある周とする。
+// 候補の無い周は回っていない周なので、行き詰まりとは数えない
+export function stuckModules(history: Candidate[], round: number): boolean {
+  const improved = new Set(history.filter((c) => c.score === 1).map((c) => c.round))
+  const seen = new Set(history.map((c) => c.round))
+  for (let r = round - 3; r < round; r++) {
+    if (!seen.has(r)) return false
+    if (improved.has(r)) return false
+  }
+  return true
+}
+
+// この周に対象にするモジュール。未探索（archive に score 1 の候補が無い）のモジュールがあれば
+// MODULES の順で周の番号から巡回して1つだけ選ぶ。無ければ5つすべて
+export function pickUnstuck(archive: Candidate[], round: number): Module[] {
+  const explored = new Set(archive.filter((c) => c.score === 1).map((c) => c.module))
+  const unexplored = MODULES.filter((module) => !explored.has(module))
+  if (unexplored.length === 0) return [...MODULES]
+  return [unexplored[round % unexplored.length]]
+}
+
 // 1周を順に進める。費用が上限を超えたら、残りの検証と採用をせずに止める
 export function runRound(options: RoundOptions): RoundResult {
   const { round, dialog, propose, check, spent, limitUsd, root } = options
   const weak = weaknesses(dialog)
   // 前の周までの候補。この周で採用した候補を後の提案に混ぜないよう、始めに1回だけ取る
   const archive = listArchive(root)
+  const history = [...listCandidates(root), ...archive]
   const start = pickStart(archive, round)
+  // 直前の3周に改善が無ければ、未探索のモジュールに回す
+  const targets = stuckModules(history, round) ? pickUnstuck(archive, round) : [...MODULES]
   const candidates: Candidate[] = []
   let stopped = false
 
-  for (const [index, module] of MODULES.entries()) {
-    const id = `${round}-${index + 1}`
+  for (const module of targets) {
+    const id = `${round}-${MODULES.indexOf(module) + 1}`
     const proposal = propose({ module, weaknesses: weak, archive, round, start })
     const candidate: Candidate = {
       id,
