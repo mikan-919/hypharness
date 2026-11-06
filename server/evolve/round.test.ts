@@ -1,12 +1,12 @@
 import { expect, test } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Dialog, Entry, Task } from '../../shared/dialog.ts'
 import { MODULES, type Candidate, type Module, type PromptCandidate } from '../../shared/evolve.ts'
 import { critic, pruner, runRound, weaknesses, type ProposeInput } from './round.ts'
 import { readPrompts } from './prompts.ts'
-import { archiveCandidate, listArchive, listCandidates, writeCandidate } from './store.ts'
+import { archiveCandidate, listArchive, listCandidates, readCode, writeCandidate } from './store.ts'
 
 // HYPH_EVO を一時ディレクトリにした置き場を作る
 const evo = () => {
@@ -322,6 +322,55 @@ test('score が 0 の候補の changes が propose の failed に入り、同じ
     root,
   })
   expect(seen.every((i) => i.failed.join(',') === 'A,B,C')).toBe(true)
+})
+
+test('propose に渡る code は start と archive の候補の id と本文を持ち、並びは archive と同じ', async () => {
+  const root = evo()
+  putArchive(root, '1-1')
+  putArchive(root, '1-2')
+  const seen: ProposeInput[] = []
+  await runRound({
+    round: 2,
+    dialog: dialog(),
+    propose: (input) => {
+      seen.push(input)
+      return { changes: [`${input.module} の変更`], note: '' }
+    },
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  const archive = listArchive(root)
+  const expected = archive.map((c) => ({ id: c.id, text: readCode(c.id, root) }))
+  expect(expected.map((e) => e.id)).toEqual(['1-1', '1-2'])
+  expect(seen.every((i) => JSON.stringify(i.code) === JSON.stringify(expected))).toBe(true)
+  expect(seen[0].code).toEqual([
+    { id: '1-1', text: readCode('1-1', root) },
+    { id: '1-2', text: readCode('1-2', root) },
+  ])
+  expect(seen[0].start?.id).toBe(seen[0].code[0].id)
+  expect(seen[0].code[0].text).toContain('module: context')
+})
+
+test('コードのファイルが無い候補は propose に渡る code の text が空文字になる', async () => {
+  const root = evo()
+  putArchive(root, '1-1')
+  rmSync(join(root, 'code', '1-1.md'))
+  const seen: ProposeInput[] = []
+  await runRound({
+    round: 2,
+    dialog: dialog(),
+    propose: (input) => {
+      seen.push(input)
+      return { changes: [`${input.module} の変更`], note: '' }
+    },
+    check: () => 0,
+    spent: () => 0,
+    limitUsd: 100,
+    root,
+  })
+  expect(seen.every((i) => i.code.length === 1 && i.code[0].id === '1-1' && i.code[0].text === '')).toBe(true)
 })
 
 test('周の番号が 10 以下のとき、changes が4個以上でも候補に残るのは先頭3個', async () => {

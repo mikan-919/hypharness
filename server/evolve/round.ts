@@ -10,11 +10,12 @@ import {
 } from '../../shared/evolve.ts'
 import { readPrompts, writePrompts } from './prompts.ts'
 import { specCandidates, type Failure } from './spec.ts'
-import { archiveCandidate, listArchive, listCandidates, writeCandidate } from './store.ts'
+import { archiveCandidate, listArchive, listCandidates, readCode, writeCandidate } from './store.ts'
 
 // 提案に渡す材料。archive は前の周までの採用済みの候補、start はこの周の出発点。
 // failed は検証に通らなかった変更の履歴、maxChanges は1つの候補に残す変更の数の上限。
-// prompts はそのモジュールで残っている Pareto のプロンプトの候補を rankPrompts の順にしたもの
+// prompts はそのモジュールで残っている Pareto のプロンプトの候補を rankPrompts の順にしたもの。
+// code は start と archive の候補のコードの本文で、archive の並び順
 export type ProposeInput = {
   module: Module
   weaknesses: string[]
@@ -24,6 +25,7 @@ export type ProposeInput = {
   failed: string[]
   maxChanges: number
   prompts: PromptCandidate[]
+  code: { id: string; text: string }[]
 }
 
 // 提案の返り値。id・round・module・score・cost は runRound が入れる。
@@ -178,6 +180,8 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
   const start = pickStart(archive, round)
   const failed = failedChanges(history)
   const maxChanges = changeLimit(round)
+  // 出発点と archive の候補のコード。archive の並び順で読む
+  const code = archive.map((candidate) => ({ id: candidate.id, text: readCode(candidate.id, root) }))
   // この周の提案から除く変更。始めの候補の一覧から1回だけ求める
   const pruned = pruner(history)
   // 直前の3周に改善が無ければ、未探索のモジュールに回す
@@ -202,6 +206,7 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
       failed,
       maxChanges,
       prompts: rankPrompts(prompts),
+      code,
     })
     // プロンプトの候補があれば、課題ごとの通過で測って Pareto の候補として書く。
     // pass を渡さないときはモデルを呼ばず、通過を空にする

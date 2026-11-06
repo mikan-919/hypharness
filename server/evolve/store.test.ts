@@ -3,7 +3,15 @@ import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Candidate } from '../../shared/evolve.ts'
-import { archiveCandidate, evoPaths, listArchive, listCandidates, readCandidate, writeCandidate } from './store.ts'
+import {
+  archiveCandidate,
+  evoPaths,
+  listArchive,
+  listCandidates,
+  readCandidate,
+  readCode,
+  writeCandidate,
+} from './store.ts'
 
 // HYPH_EVO を一時ディレクトリにした置き場を作る
 const evo = () => {
@@ -29,11 +37,13 @@ test('HYPH_EVO の下に candidates と archive と prompts のパスを返す',
     candidates: join(root, 'candidates'),
     archive: join(root, 'archive'),
     prompts: join(root, 'prompts'),
+    code: join(root, 'code'),
   })
   expect(evoPaths('/tmp/x')).toEqual({
     candidates: '/tmp/x/candidates',
     archive: '/tmp/x/archive',
     prompts: '/tmp/x/prompts',
+    code: '/tmp/x/code',
   })
 })
 
@@ -69,6 +79,35 @@ test('changes が3個を超える候補も書いて読める', () => {
   writeCandidate(many)
   expect(readCandidate('r1-9')).toEqual(many)
   expect(listCandidates()).toEqual([many])
+})
+
+test('writeCandidate は code/<id>.md に id と module と変更の行を書く', () => {
+  evo()
+  const c = candidate('r1-1', { module: 'tool-use', round: 3, changes: ['A', 'B'] })
+  writeCandidate(c)
+  const file = join(process.env.HYPH_EVO!, 'code', 'r1-1.md')
+  expect(existsSync(file)).toBe(true)
+  const text = readCode('r1-1')
+  expect(text).toContain('# r1-1')
+  expect(text).toContain('module: tool-use')
+  expect(text).toContain('round: 3')
+  expect(text).toContain('changes:')
+  expect(text).toContain('- A')
+  expect(text).toContain('- B')
+})
+
+test('archiveCandidate の後も code/<id>.md が残り、readCode が同じ本文を返す', () => {
+  evo()
+  writeCandidate(candidate('r1-1'))
+  const before = readCode('r1-1')
+  archiveCandidate('r1-1')
+  expect(existsSync(join(process.env.HYPH_EVO!, 'code', 'r1-1.md'))).toBe(true)
+  expect(readCode('r1-1')).toBe(before)
+})
+
+test('コードのファイルが無ければ readCode は空文字を返す', () => {
+  evo()
+  expect(readCode('1-1')).toBe('')
 })
 
 test('候補が無いときは空の一覧を返す', () => {

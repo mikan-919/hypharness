@@ -38,6 +38,7 @@ const SYSTEM = `あなたは hypharness の自己改良の提案役です。指�
 
 - 弱点と、出発点・archive の候補を参考にする。
 - 変更は、そのモジュールのコードに加える具体的な変更を文字列の配列で書く。
+- コードは \`~/.hyph/evo/code/<id>.md\` にあり、材料の \`code\` に本文が入っている。
 - 応答は JSON だけにする。形は {"changes": string[], "note": string}。
 - 日本語で書く。修飾表現を使わず、事実を書く。`
 
@@ -99,6 +100,7 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
         archive: input.archive.map((c) => ({ id: c.id, module: c.module, changes: c.changes })),
         failed: input.failed,
         maxChanges: input.maxChanges,
+        code: input.code,
       }
       try {
         if (!stream) throw new Error('モデルの呼び出し先を作れませんでした')
