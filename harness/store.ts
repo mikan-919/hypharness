@@ -143,7 +143,15 @@ export function createStore(file?: string, goalFile?: string) {
       broadcastSoon()
     },
     addTask(statement: string) {
-      const task: Task = { id: `t${dialog.tasks.length + 1}`, statement, state: 'solving', attempts: 0, commit: '' }
+      const task: Task = {
+        id: `t${dialog.tasks.length + 1}`,
+        statement,
+        state: 'solving',
+        attempts: 0,
+        commit: '',
+        reason: '',
+        spent: 0,
+      }
       dialog.tasks = [...dialog.tasks, task]
       changed()
       return task.id

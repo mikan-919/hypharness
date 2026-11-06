@@ -154,6 +154,8 @@ async function step(store: Store, call: Call, repo: string, options: PipelineOpt
 
 async function solve(store: Store, call: Call, tree: string, taskId: string, statement: string, options: PipelineOptions) {
   const messages: Message[] = [{ role: 'user', content: `課題 ${taskId}:\n${statement}`, timestamp: Date.now() }]
+  // 最後の検査の失敗の出力。保留にしたときの理由に使う
+  let reason = ''
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     store.setTask(taskId, { state: 'solving', attempts: attempt })
     await runAgent({
@@ -179,11 +181,13 @@ async function solve(store: Store, call: Call, tree: string, taskId: string, sta
       },
       stop: (c) => (c.name === 'done' ? arg(c, 'summary') : undefined),
     }).catch((e: Error) => {
-      // 中継が費用の上限に達して断ったときは、この課題を保留にし、課題 id・使った費用・上限を残して流れを止める
+      // 中継が費用の上限に達して断ったときは、この課題を保留にし、断りの文と使った費用を残して流れを止める
       if (!(e instanceof CostLimitError)) throw e
-      store.setTask(taskId, { state: 'held' })
       const spent = options.spent?.(taskId) ?? 0
-      throw new Error(`課題 ${taskId} が費用の上限 ${options.limitUsd} ドルに達しました（使った費用 ${spent} ドル）。保留にして流れを止めました`)
+      store.setTask(taskId, { state: 'held', reason: e.message, spent })
+      throw new Error(
+        `課題 ${taskId} が費用の上限 ${options.limitUsd} ドルに達しました（使った費用 ${spent} ドル）。保留にして流れを止めました。理由: ${e.message}`,
+      )
     })
     store.setTask(taskId, { state: 'checking' })
     git(tree, 'add', '-A')
@@ -197,9 +201,13 @@ async function solve(store: Store, call: Call, tree: string, taskId: string, sta
       store.act('solve', 'check', `${taskId} の検査が通った`)
       return
     }
+    reason = failure
     store.act('solve', 'check', failure.split('\n')[0])
     answerPending(messages, `${failure}\n\n直してから、もう一度 done を呼んでください。`)
   }
-  store.setTask(taskId, { state: 'held' })
-  throw new Error(`${taskId} が検査に ${MAX_ATTEMPTS} 回落ちたため保留にし、流れを止めました`)
+  const spent = options.spent?.(taskId) ?? 0
+  store.setTask(taskId, { state: 'held', reason, spent })
+  throw new Error(
+    `${taskId} が検査に ${MAX_ATTEMPTS} 回落ちたため保留にし、流れを止めました。理由: ${reason.slice(-1000)}`,
+  )
 }

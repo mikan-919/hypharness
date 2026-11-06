@@ -97,6 +97,12 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                     {`${taskLabel[task.state]}${task.attempts > 1 ? `（${task.attempts} 回目）` : ''} ${task.commit.slice(0, 8)}`}
                   </span>
                   <p>{task.statement.split('\n')[0]}</p>
+                  {task.state === 'held' && (
+                    <>
+                      <p class="reason">{task.reason}</p>
+                      <p class="spent">{`使った費用 ${task.spent} ドル`}</p>
+                    </>
+                  )}
                 </div>
               ))}
             </section>

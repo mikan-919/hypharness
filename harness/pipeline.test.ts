@@ -58,6 +58,9 @@ test('検査に3回落ちたら保留にして流れを止め、統合ブラン�
   })
   await runPipeline(store, call, dir, options())
   expect(store.snapshot().tasks[0]).toMatchObject({ state: 'held', attempts: 3 })
+  expect(store.snapshot().tasks[0].reason).not.toBe('')
+  expect(store.snapshot().tasks[0].reason).toContain('検査が終了コード')
+  expect(typeof store.snapshot().tasks[0].spent).toBe('number')
   expect(store.snapshot().started).toBe(false)
   expect(store.snapshot().halted).toContain('保留')
   expect(log()).toBe('init')
@@ -73,6 +76,8 @@ test('費用の上限で断られたら課題を保留にして流れを止め�
   }
   await runPipeline(store, call, dir, { ...options(), spent: (taskId) => (taskId === 't1' ? 1.2 : 0), limitUsd: 1 })
   expect(store.snapshot().tasks[0]).toMatchObject({ state: 'held' })
+  expect(store.snapshot().tasks[0].reason).toContain('停止中です: 課題 t1 が費用の上限 1 に達しました')
+  expect(store.snapshot().tasks[0].spent).toBe(1.2)
   expect(store.snapshot().started).toBe(false)
   expect(store.snapshot().halted).toContain('t1')
   expect(store.snapshot().halted).toContain('1.2')
