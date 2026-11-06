@@ -1,4 +1,4 @@
-// 自己改良の1周（最終目的の 6 の 1〜8）。弱点を集め、モジュールごとに候補を作り、検証して、通ったものだけを残す。
+// 自己改良の1周（最終目的の 6 の 1〜9）。弱点を集め、モジュールごとに候補を作り、検証して、通ったものだけを残す。
 import type { Dialog } from '../../shared/dialog.ts'
 import {
   MODULES,
@@ -9,6 +9,7 @@ import {
   type PromptCandidate,
 } from '../../shared/evolve.ts'
 import { readPrompts, writePrompts } from './prompts.ts'
+import { specCandidates, type Failure } from './spec.ts'
 import { archiveCandidate, listArchive, listCandidates, writeCandidate } from './store.ts'
 
 // 提案に渡す材料。archive は前の周までの採用済みの候補、start はこの周の出発点。
@@ -45,6 +46,8 @@ export type RoundOptions = {
   limitUsd: number
   root?: string
   pass?: Pass
+  // 失敗したテストの一覧。渡されたときは仕様の候補も作って書く
+  failures?: Failure[]
 }
 
 export type RoundResult = {
@@ -167,7 +170,7 @@ export function pruner(history: Candidate[]): Set<string> {
 
 // 1周を順に進める。費用が上限を超えたら、残りの検証と採用をせずに止める
 export async function runRound(options: RoundOptions): Promise<RoundResult> {
-  const { round, dialog, propose, check, spent, limitUsd, root, pass } = options
+  const { round, dialog, propose, check, spent, limitUsd, root, pass, failures } = options
   const weak = weaknesses(dialog)
   // 前の周までの候補。この周で採用した候補を後の提案に混ぜないよう、始めに1回だけ取る
   const archive = listArchive(root)
@@ -251,6 +254,15 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
     }
 
     candidates.push(candidate)
+  }
+
+  // 失敗したテストが渡されたときは、仕様の候補も作って書く。
+  // critic・pruner・変更数の上限は仕様の候補には適用しない
+  if (failures) {
+    for (const candidate of specCandidates(failures, round)) {
+      writeCandidate(candidate, root)
+      candidates.push(candidate)
+    }
   }
 
   return { round, candidates, stopped, start, rejected }
