@@ -6,4 +6,6 @@
 - ツールの実行が例外になったときは、その本文も同じ規則で縮め、`isError` の結果として会話に返す。
 - 縮めた本文だけを保持し、元の本文は別に持たない。
 
+`harness/settings.ts` の `AGENT_DIET`（`toolResultMaxChars`・`collapseRepeatedLines`・`collapseBlankLines`）と `COMPRESSION_GUIDE` は、ハーネスの改良（自己改良の周）の変更の対象にする。
+
 コード: `harness/agent.ts` の `shrinkToolResult` と、`runAgent` の中でツールの結果と例外をこれに通す箇所。

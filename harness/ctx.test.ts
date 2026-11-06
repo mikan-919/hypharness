@@ -7,6 +7,7 @@ import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
 import { createStore } from '../server/store.ts'
 import { recall, runAgent } from './agent.ts'
 import { ctx, editContext, SHRINK_HINT } from './ctx.ts'
+import { COMPRESSION_GUIDE } from './settings.ts'
 import type { Call } from './topic.ts'
 
 const message = (text: string): Message => ({ role: 'user', content: text, timestamp: 0 })
@@ -563,4 +564,14 @@ test('runAgent は直近の user のメッセージを現在のリクエスト�
   const summaryLines = systems[0].split('\n').filter((line) => line.includes('種別 要約'))
   expect(summaryLines[0]).toContain(`id ${matched}`)
   expect(summaryLines[0]).not.toContain(`id ${unrelated}`)
+})
+
+test('文脈が上限の 70% を超えると、recall と edit_context の結果に圧縮の指針が入る', () => {
+  const store = ctx('guide')
+  store.append(message('はじめての指示'))
+  store.append(message('置き換える前の文'))
+  store.addSummary('x'.repeat(4 * 734_004), [])
+  store.buildContextFile()
+  expect(recall('guide', '見つからない語')).toContain(COMPRESSION_GUIDE)
+  expect(editContext('guide', '置き換える前の文', '置き換えた後の文')).toContain(COMPRESSION_GUIDE)
 })

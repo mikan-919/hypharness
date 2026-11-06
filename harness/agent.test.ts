@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
 import type { AgentStore } from '../shared/contract.ts'
 import { runAgent } from './agent.ts'
+import { AGENT_DIET } from './settings.ts'
 import type { Call } from './topic.ts'
 
 // 会話の置き場はテストの一時ディレクトリにする
@@ -89,4 +90,63 @@ test('文脈が上限の 70% を超えると、edit_context の結果に要約�
   expect(result.toolName).toBe('edit_context')
   expect(result.content[0].text).toContain('要約して縮めて')
   expect(result.content[0].text).toContain('edit_context')
+})
+
+test('AGENT_DIET.toolResultMaxChars を変えると、ツール結果を切る長さがその値になる', async () => {
+  const before = AGENT_DIET.toolResultMaxChars
+  AGENT_DIET.toolResultMaxChars = 5
+  try {
+    const { body } = await through('abcdefghij')
+    expect(body).toBe('abcde')
+  } finally {
+    AGENT_DIET.toolResultMaxChars = before
+  }
+})
+
+test('AGENT_DIET.collapseRepeatedLines を false にすると、連続する同じ行を1行にまとめない', async () => {
+  const before = AGENT_DIET.collapseRepeatedLines
+  AGENT_DIET.collapseRepeatedLines = false
+  try {
+    const { body } = await through('同じ\n同じ\n次')
+    expect(body).toBe('同じ\n同じ\n次')
+  } finally {
+    AGENT_DIET.collapseRepeatedLines = before
+  }
+})
+
+test('AGENT_DIET.summaryEvery を変えると、要約ノードが増える間隔がその値になる', async () => {
+  const before = AGENT_DIET.summaryEvery
+  AGENT_DIET.summaryEvery = 1
+  try {
+    const { ctx } = await import('./ctx.ts')
+    const { createStore } = await import('../server/store.ts')
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    process.env.HYPH_CTX_DIR = mkdtempSync(join(tmpdir(), 'hyph-agent-every-'))
+    const replies = Array.from({ length: 6 }, (_, i) => toolCall('tool'))
+    let turn = 0
+    const call: Call = async () => (turn++ < 6 ? replies[turn - 1] : toolCall('stop'))
+    const messages: Message[] = [{ role: 'user', content: '課題 t1:\n進める', timestamp: Date.now() }]
+    const counts: number[] = []
+    await runAgent<string>({
+      store: fakeStore([]),
+      call,
+      agent: 'every',
+      taskId: 't1',
+      system: '',
+      tools: [],
+      messages,
+      run: async () => {
+        counts.push(ctx('every').summaries().length)
+        return '結果です'
+      },
+      stop: (c) => (c.name === 'stop' ? '終わり' : undefined),
+    })
+    // 1ターンごとに要約ノードの増え方を確かめる。直近8件より前ができてから増える
+    expect(counts).toEqual([0, 0, 0, 0, 1, 2])
+    expect(ctx('every').summaries().length).toBe(3)
+  } finally {
+    AGENT_DIET.summaryEvery = before
+  }
 })

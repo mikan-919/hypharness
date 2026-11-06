@@ -12,4 +12,6 @@
 - システムプロンプトに、ブロックごとの id・種別・トークン数・最後の参照からのターン数・参照回数・残り予算の1行を入れる。
 - 文脈のトークン数が `contextWindow` の 70% を超えたら、`recall` と `edit_context` の結果に縮める指示の1行を添える。
 
+`harness/settings.ts` の `AGENT_DIET`（`contextKeep`）と `COMPRESSION_GUIDE` は、ハーネスの改良（自己改良の周）の変更の対象にする。
+
 コード: `harness/ctx.ts` の全体（`ctx`・`blocks`・`summarizeOld`・`buildContextFile`・`editContext`・`contextStatus`・`search`・`dependenciesOf`・`overLimit`）と、`harness/agent.ts` の `recall` と `runAgent` の中でシステムプロンプトに文脈の行を足す箇所。

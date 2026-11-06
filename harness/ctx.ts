@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Message, TextContent } from '@earendil-works/pi-ai'
+import { AGENT_DIET, COMPRESSION_GUIDE } from './settings.ts'
 
 // 保存先のルート。テストは HYPH_CTX_DIR で差し替える
 export const root = () => process.env.HYPH_CTX_DIR || join(homedir(), '.hyph', 'ctx')
@@ -15,8 +16,8 @@ export const CONTEXT_WINDOW = 1_048_576
 export const CONTEXT_RATIO = 0.7
 
 // 文脈が上限に近いときに、ツールの結果の末尾に添える1行
-export const SHRINK_HINT =
-  '文脈が上限の 70% を超えました。edit_context で文脈ファイルを縮め、recall で取る件数（max_results）を減らして要約して縮めてください。'
+export const SHRINK_HINT = `文脈が上限の 70% を超えました。edit_context で文脈ファイルを縮め、recall で取る件数（max_results）を減らして要約して縮めてください。
+${COMPRESSION_GUIDE}`
 
 // 本文の文字数からトークン数を見積もる。モデルは呼ばず、4 文字を 1 トークンとする
 export const estimateTokens = (text: string) => Math.ceil(text.length / 4)
@@ -44,9 +45,6 @@ export type Block = { kind: '要約' | '生'; id: number; text: string }
 
 // 要約ノードの本文に入れる、1件のメッセージの本文の上限
 const MAX_SUMMARY_PART = 500
-
-// 文脈ファイルに入れる、生のまま残す直近のメッセージの件数
-const CONTEXT_KEEP = 8
 
 // エージェントの id ごとに1つのファイルを開き、追記と読み出しを返す
 export function ctx(agent: string) {
@@ -130,7 +128,7 @@ export function ctx(agent: string) {
   }
   // 文脈ファイルに入れるブロック。要約ノードと、直近の生メッセージ（keep 件）。
   // 最初の課題文（messages の先頭）は入れない
-  const blocks = (keep = CONTEXT_KEEP, request?: string): Block[] => {
+  const blocks = (keep = AGENT_DIET.contextKeep, request?: string): Block[] => {
     const list: Block[] = orderSummaries(summaries(), keep, request).map((s) => ({
       kind: '要約',
       id: s.id,
@@ -140,9 +138,9 @@ export function ctx(agent: string) {
     return list
   }
   // 文脈ファイルのトークン数の見積もり。blocks() の本文を estimateTokens で数える
-  const contextTokens = (keep = CONTEXT_KEEP) => blocks(keep).reduce((n, b) => n + estimateTokens(b.text), 0)
+  const contextTokens = (keep = AGENT_DIET.contextKeep) => blocks(keep).reduce((n, b) => n + estimateTokens(b.text), 0)
   // 文脈ファイルのトークン数が CONTEXT_WINDOW の 70% を超えたか
-  const overLimit = (keep = CONTEXT_KEEP) => contextTokens(keep) > CONTEXT_WINDOW * CONTEXT_RATIO
+  const overLimit = (keep = AGENT_DIET.contextKeep) => contextTokens(keep) > CONTEXT_WINDOW * CONTEXT_RATIO
   // ターンの番号。実行をまたいで数える
   const currentTurn = () => (db.query('SELECT turn FROM turn_counter WHERE id = 1').get() as { turn: number }).turn
   const lastTurnOf = (kind: string, id: number) =>
@@ -159,14 +157,14 @@ export function ctx(agent: string) {
     ).run(kind, id, turn)
   }
   // 文脈ファイルを組み立てて書き、そのパスを返す。中身は blocks() と同じ集合
-  const buildContextFile = (keep = CONTEXT_KEEP, request?: string) => {
+  const buildContextFile = (keep = AGENT_DIET.contextKeep, request?: string) => {
     const written = blocks(keep, request).map((b) => `## ${b.kind} ${b.id}\n\n${b.text}`)
     mkdirSync(dir, { recursive: true })
     writeFileSync(filePath, written.length > 0 ? `${written.join('\n\n')}\n` : '')
     return filePath
   }
   // 文脈のブロックごとの1行を返す。直近に残した生のブロックはそのターンに参照したものとして数える
-  const contextStatus = (keep = CONTEXT_KEEP, request?: string) => {
+  const contextStatus = (keep = AGENT_DIET.contextKeep, request?: string) => {
     const list = blocks(keep, request)
     const turn = currentTurn()
     for (const b of list) if (b.kind === '生') markReferenced(b.kind, b.id)

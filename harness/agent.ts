@@ -4,28 +4,34 @@ import { relative, resolve } from 'node:path'
 import type { AssistantMessage, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { AgentStore } from '../shared/contract.ts'
 import { ctx, editContext, messageText, SHRINK_HINT } from './ctx.ts'
+import { AGENT_DIET } from './settings.ts'
 import type { Call } from './topic.ts'
 
 const short = (text: string, max = 160) => (text.length > max ? `${text.slice(0, max)}…` : text)
 
-// ツール結果を文脈に入れる前の長さの上限
-const MAX_RESULT = 10_000
-
-// ツール結果の文字列を決まった規則で縮める。連続する同じ行を1行に、連続する空行を1行に詰め、
-// 10,000 文字を超える分を後ろから切る
+// ツール結果の文字列を AGENT_DIET の規則で縮める。連続する同じ行を1行に、連続する空行を1行に詰め、
+// toolResultMaxChars 文字を超える分を後ろから切る
 export function shrinkToolResult(text: string) {
-  const deduped: string[] = []
-  for (const line of text.split('\n')) {
-    if (deduped.length > 0 && deduped[deduped.length - 1] === line) continue
-    deduped.push(line)
+  let deduped = text.split('\n')
+  if (AGENT_DIET.collapseRepeatedLines) {
+    const list: string[] = []
+    for (const line of deduped) {
+      if (list.length > 0 && list[list.length - 1] === line) continue
+      list.push(line)
+    }
+    deduped = list
   }
-  const lines: string[] = []
-  for (const line of deduped) {
-    const blank = line.trim() === ''
-    if (blank && lines.length > 0 && lines[lines.length - 1].trim() === '') continue
-    lines.push(line)
+  let lines = deduped
+  if (AGENT_DIET.collapseBlankLines) {
+    const list: string[] = []
+    for (const line of deduped) {
+      const blank = line.trim() === ''
+      if (blank && list.length > 0 && list[list.length - 1].trim() === '') continue
+      list.push(line)
+    }
+    lines = list
   }
-  return lines.join('\n').slice(0, MAX_RESULT)
+  return lines.join('\n').slice(0, AGENT_DIET.toolResultMaxChars)
 }
 
 // 応答の文とツールの呼び出しを、動きとして残す
@@ -173,9 +179,6 @@ const MAX_TURNS = 200
 // 要約ノードにまとめず、生のまま残す直近のメッセージの件数
 const SUMMARY_KEEP = 8
 
-// 要約ノードを作る間隔（ターン）
-const SUMMARY_EVERY = 4
-
 // stop が値を返したツールの呼び出しで、ループを終えてその値を返す
 export async function runAgent<T>(options: {
   store: AgentStore
@@ -248,9 +251,9 @@ export async function runAgent<T>(options: {
         save(messages)
       }
     }
-    // ターンが終わった後に、4ターンごとに古いメッセージを要約ノードにまとめる。
+    // ターンが終わった後に、AGENT_DIET.summaryEvery ターンごとに古いメッセージを要約ノードにまとめる。
     // 要約を作れなくてもエージェントの実行は止めない
-    if ((turn + 1) % SUMMARY_EVERY === 0) {
+    if ((turn + 1) % AGENT_DIET.summaryEvery === 0) {
       try {
         ctx(agent).summarizeOld(SUMMARY_KEEP)
       } catch {
