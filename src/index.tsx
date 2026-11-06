@@ -180,6 +180,20 @@ const routes = app
       ? c.json({ ok: true })
       : c.json({ error: '承認を待つ提案がありません' }, 404)
   })
+  // 利用者の中継の記録とチェックポイントをすべて消す。アカウントとノードのペアリングは残す
+  .post('/reset', auth, async (c) => {
+    const prefix = `${c.var.user.id}/`
+    let cursor: string | undefined
+    do {
+      const page = await c.env.CHECKPOINTS.list({ prefix, cursor })
+      if (page.objects.length) {
+        await c.env.CHECKPOINTS.delete(page.objects.map((o) => o.key))
+      }
+      cursor = page.truncated ? page.cursor : undefined
+    } while (cursor)
+    await relay(c.env, c.var.user.id).reset()
+    return c.json({ ok: true })
+  })
   .get('/tasks/:id/history', auth, async (c) => {
     const id = Number(c.req.param('id'))
     if (!Number.isSafeInteger(id)) {
