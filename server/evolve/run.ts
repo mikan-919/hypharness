@@ -5,8 +5,9 @@ import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
 import type { Call } from '../../harness/topic.ts'
 import type { AgentStore } from '../../shared/contract.ts'
 import type { Dialog, Task } from '../../shared/dialog.ts'
-import { MODULE_SUMMARY, type Candidate } from '../../shared/evolve.ts'
+import { MODULE_SUMMARY, type Candidate, type Module } from '../../shared/evolve.ts'
 import { deepinfra } from '../model.ts'
+import { BRANCH } from '../pipeline.ts'
 import type { Stream } from '../relay.ts'
 import { createStore } from '../store.ts'
 import { applyAndCheck } from './apply.ts'
@@ -85,9 +86,31 @@ export function proposeMaterial(input: ProposeInput, root: string) {
   }
 }
 
+// 1つのソースから提案役に渡す文字数の上限
+const MAX_SOURCE = 20_000
+
+// 提案役に渡す、モジュールの仕様（docs/specs/<module>.md）と、仕様の「コード:」に挙がったソースと、ADR の題。
+// どれも統合ブランチの先端の版から読む。候補はこの版に当てる
+export function moduleMaterial(harness: string, module: Module) {
+  const ref = Bun.spawnSync(['git', '-C', harness, 'rev-parse', '--verify', '-q', BRANCH]).exitCode === 0 ? BRANCH : 'HEAD'
+  const show = (path: string) => {
+    const result = Bun.spawnSync(['git', '-C', harness, 'show', `${ref}:${path}`])
+    return result.exitCode === 0 ? result.stdout.toString() : ''
+  }
+  const spec = show(`docs/specs/${module}.md`)
+  const paths = [...new Set(spec.match(/(?:harness|server|shared)\/[\w./-]+\.ts/g) ?? [])]
+  const sources = paths.map((path) => ({ path, text: show(path).slice(0, MAX_SOURCE) })).filter((s) => s.text)
+  const adrs = Bun.spawnSync(['git', '-C', harness, 'ls-tree', '--name-only', ref, 'docs/adr/']).stdout.toString().split('\n').filter(Boolean)
+  const decisions = adrs.map((path) => show(path).split('\n')[0].replace(/^# /, ''))
+  return { spec, sources, decisions }
+}
+
 const SYSTEM = `あなたは hypharness の自己改良の提案役です。指定されたモジュールの変更案を1つ作ります。
 
-- 弱点と、出発点・archive の候補を参考にする。
+- 弱点（weaknesses）に対応する変更だけを出す。弱点に対応しない変更は出さない。
+- 材料の sources はそのモジュールの今のコード、spec は仕様。コードに書かれていることを前提にし、無い関数や設定を前提にしない。
+- decisions は ADR の題で、決定済みの事柄。ADR の決定に反する変更は出さない。
+- 出発点・archive の候補を参考にする。
 - 変更は、そのモジュールのコードに加える具体的な変更を文字列の配列で書く。
 - 候補の JSON は \`~/.hyph/evo/candidates/<id>.json\` と \`~/.hyph/evo/archive/<id>.json\` にあり、材料の \`paths\` に場所が入っている。
 - コードは \`~/.hyph/evo/code/<id>.md\` にあり、材料の \`code\` に本文が入っている。
@@ -146,11 +169,12 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
   const stream = options.stream ?? (options.propose && options.check ? undefined : deepinfra())
 
   const log = options.log ?? (() => {})
+  const harness = options.harness ?? join(import.meta.dir, '..', '..')
   const propose =
     options.propose ??
     (async (input: ProposeInput): Promise<Proposal> => {
       log('text', `${input.module} の変更案を作っている`)
-      const material = proposeMaterial(input, root)
+      const material = { ...proposeMaterial(input, root), ...moduleMaterial(harness, input.module) }
       try {
         if (!stream) throw new Error('モデルの呼び出し先を作れませんでした')
         const answer = await askModel(stream, JSON.stringify(material), systemPrompt(input.maxChanges))
@@ -182,7 +206,7 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
     (async (candidate: Candidate) => {
       log('text', `候補 ${candidate.id}（${candidate.module}）を解答役に当てさせている`)
       const score = await applyAndCheck(candidate, {
-        repo: options.harness ?? join(import.meta.dir, '..', '..'),
+        repo: harness,
         call,
         check: process.env.CHECK_COMMAND || 'bun run typecheck && bun test',
         parent: listArchive(root).find((c) => c.id === candidate.parent),

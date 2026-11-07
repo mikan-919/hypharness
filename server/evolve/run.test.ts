@@ -1,10 +1,10 @@
 import { expect, test } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Dialog } from '../../shared/dialog.ts'
 import type { Candidate } from '../../shared/evolve.ts'
-import { proposeMaterial, runEvolve, readProposal, type EvolveProgress } from './run.ts'
+import { moduleMaterial, proposeMaterial, runEvolve, readProposal, type EvolveProgress } from './run.ts'
 import type { ProposeInput } from './round.ts'
 import { archiveCandidate, evoPaths, listArchive, listCandidates, writeCandidate } from './store.ts'
 
@@ -222,4 +222,24 @@ test('onProgress は proposing から validating を経て done になり、最�
   expect(last.spent).toBe(result.spent)
   expect(last.candidates.map((c) => c.id)).toEqual(result.candidates.map((c) => c.id))
   expect(listArchive(root).map((c) => c.id)).toEqual(['1-1', '1-2', '1-3', '1-4', '1-5'])
+})
+
+test('提案役の材料に、統合ブランチの先端の仕様と、仕様に挙がったソースと、ADR の題が入る', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hyph-material-'))
+  const git = (...args: string[]) => Bun.spawnSync(['git', '-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args])
+  mkdirSync(join(dir, 'docs', 'specs'), { recursive: true })
+  mkdirSync(join(dir, 'docs', 'adr'), { recursive: true })
+  mkdirSync(join(dir, 'harness'))
+  writeFileSync(join(dir, 'docs', 'specs', 'context.md'), '# context\n\nコード: `harness/ctx.ts` と `harness/none.ts`。\n')
+  writeFileSync(join(dir, 'docs', 'adr', '0001-local.md'), '# 0001 ローカルだけで動かす\n')
+  writeFileSync(join(dir, 'harness', 'ctx.ts'), '統合ブランチの版\n')
+  git('init', '-q')
+  git('add', '-A')
+  git('commit', '-qm', 'init')
+  git('branch', 'hypharness/integration')
+  writeFileSync(join(dir, 'harness', 'ctx.ts'), '作業ツリーの版\n')
+  const material = moduleMaterial(dir, 'context')
+  expect(material.sources).toEqual([{ path: 'harness/ctx.ts', text: '統合ブランチの版\n' }])
+  expect(material.decisions).toEqual(['0001 ローカルだけで動かす'])
+  expect(material.spec).toContain('# context')
 })

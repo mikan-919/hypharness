@@ -10,6 +10,7 @@ import { deepinfra } from './model.ts'
 import { holdUnfinished, runPipeline } from './pipeline.ts'
 import { createRelay } from './relay.ts'
 import { createStore } from './store.ts'
+import { weaknesses } from './evolve/round.ts'
 import { runEvolve } from './evolve/run.ts'
 import { createWorkers } from './workers.ts'
 
@@ -118,6 +119,8 @@ app.post('/api/start', (c) => {
   }
   // 費用の上限で止まっていたら、開始の合図で中継の停止を解いてから流れを始める（ADR 0012）
   relay.resume()
+  // 自己改良の弱点は、この流れで起きた失敗だけにする。前の流れの失敗は、その後の課題で直っていることがある
+  const mark = { tasks: store.snapshot().tasks.length, entries: store.snapshot().entries.length }
   void runPipeline(store, workers.roles, REPO, {
     worktrees: join(homedir(), '.hyph', 'worktrees', REPO.replaceAll('/', '_')),
     setup: process.env.SETUP_COMMAND,
@@ -125,21 +128,27 @@ app.post('/api/start', (c) => {
     spent: relay.spent,
     limitUsd: relay.limitUsd,
   }).then(() => {
-    if (store.snapshot().finished) return evolve()
+    if (store.snapshot().finished) return evolve(mark)
   })
   return c.json({ ok: true })
 })
 
 // 自己改良の1周（ADR 0014）。分解役が最終目的を満たしたと判断した後に、hypharness 自身の改良の対象を1周改良する。
 // 検査に通った候補は統合ブランチに積み、次に動くエージェントから効く（ADR 0022）。回している間は開始の合図を受け付けない
-async function evolve() {
+async function evolve(mark: { tasks: number; entries: number }) {
+  const now = store.snapshot()
+  const dialog = { ...now, tasks: now.tasks.slice(mark.tasks), entries: now.entries.slice(mark.entries) }
+  if (weaknesses(dialog).length === 0) {
+    store.act('evolve', 'text', 'この流れで失敗が無かったため、自己改良の1周を回さなかった')
+    return
+  }
   store.setRun({ started: true })
   store.act('evolve', 'text', '自己改良の1周を始めた')
   store.setEvolution({ stage: 'proposing', candidates: [], spent: 0 })
   try {
     const result = await runEvolve({
       repo: REPO,
-      dialog: store.snapshot(),
+      dialog,
       harness: process.cwd(),
       stream: relay.stream('evolve', `evolve-${Date.now()}`),
       adopt: true,
