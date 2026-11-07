@@ -302,7 +302,7 @@ p.banner { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color:
 .evolution-round-picker { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 12px; }
 .evolution-round-picker select { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
 .evolution-row { font-size: 12px; }
-.evolution-row:not(.candidate) .evolution-candidate, .evolution-row:not(.change) .evolution-change, .evolution-row:not(.memo) .note-detail, .evolution-row:not(.diff) .diff-detail, .evolution-row:not(.check) .check-detail { display: none; }
+.evolution-row:not(.candidate) .evolution-candidate, .evolution-row:not(.change) .evolution-change, .evolution-row:not(.memo) .note-detail, .evolution-row:not(.diff) .diff-detail, .evolution-row:not(.check) .check-detail, .evolution-row:not(.material) .material-detail, .evolution-row:not(.response) .response-detail { display: none; }
 .evolution-row.candidate { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
 .evolution-candidate { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px 8px; overflow-wrap: anywhere; }
 .evolution-candidate strong:first-child { font-size: 13px; }

@@ -66,6 +66,22 @@ test('Dialog.evolution は長い検査出力を保存し、store を作り直し
   expect(loaded?.candidates[0].checkOutput?.stderr.length).toBeGreaterThan(8_000)
 })
 
+test('Dialog.evolution は提案材料と応答の全文を保存し、store の再生成後も読める', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'hyph-dialog-evolution-')), 'dialog.json')
+  const proposalMaterial = `material-start${'m'.repeat(12_000)}material-end`
+  const proposalResponse = `response-start${'r'.repeat(12_000)}response-end`
+  const store = createStore(file)
+  store.setEvolution({
+    round: 1,
+    stage: 'validating',
+    candidates: [{ ...candidate, proposalMaterial, proposalResponse }],
+  })
+
+  const loaded = createStore(file).snapshot().evolution?.candidates[0]
+  expect(loaded?.proposalMaterial).toBe(proposalMaterial)
+  expect(loaded?.proposalResponse).toBe(proposalResponse)
+})
+
 test('欄が増える前に保存した課題は、増えた欄を空の値で埋めて読む', () => {
   const file = join(mkdtempSync(join(tmpdir(), 'hyph-old-')), 'dialog.json')
   writeFileSync(file, JSON.stringify({ dialog: { tasks: [{ id: 't1', statement: '課題', state: 'committed', attempts: 1, commit: 'abc' }] }, transcripts: {} }))

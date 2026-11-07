@@ -62,6 +62,8 @@ test('詳細ログの無い旧形式候補も保存済み項目を残し、未�
     note: '保存されたメモ',
     diff: null,
     checkOutput: null,
+    proposalMaterial: null,
+    proposalResponse: null,
   })
 
   const fullText = 'detail'.repeat(2_000)
@@ -69,6 +71,8 @@ test('詳細ログの無い旧形式候補も保存済み項目を残し、未�
     note: fullText,
     diff: fullText,
     checkOutput: { stdout: fullText, stderr: fullText },
+    proposalMaterial: `材料\n${fullText}`,
+    proposalResponse: `応答\n${fullText}`,
   })
   expect(evolutionCandidateView(withDetails)).toEqual({
     id: '2-1',
@@ -79,6 +83,8 @@ test('詳細ログの無い旧形式候補も保存済み項目を残し、未�
     note: fullText,
     diff: fullText,
     checkOutput: { stdout: fullText, stderr: fullText },
+    proposalMaterial: `材料\n${fullText}`,
+    proposalResponse: `応答\n${fullText}`,
   })
 
   expect(evolutionCandidateView(candidate('3-1', 3, { note: '' })).note).toBe('')

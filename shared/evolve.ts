@@ -16,7 +16,7 @@ export const MODULE_SUMMARY: Record<Module, string> = {
 // 1つの変更案。round は周の番号、score は回帰テストの報酬（0 か 1）、cost は検証に使った費用（ドル）。
 // holdout は採用した候補を提案に使わなかった課題で測った結果（0 か 1）。未測定は undefined。
 // parent は出発点にした候補の id、diff は統合ブランチの先端から当てたコードの差分（出発点の分を含む）、
-// commit は採用して統合ブランチに積んだコミット
+// commit は採用して統合ブランチに積んだコミット。proposalMaterial と proposalResponse は提案役への入力 JSON と応答本文。
 export type Candidate = {
   id: string
   round: number
@@ -31,6 +31,9 @@ export type Candidate = {
   commit?: string
   // 検査コマンドの標準出力と標準エラー。未記録は undefined
   checkOutput?: { stdout: string; stderr: string }
+  // 提案役に実際に渡した材料 JSON と、返した本文。古い候補では未記録
+  proposalMaterial?: string
+  proposalResponse?: string
 }
 
 // モジュールごとのプロンプトの候補（最終目的の 6 の 8）。

@@ -34,6 +34,9 @@ export type Proposal = {
   changes: string[]
   note?: string
   prompt?: string
+  // 提案役に実際に渡した材料 JSON と、返した本文
+  proposalMaterial?: string
+  proposalResponse?: string
 }
 
 // プロンプトの候補を課題ごとの通過（0 か 1）で測る。渡さないときはモデルを呼ばずに空の結果にする
@@ -253,6 +256,8 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
       note: proposal.note ?? '',
       cost: 0,
       ...(start ? { parent: start.id } : {}),
+      ...(proposal.proposalMaterial === undefined ? {} : { proposalMaterial: proposal.proposalMaterial }),
+      ...(proposal.proposalResponse === undefined ? {} : { proposalResponse: proposal.proposalResponse }),
     }
     writeCandidate(candidate, root)
 

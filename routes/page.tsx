@@ -71,7 +71,7 @@ function usageLine(u: TaskUsage | undefined) {
 // 候補ごとの行を1段に並べ、irisout の入れ子 map と条件描画を避ける
 type EvolutionRow = {
   key: string
-  kind: 'candidate' | 'change' | 'memo' | 'diff' | 'check'
+  kind: 'candidate' | 'change' | 'memo' | 'diff' | 'check' | 'material' | 'response'
   id: string
   module: string
   score: string
@@ -84,6 +84,10 @@ type EvolutionRow = {
   checkSummary: string
   stdout: string
   stderr: string
+  proposalMaterialSummary: string
+  proposalMaterial: string
+  proposalResponseSummary: string
+  proposalResponse: string
 }
 
 function evolutionRowList(candidates: Candidate[]): EvolutionRow[] {
@@ -91,6 +95,7 @@ function evolutionRowList(candidates: Candidate[]): EvolutionRow[] {
   const base = (id: string, kind: EvolutionRow['kind']): EvolutionRow => ({
     key: id + '-' + kind, kind, id: '', module: '', score: '', commit: '', change: '',
     noteSummary: '', note: '', diffSummary: '', diff: '', checkSummary: '', stdout: '', stderr: '',
+    proposalMaterialSummary: '', proposalMaterial: '', proposalResponseSummary: '', proposalResponse: '',
   })
   for (const candidate of candidates) {
     const view = evolutionCandidateView(candidate)
@@ -118,6 +123,14 @@ function evolutionRowList(candidates: Candidate[]): EvolutionRow[] {
     check.stdout = view.checkOutput?.stdout ?? '検査出力の記録はありません'
     check.stderr = view.checkOutput?.stderr ?? '検査出力の記録はありません'
     rows.push(check)
+    const material = base(view.id, 'material')
+    material.proposalMaterialSummary = view.proposalMaterial === null ? '記録なし' : '提案材料を表示'
+    material.proposalMaterial = view.proposalMaterial ?? '記録なし'
+    rows.push(material)
+    const response = base(view.id, 'response')
+    response.proposalResponseSummary = view.proposalResponse === null ? '記録なし' : '提案役の応答を表示'
+    response.proposalResponse = view.proposalResponse ?? '記録なし'
+    rows.push(response)
   }
   return rows
 }
@@ -442,6 +455,12 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                       <summary>{row.checkSummary}</summary>
                       <strong>標準出力</strong><pre>{row.stdout}</pre>
                       <strong>標準エラー</strong><pre>{row.stderr}</pre>
+                    </details>
+                    <details class="evolution-detail material-detail">
+                      <summary>{`提案材料: ${row.proposalMaterialSummary}`}</summary><pre>{row.proposalMaterial}</pre>
+                    </details>
+                    <details class="evolution-detail response-detail">
+                      <summary>{`提案役の応答: ${row.proposalResponseSummary}`}</summary><pre>{row.proposalResponse}</pre>
                     </details>
                   </div>
                 ))}

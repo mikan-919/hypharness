@@ -40,5 +40,7 @@ export function evolutionCandidateView(candidate: Candidate) {
       typeof candidate.checkOutput.stderr === 'string'
         ? candidate.checkOutput
         : null,
+    proposalMaterial: typeof candidate.proposalMaterial === 'string' ? candidate.proposalMaterial : null,
+    proposalResponse: typeof candidate.proposalResponse === 'string' ? candidate.proposalResponse : null,
   }
 }

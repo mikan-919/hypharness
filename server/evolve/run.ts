@@ -60,7 +60,7 @@ const nextRound = (root: string) => {
   return rounds.length === 0 ? 1 : Math.max(...rounds) + 1
 }
 
-// 提案の材料に入れる候補の形。holdout が未測定のときは入れない
+// 提案に渡す候補の形。holdout が未測定のときは入れない
 const candidateMaterial = (c: Candidate) => ({
   id: c.id,
   module: c.module,
@@ -175,15 +175,20 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
     (async (input: ProposeInput): Promise<Proposal> => {
       log('text', `${input.module} の変更案を作っている`)
       const material = { ...proposeMaterial(input, root), ...moduleMaterial(harness, input.module) }
+      const materialText = JSON.stringify(material)
       try {
         if (!stream) throw new Error('モデルの呼び出し先を作れませんでした')
-        const answer = await askModel(stream, JSON.stringify(material), systemPrompt(input.maxChanges))
+        const answer = await askModel(stream, materialText, systemPrompt(input.maxChanges))
         cost += answer.costUsd
         const proposal = readProposal(answer.text)
         log('text', `${input.module} の変更案: ${proposal.changes.join(' / ') || proposal.note}`)
-        return proposal
+        return { ...proposal, proposalMaterial: materialText, proposalResponse: answer.text }
       } catch (e) {
-        return { changes: [], note: `モデルの呼び出しに失敗しました: ${(e as Error).message}` }
+        return {
+          changes: [],
+          note: `モデルの呼び出しに失敗しました: ${(e as Error).message}`,
+          ...(stream ? { proposalMaterial: materialText } : {}),
+        }
       }
     })
 
@@ -244,4 +249,3 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
   report('done', final.candidates, total)
   return final
 }
-
