@@ -137,3 +137,21 @@ test('課題ごとに、呼び出しの回数・トークン数・最大の文�
   await send(2)
   expect(seen.at(-1)).toEqual(['t2', { calls: 3, input: 30, cacheRead: 6, output: 9, maxPrompt: 12, edits: 1, rebuilds: 1, costUsd: 0.04 }])
 })
+
+test('同じ論点と課題の呼び出しには同じ会話の id を、別の課題には別の id を渡す', async () => {
+  const sessions: (string | undefined)[] = []
+  const relay = createRelay(async function* (_context, sessionId) {
+    sessions.push(sessionId)
+    yield { type: 'done', reason: 'stop', message: message(1, 0) } as AssistantMessageEvent
+  }, 1)
+  const send = (taskId: string) =>
+    relay
+      .handle(new Request('http://relay/', { method: 'POST', body: JSON.stringify({ topicId: 'solve', taskId, context: { messages: [] } }) }))
+      .then((r) => r.text())
+  await send('t1')
+  await send('t1')
+  await send('t2')
+  expect(sessions[0]).toMatch(/^hypharness-\w+-solve-t1$/)
+  expect(sessions[1]).toBe(sessions[0])
+  expect(sessions[2]).not.toBe(sessions[0])
+})

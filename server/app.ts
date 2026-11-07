@@ -6,7 +6,7 @@ import { streamSSE } from 'hono/streaming'
 import { createFileRouter } from 'irisout/hono'
 import { startDialog } from './dialog.ts'
 import { serveHost } from './host.ts'
-import { deepinfra } from './model.ts'
+import { model } from './model.ts'
 import { holdUnfinished, runPipeline } from './pipeline.ts'
 import { createRelay } from './relay.ts'
 import { createStore } from './store.ts'
@@ -28,7 +28,7 @@ const REPO = process.env.TARGET_REPO ?? process.cwd()
 // 開発サーバーは server/app.ts が変わるたびに同じプロセスでこのファイルを読み直す。
 // 中継・対話の状態・論点エージェントが二重にならないよう、プロセスに1つだけ置く
 const shared = ((globalThis as any).__hypharness ??= {
-  relay: createRelay(deepinfra(), Number(process.env.TASK_LIMIT_USD ?? 1), (taskId, usage) => {
+  relay: createRelay(model(), Number(process.env.TASK_LIMIT_USD ?? 1), (taskId, usage) => {
     // 分解役の呼び出しは課題を足す前に来る。課題が足された後の呼び出しで、それまでの分もまとめて入る
     if (shared.store.snapshot().tasks.some((t) => t.id === taskId)) shared.store.setTask(taskId, { usage })
   }),

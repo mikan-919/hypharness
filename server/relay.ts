@@ -3,7 +3,8 @@
 import type { AssistantMessageEvent, Context } from '@earendil-works/pi-ai'
 import type { TaskUsage, Usage } from '../shared/dialog.ts'
 
-export type Stream = (context: Context) => AsyncIterable<AssistantMessageEvent>
+// sessionId は会話ごとに固定した値。OpenCode Go は x-opencode-session として受け取り、経路とキャッシュに使う（ADR 0044）
+export type Stream = (context: Context, sessionId?: string) => AsyncIterable<AssistantMessageEvent>
 export type Call = { topicId: string; taskId: string; context: Context }
 export type Cost = { topicId?: string; taskId: string; costUsd: number }
 
@@ -26,6 +27,8 @@ export function createRelay(stream: Stream, limitUsd: number, onTask?: (taskId: 
   const tasks = new Map<string, TaskUsage>()
   // エージェントと課題ごとの、前の呼び出しの会話の件数。減ったら作り直したと数える
   const lengths = new Map<string, number>()
+  // 会話の id の接頭辞。起動ごとに変え、別の起動の同じ課題 id と混ざらないようにする
+  const run = crypto.randomUUID().slice(0, 8)
   // 論点ごとの、終わった呼び出しの実際の数の合計と、実行中の呼び出しの出力の見積もり
   const confirmed = new Map<string, Usage>()
   const inflight = new Map<object, { topicId: string; output: number }>()
@@ -67,7 +70,7 @@ export function createRelay(stream: Stream, limitUsd: number, onTask?: (taskId: 
     const rebuilt = context.messages.length < (lengths.get(key) ?? 0)
     lengths.set(key, context.messages.length)
     try {
-      for await (const event of stream(context)) {
+      for await (const event of stream(context, `hypharness-${run}-${topicId}-${taskId}`)) {
         if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') {
           live.output += estimate(event.delta)
           publish()

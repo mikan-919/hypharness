@@ -6,7 +6,7 @@ import type { Call } from '../../harness/topic.ts'
 import type { AgentStore } from '../../shared/contract.ts'
 import type { Dialog, Task } from '../../shared/dialog.ts'
 import { MODULE_SUMMARY, type Candidate, type Module } from '../../shared/evolve.ts'
-import { deepinfra } from '../model.ts'
+import { model } from '../model.ts'
 import { BRANCH } from '../pipeline.ts'
 import type { Stream } from '../relay.ts'
 import { createStore } from '../store.ts'
@@ -122,7 +122,7 @@ const systemPrompt = (maxChanges: number) => `${SYSTEM}
 - 失敗した変更（failed）を繰り返さない。
 - 変更は指定の個数までにする。個数は ${maxChanges} 個。`
 
-async function askModel(stream: ReturnType<typeof deepinfra>, user: string, system: string) {
+async function askModel(stream: Stream, user: string, system: string) {
   const messages: Message[] = [{ role: 'user', content: user, timestamp: Date.now() }]
   let answer: AssistantMessage | undefined
   for await (const event of stream({ systemPrompt: system, messages, tools: [] })) {
@@ -166,7 +166,7 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
   }
 
   let cost = 0
-  const stream = options.stream ?? (options.propose && options.check ? undefined : deepinfra())
+  const stream = options.stream ?? (options.propose && options.check ? undefined : model())
 
   const log = options.log ?? (() => {})
   const harness = options.harness ?? join(import.meta.dir, '..', '..')
