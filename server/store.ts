@@ -32,7 +32,10 @@ const MAX_ACTIVITY = 200
 function load(file: string | undefined): Saved {
   try {
     const saved = JSON.parse(readFileSync(file ?? '', 'utf8'))
-    return { dialog: { ...EMPTY, ...saved.dialog }, transcripts: saved.transcripts, seen: saved.seen ?? {} }
+    const dialog = { ...EMPTY, ...saved.dialog }
+    // 欄が増える前に保存した課題には、増えた欄が無い。画面が値を前提にするため、空の値で埋める
+    dialog.tasks = dialog.tasks.map((t: Task) => ({ reason: '', spent: 0, diff: '', ...t }))
+    return { dialog, transcripts: saved.transcripts, seen: saved.seen ?? {} }
   } catch {
     return { dialog: { ...EMPTY }, transcripts: {}, seen: {} }
   }

@@ -1,4 +1,7 @@
 import { expect, test } from 'bun:test'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Candidate } from '../shared/evolve.ts'
 import { createStore } from './store.ts'
 
@@ -42,4 +45,10 @@ test('setEvolution は今の値に重ねて保存し、subscribe の購読者に
     candidates: [candidate],
   })
   expect(seen).toHaveLength(2)
+})
+
+test('欄が増える前に保存した課題は、増えた欄を空の値で埋めて読む', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'hyph-old-')), 'dialog.json')
+  writeFileSync(file, JSON.stringify({ dialog: { tasks: [{ id: 't1', statement: '課題', state: 'committed', attempts: 1, commit: 'abc' }] }, transcripts: {} }))
+  expect(createStore(file).snapshot().tasks[0]).toMatchObject({ reason: '', spent: 0, diff: '' })
 })
