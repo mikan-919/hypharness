@@ -29,14 +29,19 @@ export const relayCall =
     let text = ''
     let last: any = {}
     const decoder = new TextDecoder()
-    for await (const bytes of response.body as unknown as AsyncIterable<Uint8Array>) {
-      const chunk = decoder.decode(bytes, { stream: true })
-      const lines = (buffer + chunk).split('\n')
-      buffer = lines.pop() ?? ''
-      for (const line of lines.filter(Boolean)) {
-        last = JSON.parse(line)
-        if (last.type === 'text_delta' || last.type === 'thinking_delta') onText?.(body.topicId, (text += last.delta))
+    try {
+      for await (const bytes of response.body as unknown as AsyncIterable<Uint8Array>) {
+        const chunk = decoder.decode(bytes, { stream: true })
+        const lines = (buffer + chunk).split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines.filter(Boolean)) {
+          last = JSON.parse(line)
+          if (last.type === 'text_delta' || last.type === 'thinking_delta') onText?.(body.topicId, (text += last.delta))
+        }
       }
+    } finally {
+      // 応答が終わったか切れたら、書いている途中の文を消す。続く活動の記録か、何も書いていない状態にする
+      if (text) onText?.(body.topicId, '')
     }
     if (buffer.trim()) last = JSON.parse(buffer)
     if (last.type === 'error') throw new Error(last.error.errorMessage ?? 'モデルの呼び出しに失敗しました')

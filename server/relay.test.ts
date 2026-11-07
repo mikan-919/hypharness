@@ -174,3 +174,16 @@ test('総利用トークン数は、呼び出しごとの文脈の全体（キ�
   const u = relay.totals().solve
   expect(u.input + u.cacheRead + u.cacheWrite + u.output).toBe(30)
 })
+
+test('応答が終わったら、書いている途中の文を消す', async () => {
+  const writing = async function* (): AsyncIterable<AssistantMessageEvent> {
+    yield { type: 'text_delta', delta: '考えている' } as AssistantMessageEvent
+    yield { type: 'done', reason: 'stop', message: message(3, 0.001) }
+  }
+  const socket = join(mkdtempSync(join(tmpdir(), 'hyph-relay-')), 'relay.sock')
+  const server = createRelay(writing, 1).listen(socket)
+  const seen: string[] = []
+  await relayCall(socket, (_, text) => seen.push(text))({ topicId: 'goal', taskId: 't1', context: { messages: [] } })
+  server.stop(true)
+  expect(seen).toEqual(['考えている', ''])
+})

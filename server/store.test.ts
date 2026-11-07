@@ -52,3 +52,9 @@ test('欄が増える前に保存した課題は、増えた欄を空の値で�
   writeFileSync(file, JSON.stringify({ dialog: { tasks: [{ id: 't1', statement: '課題', state: 'committed', attempts: 1, commit: 'abc' }] }, transcripts: {} }))
   expect(createStore(file).snapshot().tasks[0]).toMatchObject({ reason: '', spent: 0, diff: '' })
 })
+
+test('前の起動で書いていた途中の文は読み込まない', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'hyph-old-')), 'dialog.json')
+  writeFileSync(file, JSON.stringify({ dialog: { live: { goal: '**Reviewing**' } }, transcripts: {} }))
+  expect(createStore(file).snapshot().live).toEqual({})
+})
