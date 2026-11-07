@@ -152,7 +152,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .edit p { margin: 2px 0; }
 .edit-head { display: flex; gap: 8px; align-items: center; }
 .edit-head button { margin-left: auto; padding: 2px 8px; font-size: 12px; }
-.diff { margin: 4px 0 0; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; color: var(--muted); max-height: 160px; overflow: auto; }
+.diff { margin: 4px 0 0; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; color: var(--muted); }
 .tasks { margin-bottom: 16px; }
 .task { border-left: 3px solid var(--line); padding: 4px 8px; margin-bottom: 6px; }
 .task .state { margin-left: 8px; font-size: 12px; color: var(--muted); }

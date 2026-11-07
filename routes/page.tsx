@@ -259,7 +259,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
 
         <aside class="context">
           <div class="totals">
-            <span>{`${totalCost()}`}</span>
+            <span>{`$${totalCost()}`}</span>
             <span>{`出力 ${totalOutput()} トークン`}</span>
           </div>
           <div class="tabs">
