@@ -1,5 +1,8 @@
 import { expect, test } from 'bun:test'
-import { opencodeGo, opendesign } from './model.ts'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { codex, opencodeGo, opendesign } from './model.ts'
 
 test('OpenCode Go には、自分の User-Agent と会話ごとの x-opencode-session を付けて送る', async () => {
   const seen: { url: string; headers: Headers; body: any }[] = []
@@ -54,4 +57,14 @@ test('OpenDesign は、接続先かモデルが無ければ起動の時点で止
   } finally {
     process.env.OPENDESIGN_BASE_URL = saved
   }
+})
+
+test('Codex にサインインしていなければ、サインインの手順を書いた誤りにする', async () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'hyph-auth-')), 'auth.json')
+  const stream = codex('gpt-6-luna', file)
+  const error = await (async () => {
+    for await (const _ of stream({ messages: [{ role: 'user', content: 'こんにちは', timestamp: 0 }] }, 's')) {
+    }
+  })().catch((e: Error) => e)
+  expect(String(error)).toContain('pi-ai login openai')
 })

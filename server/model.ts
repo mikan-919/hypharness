@@ -1,6 +1,11 @@
+import { chmod, rename } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import type { Credential, CredentialStore } from '@earendil-works/pi-ai'
 import { envApiKeyAuth } from '@earendil-works/pi-ai'
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import { createModels, createProvider } from '@earendil-works/pi-ai/models'
+import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
 import { opencodeGoProvider } from '@earendil-works/pi-ai/providers/opencode-go'
 import type { Stream } from './relay.ts'
 
@@ -12,10 +17,72 @@ export const USER_AGENT = 'hypharness/0.1'
 // 1回の応答の出力の上限。OpenCode Go の目録の 384,000 のまま送ると予約が大きすぎる
 const MAX_TOKENS = 32_768
 
-// PROVIDER で提供元を選ぶ。deepinfra（既定）、opencode-go、opendesign
+// PROVIDER で提供元を選ぶ。deepinfra（既定）、opencode-go、opendesign、codex
 export function model(): Stream {
   const provider = process.env.PROVIDER
-  return provider === 'opencode-go' ? opencodeGo() : provider === 'opendesign' ? opendesign() : deepinfra()
+  return provider === 'opencode-go'
+    ? opencodeGo()
+    : provider === 'opendesign'
+      ? opendesign()
+      : provider === 'codex'
+        ? codex()
+        : deepinfra()
+}
+
+// サインインの情報の置き場。~/.hyph で bunx @earendil-works/pi-ai login openai を実行すると、ここに書かれる
+export const AUTH_FILE = join(homedir(), '.hyph', 'auth.json')
+
+// Codex（ADR 0046）。ChatGPT のサブスクリプションでサインインした OpenAI を、Responses API で呼ぶ。
+// モデルは CODEX_MODEL（既定 gpt-6-luna）。sessionId は OpenAI のプロンプトのキャッシュの鍵になる
+export function codex(id = process.env.CODEX_MODEL || 'gpt-6-luna', file = AUTH_FILE): Stream {
+  const models = createModels({ credentials: fileStore(file) })
+  models.setProvider(openaiProvider())
+  const chosen = models.getModel('openai', id)
+  if (!chosen) throw new Error(`OpenAI に ${id} のモデルがありません`)
+  const reasoning = process.env.REASONING
+  return async function* (context, sessionId) {
+    if (!(await models.getAuth('openai'))) {
+      throw new Error(`Codex にサインインしていません。~/.hyph で bunx @earendil-works/pi-ai login openai を実行してください`)
+    }
+    yield* models.stream(chosen, context, {
+      ...(reasoning && { reasoningEffort: reasoning }),
+      sessionId,
+      identity: { userAgent: { custom: USER_AGENT } },
+    } as never)
+  }
+}
+
+// サインインの情報をファイルに置く。refresh token は更新のたびに入れ替わるため、書き込みを直列にして古い値で上書きしない
+function fileStore(path: string): CredentialStore {
+  let queue: Promise<unknown> = Promise.resolve()
+  const load = async (): Promise<Record<string, Credential>> => ((await Bun.file(path).exists()) ? Bun.file(path).json() : {})
+  const serial = <T>(task: () => Promise<T>) => {
+    const result = queue.then(task)
+    queue = result.catch(() => {})
+    return result
+  }
+  const write = async (value: unknown) => {
+    const temporary = `${path}.tmp`
+    await Bun.write(temporary, JSON.stringify(value, null, 2))
+    await chmod(temporary, 0o600)
+    await rename(temporary, path)
+  }
+  return {
+    read: async (providerId) => (await load())[providerId],
+    list: async () => Object.entries(await load()).map(([providerId, credential]) => ({ providerId, type: credential.type })),
+    modify: (providerId, fn) =>
+      serial(async () => {
+        const all = await load()
+        const next = await fn(all[providerId])
+        if (next !== undefined) await write({ ...all, [providerId]: next })
+        return next ?? all[providerId]
+      }),
+    delete: (providerId) =>
+      serial(async () => {
+        const { [providerId]: _, ...rest } = await load()
+        await write(rest)
+      }),
+  }
 }
 
 // OpenDesign の API（ADR 0045）。OpenAI Chat Completions の形で呼ぶ。
