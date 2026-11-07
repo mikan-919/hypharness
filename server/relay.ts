@@ -1,6 +1,6 @@
 // モデルの呼び出しの中継（固定部、ADR 0014）。ハーネスはこの Unix ソケットからだけモデルを呼ぶ。
 // 費用の記録・課題1つあたりの上限・停止（ADR 0011、0012）と、トークン数の配信（ADR 0016）を持つ
-import type { AssistantMessageEvent, Context } from '@earendil-works/pi-ai'
+import { type AssistantMessageEvent, type Context, isRetryableAssistantError } from '@earendil-works/pi-ai'
 import type { TaskUsage, Usage } from '../shared/dialog.ts'
 
 // sessionId は会話ごとに固定した値。OpenCode Go は x-opencode-session として受け取り、経路とキャッシュに使う（ADR 0044）
@@ -17,6 +17,10 @@ const estimate = (text: string) => {
 }
 
 const HEARTBEAT_MS = 5_000
+
+// 一時的な誤りで呼び直す回数と、最初の待ち時間（回ごとに倍にする）
+const RETRIES = 3
+const RETRY_MS = 2_000
 
 const zero = (topicId: string): Usage => ({ topicId, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 })
 
@@ -65,48 +69,58 @@ export function createRelay(stream: Stream, limitUsd: number, onTask?: (taskId: 
 
   async function* call({ topicId, taskId, context }: Call) {
     const live = { topicId, output: 0 }
-    inflight.set(live, live)
     const key = `${topicId}/${taskId}`
-    const rebuilt = context.messages.length < (lengths.get(key) ?? 0)
+    let rebuilt = context.messages.length < (lengths.get(key) ?? 0)
     lengths.set(key, context.messages.length)
     try {
-      for await (const event of stream(context, `hypharness-${run}-${topicId}-${taskId}`)) {
-        if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') {
-          live.output += estimate(event.delta)
-          publish()
-        }
-        if (event.type === 'done' || event.type === 'error') {
-          const { usage } = event.type === 'done' ? event.message : event.error
-          const sum = confirmed.get(topicId) ?? zero(topicId)
-          confirmed.set(topicId, {
-            topicId,
-            input: sum.input + usage.input,
-            output: sum.output + usage.output,
-            cacheRead: sum.cacheRead + usage.cacheRead,
-            cacheWrite: sum.cacheWrite + usage.cacheWrite,
-            costUsd: sum.costUsd + usage.cost.total,
-          })
-          inflight.delete(live)
-          publish()
-          const total = (spent.get(taskId) ?? 0) + usage.cost.total
-          spent.set(taskId, total)
-          if (total >= limitUsd) halted = `課題 ${taskId} が費用の上限 ${limitUsd} に達しました`
-          const record = tasks.get(taskId) ?? { calls: 0, input: 0, cacheRead: 0, output: 0, maxPrompt: 0, edits: 0, rebuilds: 0, costUsd: 0 }
-          const content = event.type === 'done' ? event.message.content : []
-          const next = {
-            calls: record.calls + 1,
-            input: record.input + usage.input,
-            cacheRead: record.cacheRead + usage.cacheRead,
-            output: record.output + usage.output,
-            maxPrompt: Math.max(record.maxPrompt, usage.input + usage.cacheRead + usage.cacheWrite),
-            edits: record.edits + content.filter((c) => c.type === 'toolCall' && c.name === 'edit_context').length,
-            rebuilds: record.rebuilds + (rebuilt ? 1 : 0),
-            costUsd: record.costUsd + usage.cost.total,
+      for (let retry = 0; ; retry++) {
+        let again = false
+        inflight.set(live, live)
+        live.output = 0
+        for await (const event of stream(context, `hypharness-${run}-${topicId}-${taskId}`)) {
+          if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') {
+            live.output += estimate(event.delta)
+            publish()
           }
-          tasks.set(taskId, next)
-          onTask?.(taskId, next)
+          if (event.type === 'done' || event.type === 'error') {
+            const { usage } = event.type === 'done' ? event.message : event.error
+            const sum = confirmed.get(topicId) ?? zero(topicId)
+            confirmed.set(topicId, {
+              topicId,
+              input: sum.input + usage.input,
+              output: sum.output + usage.output,
+              cacheRead: sum.cacheRead + usage.cacheRead,
+              cacheWrite: sum.cacheWrite + usage.cacheWrite,
+              costUsd: sum.costUsd + usage.cost.total,
+            })
+            inflight.delete(live)
+            publish()
+            const total = (spent.get(taskId) ?? 0) + usage.cost.total
+            spent.set(taskId, total)
+            if (total >= limitUsd) halted = `課題 ${taskId} が費用の上限 ${limitUsd} に達しました`
+            const record = tasks.get(taskId) ?? { calls: 0, input: 0, cacheRead: 0, output: 0, maxPrompt: 0, edits: 0, rebuilds: 0, costUsd: 0 }
+            const content = event.type === 'done' ? event.message.content : []
+            const next = {
+              calls: record.calls + 1,
+              input: record.input + usage.input,
+              cacheRead: record.cacheRead + usage.cacheRead,
+              output: record.output + usage.output,
+              maxPrompt: Math.max(record.maxPrompt, usage.input + usage.cacheRead + usage.cacheWrite),
+              edits: record.edits + content.filter((c) => c.type === 'toolCall' && c.name === 'edit_context').length,
+              rebuilds: record.rebuilds + (rebuilt ? 1 : 0),
+              costUsd: record.costUsd + usage.cost.total,
+            }
+            tasks.set(taskId, next)
+            onTask?.(taskId, next)
+            // 一時的な誤り（応答の途中で接続が切れたなど）は、呼び出し元に返さずに呼び直す。費用は使った分を数える
+            again = event.type === 'error' && retry < RETRIES && !halted && isRetryableAssistantError(event.error)
+            if (again) break
+          }
+          yield event
         }
-        yield event
+        if (!again) return
+        rebuilt = false
+        await Bun.sleep(RETRY_MS * 2 ** retry)
       }
     } finally {
       // 途中で切れた呼び出しの見積もりは合計から外す

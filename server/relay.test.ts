@@ -187,3 +187,21 @@ test('応答が終わったら、書いている途中の文を消す', async ()
   server.stop(true)
   expect(seen).toEqual(['考えている', ''])
 })
+
+test('応答の途中で接続が切れたら、呼び出し元に誤りを返さずに呼び直す', async () => {
+  let calls = 0
+  const flaky = async function* (): AsyncIterable<AssistantMessageEvent> {
+    calls++
+    if (calls === 1) {
+      const error = { ...message(0, 0.001), stopReason: 'error', errorMessage: 'OpenAI Responses stream ended before a terminal response event' }
+      yield { type: 'error', reason: 'error', error } as unknown as AssistantMessageEvent
+      return
+    }
+    yield { type: 'done', reason: 'stop', message: message(5, 0.002) }
+  }
+  const relay = createRelay(flaky, 1)
+  const lines = (await (await post(relay, 't1')).text()).trim().split('\n').map((line) => JSON.parse(line))
+  expect(calls).toBe(2)
+  expect(lines.map((event) => event.type)).toEqual(['done'])
+  expect(relay.spent('t1')).toBeCloseTo(0.003)
+}, 10_000)
