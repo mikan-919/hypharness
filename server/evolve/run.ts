@@ -1,4 +1,4 @@
-// 自己改良を1周だけ回す入口（最終目的の 6 の 10）。弱点・提案・検証・採用を実物でつなぐ
+// 自己改良の1周（最終目的の 6）。弱点・提案・検証・採用を実物でつなぐ。別の命令にはしない（ADR 0002）
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
@@ -174,24 +174,3 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
   return { ...result, spent: spent() }
 }
 
-if (import.meta.main) {
-  try {
-    process.loadEnvFile('.env')
-  } catch {}
-  if (!process.env.DEEPINFRA_API_KEY) {
-    console.log('DEEPINFRA_API_KEY が無いため、モデルを呼べません。')
-  } else {
-    try {
-      const result = await runEvolve()
-      console.log(`周: ${result.round}`)
-      console.log(`出発点: ${result.start?.id ?? 'なし'}`)
-      for (const c of result.candidates) {
-        console.log(`候補: ${c.id} ${c.module} score ${c.score} holdout ${c.holdout ?? '未測定'}`)
-      }
-      console.log(`stopped: ${result.stopped}`)
-      console.log(`費用: ${result.spent}`)
-    } catch (e) {
-      console.log(`改良の1周に失敗しました: ${(e as Error).message}`)
-    }
-  }
-}
