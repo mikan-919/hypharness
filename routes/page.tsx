@@ -42,9 +42,10 @@ function headline(text: string) {
   return first.length > 80 ? `${first.slice(0, 80)}…` : first
 }
 
-// 総利用トークン数。入力（キャッシュから読んだ分を含む）と出力の合計。出力はストリーミング中の見積もりを含む
+// 総利用トークン数。呼び出しごとに、渡した文脈の全体（キャッシュの読み書きを含む入力）と出力を足していく。
+// 文脈が 10 の呼び出しの後に 20 の呼び出しがあれば 30（と出力）になる。出力はストリーミング中の見積もりを含む
 function totalTokens(u: Usage | undefined) {
-  return u ? u.input + u.cacheRead + u.output : 0
+  return u ? u.input + u.cacheRead + (u.cacheWrite ?? 0) + u.output : 0
 }
 
 // 動きの時刻（時:分:秒）

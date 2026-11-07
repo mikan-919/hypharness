@@ -18,7 +18,7 @@ const estimate = (text: string) => {
 
 const HEARTBEAT_MS = 5_000
 
-const zero = (topicId: string): Usage => ({ topicId, input: 0, output: 0, cacheRead: 0, costUsd: 0 })
+const zero = (topicId: string): Usage => ({ topicId, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 })
 
 // onTask には、呼び出しが終わるたびに、その課題のそれまでの記録を渡す
 export function createRelay(stream: Stream, limitUsd: number, onTask?: (taskId: string, usage: TaskUsage) => void) {
@@ -83,6 +83,7 @@ export function createRelay(stream: Stream, limitUsd: number, onTask?: (taskId: 
             input: sum.input + usage.input,
             output: sum.output + usage.output,
             cacheRead: sum.cacheRead + usage.cacheRead,
+            cacheWrite: sum.cacheWrite + usage.cacheWrite,
             costUsd: sum.costUsd + usage.cost.total,
           })
           inflight.delete(live)

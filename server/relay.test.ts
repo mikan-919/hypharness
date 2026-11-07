@@ -155,3 +155,22 @@ test('同じ論点と課題の呼び出しには同じ会話の id を、別の�
   expect(sessions[1]).toBe(sessions[0])
   expect(sessions[2]).not.toBe(sessions[0])
 })
+
+test('総利用トークン数は、呼び出しごとの文脈の全体（キャッシュを含む）を足していく', async () => {
+  const usages = [
+    { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 },
+    // 2回目は前の 10 をキャッシュから読み、新しい 10 のうち 2 を書き込む
+    { input: 8, output: 0, cacheRead: 10, cacheWrite: 2 },
+  ]
+  const relay = createRelay(async function* () {
+    const usage = { ...usages.shift()!, cost: { total: 0 } }
+    yield { type: 'done', reason: 'stop', message: { ...message(0, 0), usage } } as unknown as AssistantMessageEvent
+  }, 1)
+  for (let i = 0; i < 2; i++) {
+    await relay
+      .handle(new Request('http://relay/', { method: 'POST', body: JSON.stringify({ topicId: 'solve', taskId: 't1', context: { messages: [] } }) }))
+      .then((r) => r.text())
+  }
+  const u = relay.totals().solve
+  expect(u.input + u.cacheRead + u.cacheWrite + u.output).toBe(30)
+})

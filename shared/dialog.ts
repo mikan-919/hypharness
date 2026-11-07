@@ -137,5 +137,6 @@ export type Usage = {
   input: number
   output: number
   cacheRead: number
+  cacheWrite: number
   costUsd: number
 }
