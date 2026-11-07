@@ -130,6 +130,9 @@ button:disabled { opacity: 0.5; cursor: default; }
 .goal .editor { height: 40vh; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; }
 .goal button[type=submit] { justify-self: end; background: var(--accent); color: #fff; border-color: var(--accent); }
 .conflict { display: flex; gap: 8px; align-items: center; color: var(--wait); margin: 0; }
+.finished { color: var(--done); margin: 0; }
+.task-usage { border-top: 1px solid var(--line); padding: 6px 0; }
+.task-usage p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
 .question h2 { font-size: 15px; color: var(--ink); letter-spacing: 0; margin: 0 0 8px; }
 .edit { border-left: 3px solid var(--line); padding: 4px 8px; margin-bottom: 8px; }
 .edit.user { border-color: var(--wait); }

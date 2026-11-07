@@ -1,7 +1,7 @@
 // モデルの呼び出しの中継（固定部、ADR 0014）。ハーネスはこの Unix ソケットからだけモデルを呼ぶ。
 // 費用の記録・課題1つあたりの上限・停止（ADR 0011、0012）と、トークン数の配信（ADR 0016）を持つ
 import type { AssistantMessageEvent, Context } from '@earendil-works/pi-ai'
-import type { Usage } from '../shared/dialog.ts'
+import type { TaskUsage, Usage } from '../shared/dialog.ts'
 
 export type Stream = (context: Context) => AsyncIterable<AssistantMessageEvent>
 export type Call = { topicId: string; taskId: string; context: Context }
@@ -19,8 +19,13 @@ const HEARTBEAT_MS = 5_000
 
 const zero = (topicId: string): Usage => ({ topicId, input: 0, output: 0, cacheRead: 0, costUsd: 0 })
 
-export function createRelay(stream: Stream, limitUsd: number) {
+// onTask には、呼び出しが終わるたびに、その課題のそれまでの記録を渡す
+export function createRelay(stream: Stream, limitUsd: number, onTask?: (taskId: string, usage: TaskUsage) => void) {
   const spent = new Map<string, number>()
+  // ponytail: 課題の記録は taskId だけで分ける。別のリポジトリで同じ id の課題を動かすと、サーバーを起動し直すまで足し合わさる
+  const tasks = new Map<string, TaskUsage>()
+  // エージェントと課題ごとの、前の呼び出しの会話の件数。減ったら作り直したと数える
+  const lengths = new Map<string, number>()
   // 論点ごとの、終わった呼び出しの実際の数の合計と、実行中の呼び出しの出力の見積もり
   const confirmed = new Map<string, Usage>()
   const inflight = new Map<object, { topicId: string; output: number }>()
@@ -58,6 +63,9 @@ export function createRelay(stream: Stream, limitUsd: number) {
   async function* call({ topicId, taskId, context }: Call) {
     const live = { topicId, output: 0 }
     inflight.set(live, live)
+    const key = `${topicId}/${taskId}`
+    const rebuilt = context.messages.length < (lengths.get(key) ?? 0)
+    lengths.set(key, context.messages.length)
     try {
       for await (const event of stream(context)) {
         if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') {
@@ -79,6 +87,20 @@ export function createRelay(stream: Stream, limitUsd: number) {
           const total = (spent.get(taskId) ?? 0) + usage.cost.total
           spent.set(taskId, total)
           if (total >= limitUsd) halted = `課題 ${taskId} が費用の上限 ${limitUsd} に達しました`
+          const record = tasks.get(taskId) ?? { calls: 0, input: 0, cacheRead: 0, output: 0, maxPrompt: 0, edits: 0, rebuilds: 0, costUsd: 0 }
+          const content = event.type === 'done' ? event.message.content : []
+          const next = {
+            calls: record.calls + 1,
+            input: record.input + usage.input,
+            cacheRead: record.cacheRead + usage.cacheRead,
+            output: record.output + usage.output,
+            maxPrompt: Math.max(record.maxPrompt, usage.input + usage.cacheRead + usage.cacheWrite),
+            edits: record.edits + content.filter((c) => c.type === 'toolCall' && c.name === 'edit_context').length,
+            rebuilds: record.rebuilds + (rebuilt ? 1 : 0),
+            costUsd: record.costUsd + usage.cost.total,
+          }
+          tasks.set(taskId, next)
+          onTask?.(taskId, next)
         }
         yield event
       }

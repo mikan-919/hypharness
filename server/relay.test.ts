@@ -111,3 +111,29 @@ test('費用の要求の形が違うときは断る', async () => {
   expect((await postCost(relay, { taskId: 't1', costUsd: '0.005' })).status).toBe(400)
   expect(relay.spent('t1')).toBe(0)
 })
+
+test('課題ごとに、呼び出しの回数・トークン数・最大の文脈・edit_context・作り直しを数える', async () => {
+  const edit = {
+    ...message(3, 0.02),
+    content: [{ type: 'toolCall', id: 'e', name: 'edit_context', arguments: { content: '要点' } }],
+  } as unknown as AssistantMessage
+  const replies = [message(3, 0.01), edit, message(3, 0.01)]
+  const relay = createRelay(async function* () {
+    yield { type: 'done', reason: 'stop', message: replies.shift()! } as AssistantMessageEvent
+  }, 1, (taskId, usage) => seen.push([taskId, usage]))
+  const seen: [string, unknown][] = []
+  const send = (count: number) =>
+    relay
+      .handle(
+        new Request('http://relay/', {
+          method: 'POST',
+          body: JSON.stringify({ topicId: 'solve', taskId: 't2', context: { messages: Array(count).fill({ role: 'user', content: 'x' }) } }),
+        }),
+      )
+      .then((r) => r.text())
+  await send(3)
+  await send(5)
+  // edit_context の後は、渡す会話が短くなる
+  await send(2)
+  expect(seen.at(-1)).toEqual(['t2', { calls: 3, input: 30, cacheRead: 6, output: 9, maxPrompt: 12, edits: 1, rebuilds: 1, costUsd: 0.04 }])
+})

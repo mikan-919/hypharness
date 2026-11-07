@@ -35,7 +35,7 @@ export type PipelineOptions = {
 
 // 統合ブランチに課題を積み続ける。finish か保留で終わる。止めた理由を store.halted に残す
 export async function runPipeline(store: Store, roles: Roles, repo: string, options: PipelineOptions) {
-  store.setRun({ started: true, halted: '', stopping: false })
+  store.setRun({ started: true, halted: '', stopping: false, finished: '' })
   try {
     if (!git(repo, 'branch', '--list', BRANCH)) git(repo, 'branch', BRANCH, 'HEAD')
     // 前の起動が途中で止まって残した作業ツリーを片付ける
@@ -53,7 +53,7 @@ export async function runPipeline(store: Store, roles: Roles, repo: string, opti
       const finished = await step(store, roles, repo, options)
       if (finished !== undefined) {
         store.act('decompose', 'commit', `最終目的を満たした: ${finished}`)
-        store.setRun({ started: false, halted: '' })
+        store.setRun({ started: false, halted: '', finished })
         return
       }
     }

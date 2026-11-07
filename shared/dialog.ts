@@ -72,6 +72,8 @@ export type Dialog = {
   halted: string
   // 利用者が止めるボタンを押した。今の課題を終えたら止める
   stopping: boolean
+  // 分解役が最終目的を満たしたと判断して流れを終えた理由。動き出したら空にする
+  finished: string
 }
 
 export type TaskState = 'solving' | 'checking' | 'committed' | 'held'
@@ -90,6 +92,22 @@ export type Task = {
   spent: number
   // 積んだコミットの差分。積んでいなければ空文字
   diff: string
+  // 中継が数えた、この課題のモデルの呼び出し（分解役と解答役）
+  usage?: TaskUsage
+}
+
+// 課題ごとのモデルの呼び出しの記録（ADR 0031 のしきい値を調整する材料）。
+// maxPrompt は1回の呼び出しでモデルに渡した文脈の最大のトークン数、edits は edit_context の呼び出しの回数、
+// rebuilds はモデルに渡す会話が前の呼び出しより短くなった回数（edit_context としきい値で縮めた分）
+export type TaskUsage = {
+  calls: number
+  input: number
+  cacheRead: number
+  output: number
+  maxPrompt: number
+  edits: number
+  rebuilds: number
+  costUsd: number
 }
 
 // エージェントの動き1つ分。agent は論点の id か 'decompose'・'solve'

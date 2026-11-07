@@ -47,6 +47,7 @@ const dialog = (over: Partial<Dialog> = {}): Dialog => ({
   live: {},
   halted: '',
   stopping: false,
+  finished: '',
   ...over,
 })
 

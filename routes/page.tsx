@@ -1,6 +1,6 @@
 import { derived, onMount, render, signal } from 'irisout'
 import { Layout } from './Layout.tsx'
-import type { Dialog, Usage } from '../shared/dialog.ts'
+import type { Dialog, TaskUsage, Usage } from '../shared/dialog.ts'
 import { mountMonaco } from 'hyph-monaco'
 
 const stateLabel = {
@@ -18,7 +18,14 @@ const agentLabel = { decompose: '分解役', solve: '解答役', host: '固定�
 
 const tabLabel = { context: '共有文脈', history: '書き換えの履歴', cost: '費用' }
 
-export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping }: Dialog) {
+// 課題ごとの記録の1行。キャッシュの割合は、入力のうちキャッシュから読んだ分
+function usageLine(u: TaskUsage | undefined) {
+  if (!u) return ''
+  const cached = u.input + u.cacheRead > 0 ? Math.round((u.cacheRead / (u.input + u.cacheRead)) * 100) : 0
+  return `呼び出し ${u.calls} 回・入力 ${u.input + u.cacheRead}（キャッシュ ${cached}%）・出力 ${u.output}・最大の文脈 ${u.maxPrompt}・edit_context ${u.edits} 回・作り直し ${u.rebuilds} 回・$${u.costUsd.toFixed(4)}`
+}
+
+export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping, finished }: Dialog) {
   const topicList = signal(topics)
   const items = signal(questions)
   const pending = signal(queue)
@@ -44,6 +51,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const activityList = signal(activity)
   const liveText = signal(live)
   const haltedReason = signal(halted)
+  const finishedReason = signal(finished)
   const isStopping = signal(stopping)
   const recent = derived(() => [...activityList()].reverse().slice(0, 60))
   const writing = derived(() =>
@@ -101,6 +109,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
 
         <main class="conversation">
           {haltedReason() && <p class="conflict">{`流れが止まりました: ${haltedReason()}`}</p>}
+          {finishedReason() && <p class="finished">{`最終目的を満たしたため、流れを終えました: ${finishedReason()}`}</p>}
           {failure() && <p class="conflict">{failure()}</p>}
           {taskList().length > 0 && (
             <section class="tasks">
@@ -255,6 +264,15 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                 <p class="big">{totalOutput()}</p>
                 <p>出力の合計（ストリーミング中）</p>
                 <p>${totalCost()}</p>
+                <h2>課題ごと</h2>
+                {taskList()
+                  .filter((task) => task.usage)
+                  .map((task) => (
+                    <div key={task.id} class="task-usage">
+                      <strong>{task.id}</strong>
+                      <p>{usageLine(task.usage)}</p>
+                    </div>
+                  ))}
               </section>
             )}
           </div>
@@ -303,6 +321,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
       activityList(next.activity)
       liveText(next.live)
       haltedReason(next.halted)
+      finishedReason(next.finished ?? '')
       isStopping(next.stopping)
       // 書きかけでなければ、他の書き手の書き換えをそのまま映す。書きかけなら入力中の本文を変えない。
       // 保存の応答を待つ間に届いた古い版は映さない（保存済みの版を巻き戻さない）
