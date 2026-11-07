@@ -12,11 +12,11 @@ const stateLabel = {
 
 const kindLabel = { fact: '事実', fail: '失敗', done: '完了' }
 
-const taskLabel = { solving: '解いている', checking: '検査中', committed: '統合ブランチに積んだ', held: '保留' }
+const taskLabel = { solving: '解いている', checking: '検査中', committed: '積んだ', held: '保留' }
 
 const agentLabel = { decompose: '分解役', solve: '解答役', host: '固定部', evolve: '自己改良' }
 
-const tabLabel = { tasks: '課題', activity: '活動', evolution: '進化', context: '共有文脈', history: '履歴' }
+const tabLabel = { activity: '活動', tasks: '課題', evolution: '進化', context: '共有文脈', history: '履歴' }
 
 // ループの段階。上から順に、今の段階を1つだけ強調する
 const stages = [
@@ -27,35 +27,50 @@ const stages = [
   { n: 5, label: '自己改良の1周' },
 ]
 
+const evolutionStageLabel = { proposing: '変更案を作っている', validating: '候補を検査している', done: '終えた' }
+
+// タブの見出しに件数を添える。
+// ponytail: irisout 0.3.7 は derived(() => ({ ... })) の括弧を落とすため、オブジェクトを返す derived を使わずに関数にする
+function tabTitle(name: keyof typeof tabLabel, tasks: number, entries: number, edits: number) {
+  const count = name === 'tasks' ? tasks : name === 'context' ? entries : name === 'history' ? edits : -1
+  return count < 0 ? tabLabel[name] : `${tabLabel[name]} ${count}`
+}
+
+// 長い理由の見出し。最初の文か、80 文字まで
+function headline(text: string) {
+  const first = text.split(/\n|。/)[0]
+  return first.length > 80 ? `${first.slice(0, 80)}…` : first
+}
+
+// 動きの時刻（時:分:秒）
+function clock(at: number) {
+  return new Date(at).toLocaleTimeString('ja-JP', { hour12: false })
+}
+
 // 自己改良の1周の補足。まだ始まっていなければ空
 function evolutionNote(e: Evolution | null) {
-  return e ? `第 ${e.round} 周（${e.stage}）` : ''
+  return e ? `第 ${e.round} 周・${evolutionStageLabel[e.stage]}` : ''
 }
 
 // 課題ごとの記録の1行。キャッシュの割合は、入力のうちキャッシュから読んだ分
 function usageLine(u: TaskUsage | undefined) {
   if (!u) return ''
   const cached = u.input + u.cacheRead > 0 ? Math.round((u.cacheRead / (u.input + u.cacheRead)) * 100) : 0
-  return `呼び出し ${u.calls} 回・入力 ${u.input + u.cacheRead}（キャッシュ ${cached}%）・出力 ${u.output}・最大の文脈 ${u.maxPrompt}・edit_context ${u.edits} 回・作り直し ${u.rebuilds} 回・$${u.costUsd.toFixed(4)}`
+  const n = (value: number) => value.toLocaleString('ja-JP')
+  return `呼び出し ${u.calls} 回・入力 ${n(u.input + u.cacheRead)}（キャッシュ ${cached}%）・出力 ${n(u.output)}・最大の文脈 ${n(u.maxPrompt)}・edit_context ${u.edits} 回・作り直し ${u.rebuilds} 回・$${u.costUsd.toFixed(4)}`
 }
 
 // 進化タブに並べる行。候補ごとの入れ子を避け、1段の並びにする
 function evolutionRowList(e: Evolution | null) {
   if (!e) return []
-  const rows: { key: string; text: string; kind: string }[] = [
-    { key: 'round', text: `第 ${e.round} 周`, kind: '' },
-    { key: 'summary', text: `段階 ${e.stage}・費用 $${e.spent.toFixed(4)}`, kind: 'hint' },
-  ]
+  const rows: { key: string; text: string; kind: string }[] = []
   for (const candidate of e.candidates) {
-    rows.push({ key: `${candidate.id}-id`, text: `# ${candidate.id}`, kind: 'candidate' })
-    rows.push({ key: `${candidate.id}-module`, text: candidate.module, kind: 'hint' })
+    const verdict = candidate.commit ? `積んだ ${candidate.commit.slice(0, 8)}` : candidate.score === 1 ? '検査に通った' : '採用しなかった'
+    rows.push({ key: `${candidate.id}-id`, text: `${candidate.id}・${candidate.module}・${verdict}`, kind: `candidate ${candidate.commit ? 'adopted' : 'rejected'}` })
     candidate.changes.forEach((change, i) => {
       rows.push({ key: `${candidate.id}-change-${i}`, text: change, kind: 'change' })
     })
-    rows.push({ key: `${candidate.id}-score`, text: `score ${candidate.score}`, kind: 'hint' })
     if (candidate.note) rows.push({ key: `${candidate.id}-note`, text: candidate.note, kind: 'note' })
-    if (candidate.commit)
-      rows.push({ key: `${candidate.id}-commit`, text: `コミット ${candidate.commit.slice(0, 8)}`, kind: 'hint' })
   }
   return rows
 }
@@ -67,7 +82,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const entryList = signal(entries)
   const editList = signal(edits)
   // 右列で選んでいるタブ。通知が届いても変えない
-  const tab = signal<keyof typeof tabLabel>('context')
+  const tab = signal<keyof typeof tabLabel>('activity')
   // 保存済みの本文と版。保存の要求にはこの版を渡す
   const savedText = signal(goal.text)
   const savedVersion = signal(goal.version)
@@ -90,6 +105,8 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const isStopping = signal(stopping)
   const evolutionNow = signal<Evolution | null>(evolution)
   const recent = derived(() => [...activityList()].reverse().slice(0, 60))
+  const newestTasks = derived(() => [...taskList()].reverse())
+  const newestEntries = derived(() => [...entryList()].reverse())
   const writing = derived(() =>
     Object.entries(liveText())
       .filter((entry) => entry[1])
@@ -100,28 +117,22 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const history = derived(() => [...editList()].reverse())
   const readyCount = derived(() => topicList().filter((t) => t.ready).length)
   const majority = derived(() => readyCount() * 2 > topicList().length)
+  const dirty = derived(() => draft() !== savedText())
+  // 自己改良の1周が動いているか
+  const evolving = derived(() => isStarted() && finishedReason() !== '' && evolutionNow() !== null && evolutionNow().stage !== 'done')
   // 今の段階の番号（1 始まり）。止まっていないときにだけ使う
   const stage = derived(() =>
-    !isStarted() ? (majority() ? 2 : 1) : !finishedReason() ? 3 : evolutionNow() ? 5 : 4,
+    evolving() ? 5 : isStarted() ? 3 : majority() ? 2 : 1,
   )
   // 今の段階の補足
   const stageNote = derived(() =>
     stage() === 1
       ? `開始可 ${readyCount()} / ${topicList().length}`
       : stage() === 2
-        ? '論点の過半数が開始可になった'
+        ? '押すと課題を進め始める'
         : stage() === 3
-          ? isStopping() ? '今の課題を終えたら止める' : '分解役と解答役が課題を進めている'
-          : stage() === 4
-            ? finishedReason()
-            : evolutionNote(evolutionNow()),
-  )
-  const startHint = derived(() =>
-    isStarted()
-      ? '分解役と解答役が課題を進めている'
-      : majority()
-        ? '過半数の論点が開始可になった。押すと課題を進め始める'
-        : '論点の過半数が開始可になると押せる',
+          ? isStopping() ? '今の課題を終えたら止める' : `課題 ${taskList().length} 件目まで進んだ`
+          : evolutionNote(evolutionNow()),
   )
   const evolutionRows = derived(() => evolutionRowList(evolutionNow()))
   const totalOutput = derived(() => Object.values(usage()).reduce((sum, u) => sum + u.output, 0))
@@ -130,66 +141,79 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
       .reduce((sum, u) => sum + u.costUsd, 0)
       .toFixed(4),
   )
+  const unanswered = derived(() => pending().length)
 
   render(
     <Layout title="hypharness">
       <div class="shell">
         <aside class="threads">
+          <div class="brand">hypharness</div>
           {haltedReason() !== '' && (
             <div class="stage halted">
               <span class="number">!</span>
-              <span class="name">止まり</span>
-              <span class="note">{haltedReason()}</span>
+              <span class="name">止まった</span>
+              <span class="note">{headline(haltedReason())}</span>
             </div>
           )}
           {haltedReason() === '' && (
-            <div class="stages">
+            <ol class="stages">
               {stages.map((s) => (
-                <div key={s.label} class={`stage ${stage() === s.n ? 'current' : ''}`}>
-                  <span class="number">{s.n}</span>
+                <li key={s.label} class={`stage ${stage() === s.n ? 'current' : stage() > s.n ? 'past' : ''}`}>
+                  <span class="number">{stage() > s.n ? '✓' : s.n}</span>
                   <span class="name">{s.label}</span>
                   <span class="note">{stage() === s.n ? stageNote() : ''}</span>
-                </div>
+                </li>
               ))}
-            </div>
+            </ol>
           )}
-          <h2>論点</h2>
-          {topicList().map((topic) => (
-            <div key={topic.id} class={`thread ${topic.state}`}>
-              <span class="avatar">{topic.title.slice(0, 1)}</span>
-              <span class="name">{topic.title}</span>
-              <span class="state">{stateLabel[topic.state]}</span>
-              <span class="tokens">{usage()[topic.id]?.output ?? 0}</span>
-            </div>
-          ))}
           <div class="start">
-            <p>
-              開始のツール {readyCount()} / {topicList().length}
-            </p>
-            <button type="button" disabled={isStarted() || !majority()} onClick={start}>
+            <button type="button" class="primary" disabled={isStarted() || !majority()} onClick={start}>
               {isStarted() ? '流れが動いている' : '開始の合図'}
             </button>
-            <p class="hint">{startHint()}</p>
             {isStarted() && (
               <button type="button" class="stop" disabled={isStopping()} onClick={stop}>
                 {isStopping() ? '今の課題を終えたら止める' : '止める'}
               </button>
             )}
+            <p class="hint">{`開始のツール ${readyCount()} / ${topicList().length}`}</p>
           </div>
+          <h2>論点</h2>
+          {topicList().map((topic) => (
+            <div key={topic.id} class={`thread ${topic.state}`}>
+              <span class="dot" />
+              <span class="name">{topic.title}</span>
+              <span class="state">{stateLabel[topic.state]}</span>
+              <span class="tokens">{`出力 ${usage()[topic.id]?.output ?? 0}`}</span>
+            </div>
+          ))}
         </aside>
 
         <main class="conversation">
-          {haltedReason() && <p class="conflict">{`流れが止まりました: ${haltedReason()}`}</p>}
-          {finishedReason() && <p class="finished">{`最終目的を満たしたため、流れを終えました: ${finishedReason()}`}</p>}
-          {failure() && <p class="conflict">{failure()}</p>}
-          <div class="goal-head">
-            <h1>FINAL_GOAL.md</h1>
-            <span class="hint">版 {savedVersion()}</span>
-          </div>
+          {haltedReason() && (
+            <details class="banner fail">
+              <summary>{`流れが止まった: ${headline(haltedReason())}`}</summary>
+              <p>{haltedReason()}</p>
+            </details>
+          )}
+          {finishedReason() && !haltedReason() && (
+            <details class="banner done">
+              <summary>{`前回の流れは最終目的を満たして終えた: ${headline(finishedReason())}`}</summary>
+              <p>{finishedReason()}</p>
+            </details>
+          )}
+          {failure() && <p class="banner fail">{failure()}</p>}
           <form class="goal" onSubmit={save}>
-            <div class="editor" />
-            {conflict() ? (
-              <p class="conflict">
+            <div class="goal-head">
+              <h1>FINAL_GOAL.md</h1>
+              <span class="hint">{`版 ${savedVersion()}`}</span>
+              {dirty() && <span class="badge wait">未保存</span>}
+              {saved() && !dirty() && <span class="badge done">{saved()}</span>}
+              <button type="submit" class="primary" disabled={sending() || !dirty() || conflict()}>
+                保存
+              </button>
+            </div>
+            {conflict() && (
+              <p class="banner fail">
                 保存の前に本文が書き換えられました。
                 <button type="button" onClick={loadLatest}>
                   最新を読み込む
@@ -198,24 +222,15 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                   このまま上書きする
                 </button>
               </p>
-            ) : (
-              <button type="submit" disabled={sending() || draft() === savedText()}>
-                保存
-              </button>
             )}
-            {saved() && <p class="hint">{saved()}</p>}
+            <div class="editor" />
           </form>
-          {items().length > 0 && (
-            <div class="queue">
-              {items().map((q) => (
-                <span key={q.id} class={`chip ${pending()[0] === q.id ? 'head' : ''} ${q.answer !== '' ? 'answered' : ''}`}>
-                  {q.id}
-                </span>
-              ))}
-            </div>
-          )}
           {head() && (
-            <article class="question head">
+            <article class="question">
+              <div class="question-head">
+                <span class="badge wait">質問</span>
+                {unanswered() > 1 && <span class="hint">{`ほかに ${unanswered() - 1} 件が待っている`}</span>}
+              </div>
               <h2>{head().text}</h2>
               <ul class="options">
                 {head().options.map((option) => (
@@ -236,31 +251,38 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                   </li>
                 ))}
               </ul>
-              <p class="recommendation">{head().recommendation}</p>
+              {head().recommendation && <p class="recommendation">{head().recommendation}</p>}
               <form class="reply" onSubmit={answer}>
                 <textarea
                   value={reply()}
                   onInput={updateReply}
                   placeholder={picked() ? '補足があれば書く' : '選択肢を選ぶか、答えを書く'}
                 />
-                <button type="submit" disabled={sending()}>
-                  {picked() ? `「${picked()}」で答える` : '書いた答えを送る'}
-                </button>
-                <p class="hint">
-                  {picked()
-                    ? '欄に書いた補足は、選んだ選択肢と一緒に送る'
-                    : '選択肢を選ばずに送ると、欄に書いた文がそのまま答えになる'}
-                </p>
+                <div class="reply-foot">
+                  <span class="hint">
+                    {picked()
+                      ? '欄に書いた補足は、選んだ選択肢と一緒に送る'
+                      : '選択肢を選ばずに送ると、欄に書いた文がそのまま答えになる'}
+                  </span>
+                  <button type="submit" class="primary" disabled={sending()}>
+                    {picked() ? `「${picked()}」で答える` : '書いた答えを送る'}
+                  </button>
+                </div>
               </form>
             </article>
           )}
-          {!head() && <p class="hint">質問はありません</p>}
         </main>
 
         <aside class="context">
           <div class="totals">
-            <span>{`$${totalCost()}`}</span>
-            <span>{`出力 ${totalOutput()} トークン`}</span>
+            <div>
+              <span class="value">{`$${totalCost()}`}</span>
+              <span class="hint">費用</span>
+            </div>
+            <div>
+              <span class="value">{totalOutput()}</span>
+              <span class="hint">出力トークン</span>
+            </div>
           </div>
           <div class="tabs">
             {(Object.keys(tabLabel) as (keyof typeof tabLabel)[]).map((name) => (
@@ -271,66 +293,75 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                 data-tab={name}
                 onClick={pickTab}
               >
-                {tabLabel[name]}
+                {tabTitle(name, taskList().length, entryList().length, editList().length)}
               </button>
             ))}
           </div>
           <div class="tab-body">
-            {tab() === 'tasks' && (
-              <div>
-                <h2>課題</h2>
-                {taskList().length === 0 && <p class="hint">まだ課題がありません</p>}
-                {taskList().map((task) => (
-                  <div key={task.id} class={`task ${task.state}`}>
-                    <strong>{task.id}</strong>
-                    <span class="state">{taskLabel[task.state]}</span>
-                    <p>{task.statement.split('\n')[0]}</p>
-                    <p class="hint">{`試行 ${task.attempts} 回・コミット ${task.commit.slice(0, 8)}・費用 ${task.spent} ドル`}</p>
-                    {task.state === 'held' && <p class="reason">{`${task.reason}（使った費用 ${task.spent} ドル）`}</p>}
-                    {task.state === 'committed' && task.diff && <pre class="diff">{task.diff}</pre>}
-                    {task.usage && <p class="hint">{usageLine(task.usage)}</p>}
-                  </div>
-                ))}
-              </div>
-            )}
             {tab() === 'activity' && (
               <div>
-                <h2>動き</h2>
                 {writing().map((w) => (
                   <div key={w.agent} class="activity live">
-                    <strong>{`${agentLabel[w.agent] ?? topicList().find((t) => t.id === w.agent)?.title ?? w.agent} が書いている`}</strong>
+                    <div class="activity-head">
+                      <strong>{agentLabel[w.agent] ?? topicList().find((t) => t.id === w.agent)?.title ?? w.agent}</strong>
+                      <span class="hint">書いている</span>
+                    </div>
                     <p>{w.text}</p>
                   </div>
                 ))}
+                {recent().length === 0 && writing().length === 0 && <p class="hint">まだ動きがありません</p>}
                 {recent().map((a) => (
                   <div key={a.id} class={`activity ${a.kind}`}>
-                    <strong>{agentLabel[a.agent] ?? topicList().find((t) => t.id === a.agent)?.title ?? a.agent}</strong>
+                    <div class="activity-head">
+                      <strong>{agentLabel[a.agent] ?? topicList().find((t) => t.id === a.agent)?.title ?? a.agent}</strong>
+                      <span class="hint">{clock(a.at)}</span>
+                    </div>
                     <p>{a.text}</p>
                   </div>
                 ))}
               </div>
             )}
+            {tab() === 'tasks' && (
+              <div>
+                {taskList().length === 0 && <p class="hint">まだ課題がありません</p>}
+                {newestTasks().map((task) => (
+                  <details key={task.id} class={`task ${task.state}`}>
+                    <summary>
+                      <span class="task-id">{task.id}</span>
+                      <span class="task-title">{task.statement.split('\n')[0]}</span>
+                      <span class={`badge ${task.state}`}>{taskLabel[task.state]}</span>
+                    </summary>
+                    <p class="hint">
+                      {`試行 ${task.attempts} 回${task.commit ? `・コミット ${task.commit.slice(0, 8)}` : ''}${task.usage ? `・$${task.usage.costUsd.toFixed(4)}` : ''}`}
+                    </p>
+                    {task.state === 'held' && <p class="reason">{task.reason}</p>}
+                    {task.usage && <p class="hint">{usageLine(task.usage)}</p>}
+                    {task.state === 'committed' && task.diff && <pre class="diff">{task.diff}</pre>}
+                  </details>
+                ))}
+              </div>
+            )}
             {tab() === 'evolution' && (
               <div>
-                <h2>自己改良</h2>
                 {!evolutionNow() && <p class="hint">まだ自己改良の周がありません</p>}
                 {evolutionNow() && (
-                  <div>
-                    {evolutionRows().map((row) => (
-                      <p key={row.key} class={row.kind}>
-                        {row.text}
-                      </p>
-                    ))}
-                  </div>
+                  <p class="evolution-head">
+                    {`第 ${evolutionNow().round} 周・${evolutionStageLabel[evolutionNow().stage]}・$${evolutionNow().spent.toFixed(4)}`}
+                  </p>
                 )}
+                {evolutionRows().map((row) => (
+                  <p key={row.key} class={row.kind}>
+                    {row.text}
+                  </p>
+                ))}
               </div>
             )}
             {tab() === 'context' && (
               <div>
-                <h2>共有文脈</h2>
-                {entryList().map((entry) => (
+                {entryList().length === 0 && <p class="hint">まだ共有文脈がありません</p>}
+                {newestEntries().map((entry) => (
                   <div key={entry.id} class={`entry ${entry.kind}`}>
-                    <span class="kind">{kindLabel[entry.kind]}</span>
+                    <span class={`badge ${entry.kind}`}>{kindLabel[entry.kind]}</span>
                     <p>{entry.text}</p>
                     <small>{entry.evidence}</small>
                   </div>
@@ -339,26 +370,25 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
             )}
             {tab() === 'history' && (
               <div>
-                <h2>書き換えの履歴</h2>
                 {history().map((edit) => (
-                  <div key={edit.id} class={`edit ${edit.author === 'user' ? 'user' : 'agent'}`}>
-                    <div class="edit-head">
+                  <details key={edit.id} class={`edit ${edit.author === 'user' ? 'user' : 'agent'}`}>
+                    <summary>
                       <strong>
                         {edit.author === 'user' ? '利用者' : (topicList().find((t) => t.id === edit.author)?.title ?? edit.author)}
                       </strong>
-                      <span class="hint">版 {edit.version}</span>
-                      <button type="button" data-id={edit.id} onClick={revert}>
-                        この前に戻す
-                      </button>
-                    </div>
-                    <p>{edit.reason}</p>
+                      <span class="hint">{`版 ${edit.version}`}</span>
+                      <span class="edit-reason">{edit.reason}</span>
+                    </summary>
                     <pre class="diff">
                       {edit.diff
                         .filter((l) => l.op !== ' ')
                         .map((l) => `${l.op} ${l.line}`)
                         .join('\n')}
                     </pre>
-                  </div>
+                    <button type="button" data-id={edit.id} onClick={revert}>
+                      この版の前に戻す
+                    </button>
+                  </details>
                 ))}
               </div>
             )}
