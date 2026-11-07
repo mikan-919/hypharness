@@ -290,4 +290,18 @@ p.banner { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color:
   .context { max-height: 80vh; }
   .goal .editor { height: 60vh; }
 }
+
+.metrics { max-width: 1200px; margin: 0 auto; padding: 16px; }
+.metrics-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.metrics-head .brand { color: var(--ink); text-decoration: none; margin: 0; }
+.brand a { font-weight: 400; margin-left: 8px; }
+.metric-cards { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); padding: 0 0 4px; border: none; }
+.table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+.metric-table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+.metric-table th, .metric-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+.metric-table th { color: var(--muted); font-weight: 600; background: var(--sunken); }
+.metric-table th:first-child, .metric-table td:first-child { text-align: left; }
+.metric-table .statement { max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+.metric-table .prompt { display: inline-flex; align-items: center; gap: 6px; }
+.metric-table meter { width: 80px; }
 `

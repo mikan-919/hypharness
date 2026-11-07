@@ -194,6 +194,6 @@ app.post('/api/answer', async (c) => {
 app.route(
   '/',
   createFileRouter('./routes', {
-    loaders: { '/': () => store.snapshot() },
+    loaders: { '/': () => store.snapshot(), '/metrics': () => store.snapshot() },
   }),
 )

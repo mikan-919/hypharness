@@ -153,7 +153,9 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     <Layout title="hypharness">
       <div class="shell">
         <aside class="threads">
-          <div class="brand">hypharness</div>
+          <div class="brand">
+            hypharness <a class="hint" href="/metrics">メトリクス</a>
+          </div>
           {haltedReason() !== '' && (
             <div class="stage halted">
               <span class="number">!</span>
