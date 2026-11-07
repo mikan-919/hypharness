@@ -142,11 +142,9 @@ async function evolve() {
       harness: process.cwd(),
       stream: relay.stream('evolve', `evolve-${Date.now()}`),
       adopt: true,
+      store,
+      log: (kind, text) => store.act('evolve', kind, text),
     })
-    for (const c of result.candidates) {
-      const line = c.commit ? `${c.commit.slice(0, 8)} として統合ブランチに積んだ` : `採用しなかった: ${c.note.split('\n').at(-1)}`
-      store.act('evolve', c.commit ? 'commit' : 'fail', `${c.id}（${c.module}）: ${line}`)
-    }
     for (const r of result.rejected) store.act('evolve', 'fail', `${r.module}: ${r.reason}`)
     store.act('evolve', 'text', `自己改良の1周 ${result.round} を終えた。費用 ${result.spent.toFixed(4)} ドル`)
   } catch (e) {

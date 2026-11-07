@@ -1,11 +1,12 @@
 // 候補の変更をコードに当ててから検査する（最終目的の 6）。変更の文は解答役が実装し、検査を通るかで報酬を決める。
 // 当てた差分は候補に残し、次の周はその差分を出発点に積む
-import { mkdtempSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { solve } from '../../harness/roles.ts'
 import { sandboxed } from '../../harness/sandbox.ts'
 import type { Call } from '../../harness/topic.ts'
+import type { AgentStore } from '../../shared/contract.ts'
 import { MODULE_SUMMARY, type Candidate } from '../../shared/evolve.ts'
 import { BRANCH, git } from '../pipeline.ts'
 import { createStore } from '../store.ts'
@@ -21,6 +22,8 @@ export type ApplyOptions = {
   parent?: Candidate
   // 検査に通ったら、統合ブランチに比較して上書き（CAS）で積む。積めなければ 0 にする
   adopt?: boolean
+  // 解答役の動きを残す対話の状態。固定部は画面とつながるものを渡す
+  store?: AgentStore
 }
 
 const statement = (c: Candidate) =>
@@ -33,14 +36,17 @@ const statement = (c: Candidate) =>
 
 // 候補の変更を一時的な作業ツリーで当てて検査し、0 か 1 を返す。当てた差分は candidate.diff に入れる
 export async function applyAndCheck(candidate: Candidate, options: ApplyOptions): Promise<0 | 1> {
-  const { repo, call, check, parent, adopt } = options
+  const { repo, call, check, parent, adopt, store = createStore() } = options
   const hasBranch = Bun.spawnSync(['git', '-C', repo, 'rev-parse', '--verify', '-q', BRANCH]).exitCode === 0
   const base = git(repo, 'rev-parse', hasBranch ? BRANCH : 'HEAD')
   const tree = mkdtempSync(join(tmpdir(), 'hyph-evo-'))
   git(repo, 'worktree', 'add', '-q', '--detach', tree, base)
   try {
-    // ponytail: node_modules はハーネスのものを共有する。依存を足す変更は当てられずに落ちる
-    symlinkSync(join(repo, 'node_modules'), join(tree, 'node_modules'))
+    // 依存はホストで入れる。ハーネスの node_modules へのリンクは、ホームディレクトリが空の隔離環境から見えない
+    if (existsSync(join(tree, 'package.json'))) {
+      const install = Bun.spawnSync(['bun', 'install', '--frozen-lockfile'], { cwd: tree, stderr: 'pipe' })
+      if (install.exitCode !== 0) throw new Error(`依存を入れられませんでした: ${install.stderr.toString().trim()}`)
+    }
     if (parent?.diff && !parent.commit) {
       const applied = Bun.spawnSync(['git', '-C', tree, 'apply', '--index', '-'], { stdin: Buffer.from(parent.diff), stderr: 'pipe' })
       if (applied.exitCode !== 0) {
@@ -49,7 +55,7 @@ export async function applyAndCheck(candidate: Candidate, options: ApplyOptions)
       }
     }
     try {
-      await solve(createStore(), call, { role: 'solve', taskId: candidate.id, tree, statement: statement(candidate), messages: [], failure: '' })
+      await solve(store, call, { role: 'solve', taskId: candidate.id, tree, statement: statement(candidate), messages: [], failure: '' })
     } catch (e) {
       candidate.note = `${candidate.note}\n解答役が変更を当てられませんでした: ${(e as Error).message}`.trim()
       return 0

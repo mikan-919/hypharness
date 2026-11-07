@@ -3,6 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
 import type { Call } from '../../harness/topic.ts'
+import type { AgentStore } from '../../shared/contract.ts'
 import type { Dialog, Task } from '../../shared/dialog.ts'
 import { MODULE_SUMMARY, type Candidate } from '../../shared/evolve.ts'
 import { deepinfra } from '../model.ts'
@@ -28,6 +29,10 @@ export type EvolveOptions = {
   stream?: Stream
   // 検査に通った候補を統合ブランチに積む
   adopt?: boolean
+  // 解答役の動きを残す対話の状態
+  store?: AgentStore
+  // 提案・検証の進み具合を知らせる
+  log?: (kind: 'text' | 'commit' | 'fail', text: string) => void
   // 採用した候補を、提案に使わなかった課題で測る。渡さないときは測らない
   holdout?: (candidate: Candidate, tasks: Task[]) => 0 | 1
 }
@@ -126,15 +131,19 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
   let cost = 0
   const stream = options.stream ?? (options.propose && options.check ? undefined : deepinfra())
 
+  const log = options.log ?? (() => {})
   const propose =
     options.propose ??
     (async (input: ProposeInput): Promise<Proposal> => {
+      log('text', `${input.module} の変更案を作っている`)
       const material = proposeMaterial(input, root)
       try {
         if (!stream) throw new Error('モデルの呼び出し先を作れませんでした')
         const answer = await askModel(stream, JSON.stringify(material), systemPrompt(input.maxChanges))
         cost += answer.costUsd
-        return readProposal(answer.text)
+        const proposal = readProposal(answer.text)
+        log('text', `${input.module} の変更案: ${proposal.changes.join(' / ') || proposal.note}`)
+        return proposal
       } catch (e) {
         return { changes: [], note: `モデルの呼び出しに失敗しました: ${(e as Error).message}` }
       }
@@ -156,14 +165,27 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
   // 候補の変更を解答役にコードへ当てさせ、検査を通るかで 0 か 1 にする
   const check =
     options.check ??
-    ((candidate: Candidate) =>
-      applyAndCheck(candidate, {
+    (async (candidate: Candidate) => {
+      log('text', `候補 ${candidate.id}（${candidate.module}）を解答役に当てさせている`)
+      const score = await applyAndCheck(candidate, {
         repo: options.harness ?? join(import.meta.dir, '..', '..'),
         call,
         check: process.env.CHECK_COMMAND || 'bun run typecheck && bun test',
         parent: listArchive(root).find((c) => c.id === candidate.parent),
         adopt: options.adopt,
-      }))
+        store: options.store,
+      }).catch((e: Error) => {
+        candidate.note = `${candidate.note}\n${e.message}`.trim()
+        return 0 as const
+      })
+      log(
+        candidate.commit ? 'commit' : 'fail',
+        candidate.commit
+          ? `候補 ${candidate.id}（${candidate.module}）を ${candidate.commit.slice(0, 8)} として統合ブランチに積んだ`
+          : `候補 ${candidate.id}（${candidate.module}）を採用しなかった: ${candidate.note.split('\n').at(-1)?.slice(0, 300)}`,
+      )
+      return score
+    })
 
   const spent = options.spent ?? (() => cost)
 
