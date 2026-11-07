@@ -16,7 +16,7 @@ const taskLabel = { solving: '解いている', checking: '検査中', committed
 
 const agentLabel = { decompose: '分解役', solve: '解答役', host: '固定部', evolve: '自己改良' }
 
-const tabLabel = { context: '共有文脈', history: '書き換えの履歴', cost: '費用' }
+const tabLabel = { tasks: '課題', activity: '活動', evolution: '進化', context: '共有文脈', history: '履歴' }
 
 // ループの段階。上から順に、今の段階を1つだけ強調する
 const stages = [
@@ -37,6 +37,27 @@ function usageLine(u: TaskUsage | undefined) {
   if (!u) return ''
   const cached = u.input + u.cacheRead > 0 ? Math.round((u.cacheRead / (u.input + u.cacheRead)) * 100) : 0
   return `呼び出し ${u.calls} 回・入力 ${u.input + u.cacheRead}（キャッシュ ${cached}%）・出力 ${u.output}・最大の文脈 ${u.maxPrompt}・edit_context ${u.edits} 回・作り直し ${u.rebuilds} 回・$${u.costUsd.toFixed(4)}`
+}
+
+// 進化タブに並べる行。候補ごとの入れ子を避け、1段の並びにする
+function evolutionRowList(e: Evolution | null) {
+  if (!e) return []
+  const rows: { key: string; text: string; kind: string }[] = [
+    { key: 'round', text: `第 ${e.round} 周`, kind: '' },
+    { key: 'summary', text: `段階 ${e.stage}・費用 $${e.spent.toFixed(4)}`, kind: 'hint' },
+  ]
+  for (const candidate of e.candidates) {
+    rows.push({ key: `${candidate.id}-id`, text: `# ${candidate.id}`, kind: 'candidate' })
+    rows.push({ key: `${candidate.id}-module`, text: candidate.module, kind: 'hint' })
+    candidate.changes.forEach((change, i) => {
+      rows.push({ key: `${candidate.id}-change-${i}`, text: change, kind: 'change' })
+    })
+    rows.push({ key: `${candidate.id}-score`, text: `score ${candidate.score}`, kind: 'hint' })
+    if (candidate.note) rows.push({ key: `${candidate.id}-note`, text: candidate.note, kind: 'note' })
+    if (candidate.commit)
+      rows.push({ key: `${candidate.id}-commit`, text: `コミット ${candidate.commit.slice(0, 8)}`, kind: 'hint' })
+  }
+  return rows
 }
 
 export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping, finished, evolution }: Dialog) {
@@ -102,6 +123,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
         ? '過半数の論点が開始可になった。押すと課題を進め始める'
         : '論点の過半数が開始可になると押せる',
   )
+  const evolutionRows = derived(() => evolutionRowList(evolutionNow()))
   const totalOutput = derived(() => Object.values(usage()).reduce((sum, u) => sum + u.output, 0))
   const totalCost = derived(() =>
     Object.values(usage())
@@ -160,22 +182,6 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
           {haltedReason() && <p class="conflict">{`流れが止まりました: ${haltedReason()}`}</p>}
           {finishedReason() && <p class="finished">{`最終目的を満たしたため、流れを終えました: ${finishedReason()}`}</p>}
           {failure() && <p class="conflict">{failure()}</p>}
-          {taskList().length > 0 && (
-            <section class="tasks">
-              <h2>課題</h2>
-              {taskList().map((task) => (
-                <div key={task.id} class={`task ${task.state}`}>
-                  <strong>{task.id}</strong>
-                  <span class="state">
-                    {`${taskLabel[task.state]}${task.attempts > 1 ? `（${task.attempts} 回目）` : ''} ${task.commit.slice(0, 8)}`}
-                  </span>
-                  <p>{task.statement.split('\n')[0]}</p>
-                  {task.state === 'held' && <p class="reason">{`${task.reason}（使った費用 ${task.spent} ドル）`}</p>}
-                  {task.state === 'committed' && task.diff && <pre class="diff">{task.diff}</pre>}
-                </div>
-              ))}
-            </section>
-          )}
           <div class="goal-head">
             <h1>FINAL_GOAL.md</h1>
             <span class="hint">版 {savedVersion()}</span>
@@ -243,6 +249,10 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
         </main>
 
         <aside class="context">
+          <div class="totals">
+            <span>{`${totalCost()}`}</span>
+            <span>{`出力 ${totalOutput()} トークン`}</span>
+          </div>
           <div class="tabs">
             {(Object.keys(tabLabel) as (keyof typeof tabLabel)[]).map((name) => (
               <button
@@ -257,7 +267,24 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
             ))}
           </div>
           <div class="tab-body">
-            {tab() === 'context' && (
+            {tab() === 'tasks' && (
+              <div>
+                <h2>課題</h2>
+                {taskList().length === 0 && <p class="hint">まだ課題がありません</p>}
+                {taskList().map((task) => (
+                  <div key={task.id} class={`task ${task.state}`}>
+                    <strong>{task.id}</strong>
+                    <span class="state">{taskLabel[task.state]}</span>
+                    <p>{task.statement.split('\n')[0]}</p>
+                    <p class="hint">{`試行 ${task.attempts} 回・コミット ${task.commit.slice(0, 8)}・費用 ${task.spent} ドル`}</p>
+                    {task.state === 'held' && <p class="reason">{`${task.reason}（使った費用 ${task.spent} ドル）`}</p>}
+                    {task.state === 'committed' && task.diff && <pre class="diff">{task.diff}</pre>}
+                    {task.usage && <p class="hint">{usageLine(task.usage)}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
+            {tab() === 'activity' && (
               <div>
                 <h2>動き</h2>
                 {writing().map((w) => (
@@ -272,6 +299,25 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                     <p>{a.text}</p>
                   </div>
                 ))}
+              </div>
+            )}
+            {tab() === 'evolution' && (
+              <div>
+                <h2>自己改良</h2>
+                {!evolutionNow() && <p class="hint">まだ自己改良の周がありません</p>}
+                {evolutionNow() && (
+                  <div>
+                    {evolutionRows().map((row) => (
+                      <p key={row.key} class={row.kind}>
+                        {row.text}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {tab() === 'context' && (
+              <div>
                 <h2>共有文脈</h2>
                 {entryList().map((entry) => (
                   <div key={entry.id} class={`entry ${entry.kind}`}>
@@ -306,23 +352,6 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                   </div>
                 ))}
               </div>
-            )}
-            {tab() === 'cost' && (
-              <section class="metrics">
-                <h2>トークン</h2>
-                <p class="big">{totalOutput()}</p>
-                <p>出力の合計（ストリーミング中）</p>
-                <p>${totalCost()}</p>
-                <h2>課題ごと</h2>
-                {taskList()
-                  .filter((task) => task.usage)
-                  .map((task) => (
-                    <div key={task.id} class="task-usage">
-                      <strong>{task.id}</strong>
-                      <p>{usageLine(task.usage)}</p>
-                    </div>
-                  ))}
-              </section>
             )}
           </div>
         </aside>

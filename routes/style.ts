@@ -51,13 +51,25 @@ h2 { font-size: 12px; color: var(--muted); letter-spacing: 0.08em; margin: 16px 
   flex-direction: column;
   overflow: hidden;
 }
+.totals {
+  display: flex;
+  gap: 12px;
+  flex: none;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
+  flex: none;
   border-bottom: 1px solid var(--line);
-  padding-bottom: 8px;
+  padding: 8px 0;
 }
-.tabs .tab { flex: 1; padding: 6px 4px; font-size: 12px; }
+.tabs .tab { flex: 1 1 auto; min-width: 0; white-space: nowrap; padding: 6px 4px; font-size: 11px; }
 .tabs .tab.current { background: var(--accent); color: #fff; border-color: var(--accent); }
 .tab-body { flex: 1; min-height: 0; overflow-y: auto; }
 .thread {
@@ -148,6 +160,8 @@ button:disabled { opacity: 0.5; cursor: default; }
 .task.solving, .task.checking { border-color: var(--accent); }
 .task.committed { border-color: var(--done); }
 .task.held { border-color: var(--fail); }
+.candidate { border-left: 3px solid var(--line); padding: 4px 8px; margin-bottom: 6px; }
+.candidate p { margin: 2px 0; }
 .activity { border-left: 2px solid var(--line); padding: 2px 8px; margin-bottom: 4px; font-size: 12px; }
 .activity p { margin: 0; color: var(--muted); word-break: break-all; }
 .activity.live { border-color: var(--accent); }
