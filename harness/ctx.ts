@@ -39,9 +39,11 @@ type State = { cut: number; content: string }
 // key ごとの作業文脈。key は課題の作業ツリーや論点ごとに分ける。状態は子プロセスをまたいで残すためファイルに置く
 export function workingContext(key: string) {
   const file = join(root(), `${Bun.hash(key).toString(36)}.json`)
-  const load = (): State => {
+  // 会話より先を指す状態は、別の会話（再起動の後に前の試行からやり直した会話など）のもので、捨てる
+  const load = (length = Infinity): State => {
     try {
-      return JSON.parse(readFileSync(file, 'utf8')) as State
+      const state = JSON.parse(readFileSync(file, 'utf8')) as State
+      return state.cut > length ? { cut: 0, content: '' } : state
     } catch {
       return { cut: 0, content: '' }
     }
@@ -53,7 +55,7 @@ export function workingContext(key: string) {
   return {
     // モデルに渡す会話。先頭の指示はそのまま、cut より前の会話を作業文脈1通に置き換える
     view(messages: Message[]): Message[] {
-      let { cut, content } = load()
+      let { cut, content } = load(messages.length)
       if (!cut) return messages
       // ツールの結果から始めると、呼び出しのない結果になって API が受け付けない。edit_context の結果もここで落ちる
       while (messages[cut]?.role === 'toolResult') cut++
@@ -68,7 +70,7 @@ export function workingContext(key: string) {
     // ponytail: 直近の件数だけでしきい値を超えるほど大きいと、毎回縮めてキャッシュが外れる。起きたら件数を文脈の量で決める
     compact(messages: Message[], tokens: number) {
       if (tokens <= AGENT_DIET.compactAtTokens) return false
-      const state = load()
+      const state = load(messages.length)
       const from = Math.max(state.cut, 1)
       let cut = Math.max(from, messages.length - AGENT_DIET.contextKeep)
       // ツールの結果から始めると、呼び出しのない結果になって API が受け付けない

@@ -7,7 +7,7 @@ import { createFileRouter } from 'irisout/hono'
 import { startDialog } from './dialog.ts'
 import { serveHost } from './host.ts'
 import { model } from './model.ts'
-import { holdUnfinished, runPipeline } from './pipeline.ts'
+import { runPipeline } from './pipeline.ts'
 import { createRelay } from './relay.ts'
 import { createStore } from './store.ts'
 import { weaknesses } from './evolve/round.ts'
@@ -47,11 +47,6 @@ const store = shared.store
 export function boot() {
   if (shared.booted) return RELAY_SOCKET
   shared.booted = true
-  // 前の起動で流れが動いていたら、止まったことにする。利用者が開始の合図を出し直す
-  if (store.snapshot().started) {
-    holdUnfinished(store)
-    store.setRun({ started: false, halted: 'サーバーが再起動したため流れが止まりました' })
-  }
   for (const socket of [RELAY_SOCKET, HOST_SOCKET]) {
     try {
       unlinkSync(socket)
@@ -60,6 +55,15 @@ export function boot() {
   relay.listen(RELAY_SOCKET)
   serveHost(store, HOST_SOCKET)
   dialog()
+  // 前の起動で流れが動いていたら、止まった所から続ける。課題ごとの費用は前の起動の分から数える
+  const { started, finished, tasks } = store.snapshot()
+  if (started) {
+    for (const t of tasks) if (t.usage) relay.restore(t.id, t.usage)
+    store.act('host', 'text', 'サーバーが再起動したため、前の流れの続きから動かす')
+    // 最終目的を満たして終えていれば、自己改良の1周の途中で止まった。周は初めからやり直す
+    if (finished) void evolve()
+    else flow()
+  }
   return RELAY_SOCKET
 }
 
@@ -117,10 +121,16 @@ app.post('/api/start', (c) => {
   if (topics.filter((t) => t.ready).length * 2 <= topics.length) {
     return c.json({ error: '論点エージェントの過半数が開始可になっていません' }, 409)
   }
-  // 費用の上限で止まっていたら、開始の合図で中継の停止を解いてから流れを始める（ADR 0012）
-  relay.resume()
   // 自己改良の弱点は、この流れで起きた失敗だけにする。前の流れの失敗は、その後の課題で直っていることがある
-  const mark = { tasks: store.snapshot().tasks.length, entries: store.snapshot().entries.length }
+  store.setRun({ from: { tasks: store.snapshot().tasks.length, entries: store.snapshot().entries.length } })
+  flow()
+  return c.json({ ok: true })
+})
+
+// 課題を解く流れを動かし、最終目的を満たして終えたら自己改良の1周を回す。開始の合図と、再起動の後の再開から呼ぶ
+function flow() {
+  // 費用の上限で止まっていたら、中継の停止を解いてから流れを始める（ADR 0012）
+  relay.resume()
   void runPipeline(store, workers.roles, REPO, {
     worktrees: join(homedir(), '.hyph', 'worktrees', REPO.replaceAll('/', '_')),
     setup: process.env.SETUP_COMMAND,
@@ -128,15 +138,15 @@ app.post('/api/start', (c) => {
     spent: relay.spent,
     limitUsd: relay.limitUsd,
   }).then(() => {
-    if (store.snapshot().finished) return evolve(mark)
+    if (store.snapshot().finished) return evolve()
   })
-  return c.json({ ok: true })
-})
+}
 
 // 自己改良の1周（ADR 0014）。分解役が最終目的を満たしたと判断した後に、hypharness 自身の改良の対象を1周改良する。
 // 検査に通った候補は統合ブランチに積み、次に動くエージェントから効く（ADR 0022）。回している間は開始の合図を受け付けない
-async function evolve(mark: { tasks: number; entries: number }) {
+async function evolve() {
   const now = store.snapshot()
+  const mark = now.from
   const dialog = { ...now, tasks: now.tasks.slice(mark.tasks), entries: now.entries.slice(mark.entries) }
   if (weaknesses(dialog).length === 0) {
     store.act('evolve', 'text', 'この流れで失敗が無かったため、自己改良の1周を回さなかった')

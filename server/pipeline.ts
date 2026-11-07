@@ -38,15 +38,15 @@ export async function runPipeline(store: Store, roles: Roles, repo: string, opti
   store.setRun({ started: true, halted: '', stopping: false, finished: '' })
   try {
     if (!git(repo, 'branch', '--list', BRANCH)) git(repo, 'branch', BRANCH, 'HEAD')
-    // 前の起動が途中で止まって残した作業ツリーを片付ける
-    for (const line of git(repo, 'worktree', 'list', '--porcelain').split('\n')) {
-      const tree = line.startsWith('worktree ') ? line.slice(9) : ''
-      if (tree.startsWith(`${options.worktrees}/`)) git(repo, 'worktree', 'remove', '--force', tree)
-    }
+    // 前の起動が途中で止まって残した作業ツリーを片付ける。途中の課題の作業ツリーは、続きを解くために残す
+    const keep = unfinished(store, repo, options.worktrees)?.tree
+    for (const tree of trees(repo, options.worktrees)) if (tree !== keep) git(repo, 'worktree', 'remove', '--force', tree)
     git(repo, 'worktree', 'prune')
+    if (!keep) holdUnfinished(store, '前の起動で途中まで解いた作業ツリーが残っていない')
     while (true) {
       // 利用者が止めるボタンを押していたら、次の課題に入らずに止める
       if (store.snapshot().stopping) {
+        holdUnfinished(store, '利用者が止めました')
         store.setRun({ started: false, halted: '利用者が止めました', stopping: false })
         return
       }
@@ -72,25 +72,61 @@ export function holdUnfinished(store: Store, reason = '流れが途中で止ま�
   }
 }
 
-// 課題を1つ進める。最終目的を満たしていれば finish の理由を返す
+// この流れの作業ツリーの一覧
+function trees(repo: string, worktrees: string) {
+  return git(repo, 'worktree', 'list', '--porcelain')
+    .split('\n')
+    .filter((line) => line.startsWith(`worktree ${worktrees}/`))
+    .map((line) => line.slice(9))
+}
+
+// 前の起動が途中で止めた課題と、その作業ツリー。解いている途中か、検査に通って統合ブランチに積む前に止まった課題
+export function unfinished(store: Store, repo: string, worktrees: string) {
+  const task = store.snapshot().tasks.at(-1)
+  if (!task) return undefined
+  const tree = trees(repo, worktrees).find((t) => t.startsWith(`${worktrees}/${task.id}-`))
+  if (!tree) return undefined
+  const pending = task.state === 'solving' || task.state === 'checking'
+  const unpushed = task.state === 'committed' && Bun.spawnSync(['git', '-C', repo, 'merge-base', '--is-ancestor', task.commit, BRANCH]).exitCode !== 0
+  return pending || unpushed ? { task, tree } : undefined
+}
+
+// 課題を1つ進める。最終目的を満たしていれば finish の理由を返す。前の起動が途中で止めた課題があれば、その続きから進める
 async function step(store: Store, roles: Roles, repo: string, options: PipelineOptions) {
+  const resumed = unfinished(store, repo, options.worktrees)
   const n = store.snapshot().tasks.length + 1
-  const tree = `${options.worktrees}/t${n}-${Date.now()}`
-  mkdirSync(dirname(tree), { recursive: true })
-  const base = git(repo, 'rev-parse', BRANCH)
-  git(repo, 'worktree', 'add', '--detach', tree, base)
+  const tree = resumed?.tree ?? `${options.worktrees}/t${n}-${Date.now()}`
+  // 作業ツリーは統合ブランチの先端から作り、検査に通るまでコミットしない。積んだ課題の続きなら、その親が元
+  const base = resumed
+    ? git(tree, 'rev-parse', resumed.task.state === 'committed' ? 'HEAD^' : 'HEAD')
+    : git(repo, 'rev-parse', BRANCH)
+  if (!resumed) {
+    mkdirSync(dirname(tree), { recursive: true })
+    git(repo, 'worktree', 'add', '--detach', tree, base)
+  }
   try {
-    // 最終目的の本文は対話の状態にある（画面で書き換えたもの）。作業ツリーにも書き、最初の課題のコミットに入れる（ADR 0003）
-    writeFileSync(join(tree, 'FINAL_GOAL.md'), store.snapshot().goal.text)
-    const next = await roles.decompose({ role: 'decompose', taskId: `t${n}`, tree })
-    if ('finish' in next) return next.finish
-    const taskId = store.addTask(next.statement)
-    if (options.setup) {
-      // 準備はホストで動かす。依存の取得などネットワークが要る処理のため
-      const setup = Bun.spawnSync(['sh', '-c', options.setup], { cwd: tree, stdout: 'pipe', stderr: 'pipe' })
-      if (setup.exitCode !== 0) throw new Error(`準備のコマンドが失敗しました: ${setup.stderr.toString().slice(-2000)}`)
+    let taskId: string
+    let statement: string
+    if (resumed) {
+      ;({ id: taskId, statement } = resumed.task)
+      store.act('solve', 'text', `${taskId} を前の起動の続きから進める`)
+    } else {
+      // 最終目的の本文は対話の状態にある（画面で書き換えたもの）。作業ツリーにも書き、最初の課題のコミットに入れる（ADR 0003）
+      writeFileSync(join(tree, 'FINAL_GOAL.md'), store.snapshot().goal.text)
+      const next = await roles.decompose({ role: 'decompose', taskId: `t${n}`, tree })
+      if ('finish' in next) return next.finish
+      statement = next.statement
+      taskId = store.addTask(statement)
+      if (options.setup) {
+        // 準備はホストで動かす。依存の取得などネットワークが要る処理のため
+        const setup = Bun.spawnSync(['sh', '-c', options.setup], { cwd: tree, stdout: 'pipe', stderr: 'pipe' })
+        if (setup.exitCode !== 0) throw new Error(`準備のコマンドが失敗しました: ${setup.stderr.toString().slice(-2000)}`)
+      }
     }
-    const summary = await solve(store, roles, tree, taskId, next.statement, options)
+    const summary =
+      resumed?.task.state === 'committed'
+        ? '前の起動で検査に通った変更'
+        : await solve(store, roles, tree, taskId, statement, options, resumed?.task.attempts ?? 0)
     const commit = git(tree, 'rev-parse', 'HEAD')
     // 作業ツリーを作った後に統合ブランチが動いていたら、上書きせずに止める（その間のコミットを消さない）
     try {
@@ -102,7 +138,7 @@ async function step(store: Store, roles: Roles, repo: string, options: PipelineO
     store.record({
       topicId: 'solve',
       kind: 'fact',
-      text: `${next.statement.split('\n')[0]}\n変えた点: ${summary}`,
+      text: `${statement.split('\n')[0]}\n変えた点: ${summary}`,
       evidence: `課題 ${taskId} のコミット ${commit.slice(0, 8)}`,
     })
     store.act('solve', 'commit', `${taskId} を ${commit.slice(0, 8)} として統合ブランチに積んだ`)
@@ -113,12 +149,15 @@ async function step(store: Store, roles: Roles, repo: string, options: PipelineO
   }
 }
 
-// 課題を解く。解答役の試行と検査を繰り返し、検査が通れば done の summary を返す
-async function solve(store: Store, roles: Roles, tree: string, taskId: string, statement: string, options: PipelineOptions) {
-  let messages: Message[] = []
+// 課題を解く。解答役の試行と検査を繰り返し、検査が通れば done の summary を返す。
+// 試行ごとの会話を保存し、再起動の後は、前の起動で終えた試行の会話と試行の回数から続ける
+async function solve(store: Store, roles: Roles, tree: string, taskId: string, statement: string, options: PipelineOptions, tried = 0) {
+  const key = `solve:${taskId}`
+  let messages: Message[] = (tried > 0 && store.transcript(key)) || []
   // 最後の検査の失敗の出力。次の試行に渡し、保留にしたときの理由にも使う
-  let reason = ''
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  let reason = tried > 0 ? '前の起動がこの課題の途中で止まった。作業ツリーには途中までの変更が残っている。git status で確かめてから続けてください。' : ''
+  // ponytail: 途中で止まった試行は、その試行の会話を失い、同じ回としてやり直す。試行の途中の会話まで要るなら、エージェントの1ターンごとに保存する
+  for (let attempt = Math.max(tried, 1); attempt <= MAX_ATTEMPTS; attempt++) {
     store.setTask(taskId, { state: 'solving', attempts: attempt })
     const result = await roles.solve({ role: 'solve', taskId, tree, statement, messages, failure: reason }).catch((e: Error) => {
       // 中継が費用の上限に達して断ったときは、この課題を保留にし、断りの文と使った費用を残して流れを止める
@@ -130,6 +169,7 @@ async function solve(store: Store, roles: Roles, tree: string, taskId: string, s
       )
     })
     messages = result.messages
+    store.saveTranscript(key, messages)
     store.setTask(taskId, { state: 'checking' })
     git(tree, 'add', '-A')
     let failure: { text: string; code: string } | undefined
@@ -146,6 +186,8 @@ async function solve(store: Store, roles: Roles, tree: string, taskId: string, s
       const commit = git(tree, 'rev-parse', 'HEAD')
       const patch = git(tree, 'show', '--format=', '--patch', commit)
       store.setTask(taskId, { state: 'committed', commit, diff: patch.slice(-MAX_DIFF) })
+      // 終えた課題の会話は再開に使わないので捨てる。保存のファイルを大きくしない
+      store.saveTranscript(key, [])
       return result.summary
     }
     reason = failure.text
@@ -160,5 +202,6 @@ async function solve(store: Store, roles: Roles, tree: string, taskId: string, s
   }
   const spent = options.spent?.(taskId) ?? 0
   store.setTask(taskId, { state: 'held', reason, spent })
+  store.saveTranscript(key, [])
   throw new Error(`${taskId} が検査に ${MAX_ATTEMPTS} 回落ちたため保留にし、流れを止めました。理由: ${reason.slice(-1000)}`)
 }

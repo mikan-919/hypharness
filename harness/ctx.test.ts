@@ -112,3 +112,12 @@ test('作業文脈は key ごとに分かれ、同じ key なら開き直して�
   expect(texts(workingContext('a').view(messages))).toContain('要点')
   expect(workingContext('b').view(messages)).toEqual(messages)
 })
+
+test('会話より先を指す作業文脈は、前の試行からやり直した別の会話のものとして使わない', () => {
+  const context = workingContext(`stale-${Math.random()}`)
+  const long: Message[] = Array.from({ length: 6 }, (_, i) => ({ role: 'user', content: `m${i}`, timestamp: 0 }))
+  context.replace(long, '途中で止まった試行の要約')
+  const short = long.slice(0, 3)
+  expect(context.view(short)).toEqual(short)
+  expect(context.view(long)[1]).toMatchObject({ content: expect.stringContaining('途中で止まった試行の要約') })
+})

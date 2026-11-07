@@ -30,6 +30,7 @@ const emptyDialog = (): Dialog => ({
   stopping: false,
   finished: '',
   evolution: null,
+  from: { tasks: 0, entries: 0 },
 })
 
 test('検証が 1 の候補だけ archive に移り、0 の候補は candidates に残る', async () => {

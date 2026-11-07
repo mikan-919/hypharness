@@ -303,3 +303,24 @@ test('解答役のシステムプロンプトに、根拠が実行の結果の�
     expect(system).not.toContain('利用者は赤を選んだ')
   }
 })
+
+test('サーバーが課題の途中で止まっても、次の起動で同じ作業ツリーの続きから解いて積む', async () => {
+  const { dir, log } = repo()
+  const file = join(mkdtempSync(join(tmpdir(), 'hyph-store-')), 'dialog.json')
+  const opts = options()
+  let stopped!: () => void
+  const reached = new Promise<void>((resolve) => (stopped = resolve))
+  const first = script({
+    decompose: [reply('submit_task', { statement: 'out.txt に ok と書く' })],
+    solve: [reply('write_file', { path: 'out.txt', content: 'ok' })],
+  })
+  // 書いた後の呼び出しで返らなくなる。ここでサーバーが止まったことにする
+  void run(createStore(file), async (body) => (body.topicId === 'solve' && body.context.messages.length > 2 ? (stopped(), new Promise(() => {})) : first(body)), dir, opts)
+  await reached
+  const store = createStore(file)
+  expect(store.snapshot().tasks[0]).toMatchObject({ id: 't1', state: 'solving' })
+  await run(store, script({ solve: [reply('done', { summary: '書いた' })], decompose: [reply('finish', { reason: '満たした' })] }), dir, opts)
+  expect(store.snapshot().tasks).toHaveLength(1)
+  expect(store.snapshot().tasks[0]).toMatchObject({ state: 'committed', attempts: 1 })
+  expect(log()).toBe('t1: out.txt に ok と書く\ninit')
+})

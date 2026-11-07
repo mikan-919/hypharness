@@ -164,6 +164,11 @@ export function createRelay(stream: Stream, limitUsd: number, onTask?: (taskId: 
     limitUsd,
     // モデルの利用料以外の費用を足す。上限に達したら停止する
     cost,
+    // 前の起動で数えた課題の記録を戻す。再起動の後も、課題1つあたりの上限を通しで数える
+    restore(taskId: string, usage: TaskUsage) {
+      tasks.set(taskId, usage)
+      spent.set(taskId, usage.costUsd)
+    },
     // 停止を解く。開始の合図を受けたときに呼ぶ
     resume: () => {
       halted = ''

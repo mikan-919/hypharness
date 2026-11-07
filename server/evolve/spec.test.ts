@@ -32,6 +32,7 @@ const emptyDialog = (): Dialog => ({
   stopping: false,
   finished: '',
   evolution: null,
+  from: { tasks: 0, entries: 0 },
 })
 
 test('同じモジュールでも失敗の種類が違えば別の候補になる', () => {

@@ -85,7 +85,9 @@ export type Dialog = {
   // 分解役が最終目的を満たしたと判断して流れを終えた理由。動き出したら空にする
   finished: string
   // 自己改良の1周の進み。回していないときは null
-  evolution: Evolution | null
+  evolution: Evolution   // 今の流れを始めたときの課題と共有文脈の件数。自己改良の弱点をこの流れの分に絞るのに使い、再起動の後も引き継ぐ
+  from: { tasks: number; entries: number }
+| null
 }
 
 export type TaskState = 'solving' | 'checking' | 'committed' | 'held'
