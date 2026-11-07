@@ -6,6 +6,7 @@ import type { Call } from '../../harness/topic.ts'
 import type { Dialog, Task } from '../../shared/dialog.ts'
 import { MODULE_SUMMARY, type Candidate } from '../../shared/evolve.ts'
 import { deepinfra } from '../model.ts'
+import type { Stream } from '../relay.ts'
 import { createStore } from '../store.ts'
 import { applyAndCheck } from './apply.ts'
 import { runRound, type Proposal, type ProposeInput, type RoundResult } from './round.ts'
@@ -23,6 +24,10 @@ export type EvolveOptions = {
   limitUsd?: number
   // 候補を当てるハーネスのリポジトリ。既定はこのファイルのあるリポジトリ
   harness?: string
+  // モデルの呼び出し先。固定部は中継を通したものを渡す。渡さなければ DeepInfra を直接呼ぶ
+  stream?: Stream
+  // 検査に通った候補を統合ブランチに積む
+  adopt?: boolean
   // 採用した候補を、提案に使わなかった課題で測る。渡さないときは測らない
   holdout?: (candidate: Candidate, tasks: Task[]) => 0 | 1
 }
@@ -119,7 +124,7 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
   const limitUsd = Number.isFinite(limit) ? limit : 1
 
   let cost = 0
-  const stream = options.propose && options.check ? undefined : deepinfra()
+  const stream = options.stream ?? (options.propose && options.check ? undefined : deepinfra())
 
   const propose =
     options.propose ??
@@ -157,6 +162,7 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
         call,
         check: process.env.CHECK_COMMAND || 'bun run typecheck && bun test',
         parent: listArchive(root).find((c) => c.id === candidate.parent),
+        adopt: options.adopt,
       }))
 
   const spent = options.spent ?? (() => cost)

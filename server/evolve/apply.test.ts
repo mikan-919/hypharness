@@ -69,3 +69,35 @@ test('解答役がコードを変えなければ 0 にする', async () => {
   expect(await applyAndCheck(c, { repo, call, check: 'true' })).toBe(0)
   expect(c.note).toContain('コードを変えませんでした')
 })
+
+test('採用すると、検査に通った候補を統合ブランチに積み、出発点にしても差分を当て直さない', async () => {
+  const repo = harness()
+  const branch = () => Bun.spawnSync(['git', '-C', repo, 'rev-parse', 'hypharness/integration']).stdout.toString().trim()
+  const first = candidate('1-4')
+  expect(await applyAndCheck(first, { repo, call: writes('a.txt'), check: 'test -f a.txt', adopt: true })).toBe(1)
+  expect(first.commit).toBe(branch())
+  const second = candidate('2-4', first.id)
+  expect(await applyAndCheck(second, { repo, call: writes('b.txt'), check: 'test -f a.txt && test -f b.txt', parent: first, adopt: true })).toBe(1)
+  expect(second.commit).toBe(branch())
+  expect(second.diff).not.toContain('a.txt')
+})
+
+test('周の間に統合ブランチが進んでいたら、積まずに 0 にする', async () => {
+  const repo = harness()
+  const git = (...args: string[]) => Bun.spawnSync(['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args])
+  git('branch', 'hypharness/integration')
+  const replies = [reply('write_file', { path: 'a.txt', content: 'x\n' }), reply('done', { summary: '書いた' })]
+  // 解答役が動いている間に、流れが統合ブランチに別のコミットを積む
+  const call: Call = async () => {
+    if (replies.length === 1) {
+      git('checkout', '-q', 'hypharness/integration')
+      git('commit', '-q', '--allow-empty', '-m', '流れの課題')
+      git('checkout', '-q', '-')
+    }
+    return replies.shift()!
+  }
+  const c = candidate('1-4')
+  expect(await applyAndCheck(c, { repo, call, check: 'true', adopt: true })).toBe(0)
+  expect(c.note).toContain('統合ブランチに積めませんでした')
+  expect(c.commit).toBeUndefined()
+})

@@ -10,6 +10,7 @@ import { deepinfra } from './model.ts'
 import { holdUnfinished, runPipeline } from './pipeline.ts'
 import { createRelay } from './relay.ts'
 import { createStore } from './store.ts'
+import { runEvolve } from './evolve/run.ts'
 import { createWorkers } from './workers.ts'
 
 // Vite の開発サーバーには Bun が .env を読み込まないため、ここで読む。既にある環境変数は上書きしない
@@ -123,9 +124,39 @@ app.post('/api/start', (c) => {
     check: process.env.CHECK_COMMAND,
     spent: relay.spent,
     limitUsd: relay.limitUsd,
+  }).then(() => {
+    if (store.snapshot().finished) return evolve()
   })
   return c.json({ ok: true })
 })
+
+// 自己改良の1周（ADR 0014）。分解役が最終目的を満たしたと判断した後に、hypharness 自身の改良の対象を1周改良する。
+// 検査に通った候補は統合ブランチに積み、次に動くエージェントから効く（ADR 0022）。回している間は開始の合図を受け付けない
+async function evolve() {
+  store.setRun({ started: true })
+  store.act('evolve', 'text', '自己改良の1周を始めた')
+  try {
+    const result = await runEvolve({
+      repo: REPO,
+      dialog: store.snapshot(),
+      harness: process.cwd(),
+      stream: relay.stream('evolve', `evolve-${Date.now()}`),
+      adopt: true,
+    })
+    for (const c of result.candidates) {
+      const line = c.commit ? `${c.commit.slice(0, 8)} として統合ブランチに積んだ` : `採用しなかった: ${c.note.split('\n').at(-1)}`
+      store.act('evolve', c.commit ? 'commit' : 'fail', `${c.id}（${c.module}）: ${line}`)
+    }
+    for (const r of result.rejected) store.act('evolve', 'fail', `${r.module}: ${r.reason}`)
+    store.act('evolve', 'text', `自己改良の1周 ${result.round} を終えた。費用 ${result.spent.toFixed(4)} ドル`)
+  } catch (e) {
+    store.act('evolve', 'fail', `自己改良の1周に失敗した: ${(e as Error).message}`)
+  } finally {
+    // 周の費用が上限に達して中継が止まっていても、課題の流れは終わっているので解く
+    relay.resume()
+    store.setRun({ started: false })
+  }
+}
 
 // 止めるボタン。解いている途中では止めず、今の課題を終えたら止める
 app.post('/api/stop', (c) => {

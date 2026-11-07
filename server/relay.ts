@@ -169,5 +169,7 @@ export function createRelay(stream: Stream, limitUsd: number, onTask?: (taskId: 
       return () => void listeners.delete(listener)
     },
     halted: () => halted,
+    // 固定部の中から中継を通してモデルを呼ぶ。費用は taskId に数える
+    stream: (topicId: string, taskId: string): Stream => (context) => call({ topicId, taskId, context }),
   }
 }

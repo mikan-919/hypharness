@@ -17,8 +17,10 @@ export type ApplyOptions = {
   call: Call
   // 検査のコマンド。隔離環境で動かす
   check: string
-  // 出発点の候補。差分を先に当てる
+  // 出発点の候補。統合ブランチに積んでいなければ、差分を先に当てる
   parent?: Candidate
+  // 検査に通ったら、統合ブランチに比較して上書き（CAS）で積む。積めなければ 0 にする
+  adopt?: boolean
 }
 
 const statement = (c: Candidate) =>
@@ -31,14 +33,15 @@ const statement = (c: Candidate) =>
 
 // 候補の変更を一時的な作業ツリーで当てて検査し、0 か 1 を返す。当てた差分は candidate.diff に入れる
 export async function applyAndCheck(candidate: Candidate, options: ApplyOptions): Promise<0 | 1> {
-  const { repo, call, check, parent } = options
-  const base = Bun.spawnSync(['git', '-C', repo, 'rev-parse', '--verify', '-q', BRANCH]).exitCode === 0 ? BRANCH : 'HEAD'
+  const { repo, call, check, parent, adopt } = options
+  const hasBranch = Bun.spawnSync(['git', '-C', repo, 'rev-parse', '--verify', '-q', BRANCH]).exitCode === 0
+  const base = git(repo, 'rev-parse', hasBranch ? BRANCH : 'HEAD')
   const tree = mkdtempSync(join(tmpdir(), 'hyph-evo-'))
   git(repo, 'worktree', 'add', '-q', '--detach', tree, base)
   try {
     // ponytail: node_modules はハーネスのものを共有する。依存を足す変更は当てられずに落ちる
     symlinkSync(join(repo, 'node_modules'), join(tree, 'node_modules'))
-    if (parent?.diff) {
+    if (parent?.diff && !parent.commit) {
       const applied = Bun.spawnSync(['git', '-C', tree, 'apply', '--index', '-'], { stdin: Buffer.from(parent.diff), stderr: 'pipe' })
       if (applied.exitCode !== 0) {
         candidate.note = `${candidate.note}\n出発点 ${parent.id} の差分を当てられませんでした: ${applied.stderr.toString().trim()}`.trim()
@@ -59,8 +62,24 @@ export async function applyAndCheck(candidate: Candidate, options: ApplyOptions)
     }
     candidate.diff = `${diff}\n`
     const result = await sandboxed(tree, check)
-    if (result.code !== 0) candidate.note = `${candidate.note}\n検査に落ちました: ${result.output.slice(-1000)}`.trim()
-    return result.code === 0 ? 1 : 0
+    if (result.code !== 0) {
+      candidate.note = `${candidate.note}\n検査に落ちました: ${result.output.slice(-1000)}`.trim()
+      return 0
+    }
+    if (!adopt) return 1
+    const summary = `${candidate.id}: ${candidate.module} の自己改良`
+    git(tree, '-c', 'user.name=hypharness', '-c', 'user.email=hypharness@localhost', 'commit', '-q', '-m', summary, '-m', candidate.changes.map((c) => `- ${c}`).join('\n'))
+    const commit = git(tree, 'rev-parse', 'HEAD')
+    try {
+      // 周の間に流れが統合ブランチを進めていたら積まない
+      git(repo, 'update-ref', `refs/heads/${BRANCH}`, commit, hasBranch ? base : '0'.repeat(40))
+    } catch (e) {
+      candidate.note = `${candidate.note}\n統合ブランチに積めませんでした: ${(e as Error).message}`.trim()
+      return 0
+    }
+    candidate.commit = commit
+    if (git(repo, 'remote').split('\n').includes('origin')) git(repo, 'push', 'origin', BRANCH)
+    return 1
   } finally {
     Bun.spawnSync(['git', '-C', repo, 'worktree', 'remove', '--force', tree])
   }
