@@ -3,14 +3,14 @@ import { readdir } from 'node:fs/promises'
 import { relative, resolve } from 'node:path'
 import type { AssistantMessage, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { AgentStore } from '../shared/contract.ts'
-import { ctx, editContext, messageText, SHRINK_HINT } from './ctx.ts'
-import { AGENT_DIET } from './settings.ts'
+import { promptTokens, workingContext } from './ctx.ts'
+import { AGENT_DIET, COMPRESSION_GUIDE } from './settings.ts'
 import type { Call } from './topic.ts'
 
 const short = (text: string, max = 160) => (text.length > max ? `${text.slice(0, max)}…` : text)
 
 // ツール結果の文字列を AGENT_DIET の規則で縮める。連続する同じ行を1行に、連続する空行を1行に詰め、
-// toolResultMaxChars 文字を超える分を後ろから切る
+// toolResultMaxChars 文字を超える分を後ろから切り、切ったことを書き添える
 export function shrinkToolResult(text: string) {
   let deduped = text.split('\n')
   if (AGENT_DIET.collapseRepeatedLines) {
@@ -31,7 +31,9 @@ export function shrinkToolResult(text: string) {
     }
     lines = list
   }
-  return lines.join('\n').slice(0, AGENT_DIET.toolResultMaxChars)
+  const joined = lines.join('\n')
+  const max = AGENT_DIET.toolResultMaxChars
+  return joined.length > max ? `${joined.slice(0, max)}\n…（${joined.length} 文字のうち先頭の ${max} 文字）` : joined
 }
 
 // 応答の文とツールの呼び出しを、動きとして残す
@@ -81,52 +83,50 @@ export const READ_TOOLS = [
   },
 ] as Tool[]
 
-// 過去の会話を語で検索するツール。呼んだエージェントの id の SQLite を検索する
+// 作業文脈に置き換えた会話の原文を語で探すツール（LCM）
 export const RECALL_TOOL = {
   name: 'recall',
-  description: 'このエージェントの過去のメッセージと要約を語で検索する。一致したメッセージの全文と要約を返す',
+  description: '作業文脈に置き換えて見えなくなった会話の原文を、語で探す',
   parameters: object(
     {
-      query: { type: 'string', description: '検索する語' },
+      query: { type: 'string', description: '探す語。空白で区切ると、どれかを含むものを返す' },
       max_results: { type: 'number', description: '返す件数の上限（既定 5）' },
     },
     ['query'],
   ),
 } as Tool
 
-// 文脈ファイルを書き換えるツール。old の1箇所だけを new に置き換える
+// これまでの会話を、モデルが書いた作業文脈に置き換えるツール（CLM）
 export const EDIT_CONTEXT_TOOL = {
   name: 'edit_context',
-  description: 'このエージェントの文脈ファイルを書き換える。old が1回だけ現れるときその1箇所を new に置き換える',
-  parameters: object(
-    {
-      old: { type: 'string', description: '文脈ファイルにある、置き換える前の文' },
-      new: { type: 'string', description: '置き換えた後の文。空文字は不可' },
-    },
-    ['old', 'new'],
-  ),
+  description: `ここまでの会話（最初の指示を除く）を content に置き換える。次の呼び出しからは、置き換えた会話の代わりに content だけが渡り、原文は recall で引ける。文脈が長くなり、古いツールの出力が要らなくなったときに呼ぶ。ほかのツールと同じ応答で呼ぶと、それらの結果も置き換えに含まれる。${COMPRESSION_GUIDE}`,
+  parameters: object({ content: { type: 'string', description: '作業を続けるのに要ることを書いた作業文脈' } }, ['content']),
 } as Tool
 
-// recall の結果を文にする。一致が無ければその旨を返す。一致したブロックは参照したものとして数える。
-// 文脈のトークン数が上限の 70% を超えているときは、返す文の末尾に縮める指示を添える
-export function recall(agent: string, query: unknown, maxResults?: unknown) {
-  const n = Number(maxResults)
-  const store = ctx(agent)
-  // 文脈が上限に近いときだけ、末尾に縮める指示を添える
-  const withHint = (text: string) => (store.overLimit() ? `${text}\n${SHRINK_HINT}` : text)
-  const found = store.search(String(query ?? ''), Number.isFinite(n) && n > 0 ? n : undefined)
-  if (found.messages.length === 0 && found.summaries.length === 0) {
-    return withHint('一致するメッセージや要約はありません。')
+// edit_context と recall を作業文脈で処理する。ほかのツールなら undefined を返す
+export function contextTool(context: ReturnType<typeof workingContext>, messages: Message[], call: ToolCall) {
+  const a = call.arguments as Record<string, unknown>
+  if (call.name === 'edit_context') {
+    const content = String(a.content ?? '').trim()
+    if (!content) throw new Error('content が空のため、置き換えませんでした')
+    context.replace(messages, content)
+    return '置き換えた。次の呼び出しから、ここまでの会話の代わりに作業文脈を渡す'
   }
-  for (const message of found.messages) store.markReferenced('生', message.id)
-  for (const summary of found.summaries) store.markReferenced('要約', summary.id)
-  const lines: string[] = []
-  for (const message of found.messages) {
-    const inSummaries = message.summaries.length > 0 ? `（要約 ${message.summaries.join(', ')} に含まれる）` : ''
-    lines.push(`メッセージ ${message.id}${inSummaries}:\n${message.text}`)
+  if (call.name === 'recall') {
+    const n = Number(a.max_results)
+    return context.recall(messages, String(a.query ?? ''), Number.isFinite(n) && n > 0 ? n : undefined)
   }
-  for (const summary of found.summaries) lines.push(`要約 ${summary.id}:\n${summary.text}`)
-  return withHint(lines.join('\n\n'))
+  return undefined
+}
+
+// 文脈がしきい値の半分を超えたら、最後のツールの結果に大きさを書き添える。縮めるかはモデルが決める（CLM）
+export function noteSize(messages: Message[], tokens: number) {
+  const last = messages.at(-1)
+  if (tokens <= AGENT_DIET.compactAtTokens / 2 || last?.role !== 'toolResult') return
+  last.content.push({
+    type: 'text',
+    text: `（文脈は約 ${tokens} トークン。${AGENT_DIET.compactAtTokens} を超えると、古い会話を決まった手順で要約に置き換える。その前に edit_context で自分で縮められる）`,
+  })
 }
 
 // 最後の応答のツールの呼び出しのうち、結果のないものに text を結果として返す。API は結果のない呼び出しの後に会話を続けさせない
@@ -146,38 +146,9 @@ export function answerPending(messages: Message[], text: string) {
   }
 }
 
-// 会話を ctx に追記する関数を返す。追記した位置を覚えておき、同じメッセージは2回追記しない。
-// 続きから始める会話は、既に保存されている先頭の分を飛ばす。追記の失敗では例外を出さない
-function recorder(agent: string) {
-  let store: ReturnType<typeof ctx> | undefined
-  let opened = false
-  let saved = 0
-  return (messages: Message[]) => {
-    if (!opened) {
-      opened = true
-      try {
-        store = ctx(agent)
-        const stored = store.messages().map((m) => JSON.stringify(m))
-        while (saved < stored.length && saved < messages.length && JSON.stringify(messages[saved]) === stored[saved]) saved++
-      } catch {
-        store = undefined
-      }
-    }
-    if (!store) return
-    try {
-      for (; saved < messages.length; saved++) store.append(messages[saved])
-    } catch {
-      // 追記の失敗でエージェントの実行を止めない
-    }
-  }
-}
-
 // 1回の実行のモデルの呼び出しの上限。費用は課題ごとの上限（ADR 0011）で止めるので、これは暴走の止め役に過ぎない。
 // 60 回では、irisout の制約を調べながら Monaco を入れる課題（t13）が終わらなかった
 const MAX_TURNS = 200
-
-// 要約ノードにまとめず、生のまま残す直近のメッセージの件数
-const SUMMARY_KEEP = 8
 
 // stop が値を返したツールの呼び出しで、ループを終えてその値を返す
 export async function runAgent<T>(options: {
@@ -188,12 +159,14 @@ export async function runAgent<T>(options: {
   system: string
   tools: Tool[]
   messages: Message[]
+  // 作業文脈を分ける単位。課題の作業ツリーなど、子プロセスをまたいで同じ値になるもの
+  contextKey: string
   run: (call: ToolCall) => Promise<string>
   stop: (call: ToolCall) => T | undefined
 }): Promise<T> {
   const { store, call, agent, taskId, system, tools, messages, run, stop } = options
-  const save = recorder(agent)
-  save(messages)
+  const context = workingContext(options.contextKey)
+  let tokens = 0
   // ツールの結果を、縮めてエラーを握る形にする
   const attempt = async (work: () => string | Promise<string>) => {
     try {
@@ -203,42 +176,19 @@ export async function runAgent<T>(options: {
     }
   }
   for (let turn = 0; turn < MAX_TURNS; turn++) {
-    // 毎ターンのモデルの呼び出しの前に文脈ファイルを組み立て、そのパスとブロックごとの状態をシステムプロンプトの末尾に書く
-    let systemPrompt = system
-    try {
-      const context = ctx(agent)
-      context.beginTurn()
-      // 現在のリクエストは直近の user のメッセージの本文。要約ノードをこの本文で並べ替える
-      const last = messages.findLast((m) => m.role === 'user')
-      const request = last ? messageText(last) : undefined
-      const path = context.buildContextFile(undefined, request)
-      const lines = context.contextStatus(undefined, request)
-      systemPrompt =
-        lines.length > 0
-          ? `${system}\n文脈ファイル: ${path}\n文脈ブロック:\n${lines.join('\n')}`
-          : `${system}\n文脈ファイル: ${path}`
-    } catch {
-      // 文脈ファイルを作れなくてもエージェントの実行は止めない
-    }
-    const reply = await call({ topicId: agent, taskId, context: { systemPrompt, messages, tools } })
+    if (context.compact(messages, tokens)) store.act(agent, 'text', '文脈がしきい値を超えたため、古い会話を要約に置き換えた')
+    const reply = await call({ topicId: agent, taskId, context: { systemPrompt: system, messages: context.view(messages), tools } })
+    tokens = promptTokens(reply)
     messages.push(reply)
-    save(messages)
     noteReply(store, agent, reply)
     const calls = reply.content.filter((c): c is ToolCall => c.type === 'toolCall')
     if (calls.length === 0) {
       messages.push({ role: 'user', content: 'ツールを呼んで進めてください。', timestamp: Date.now() })
-      save(messages)
     } else {
       for (const toolCall of calls) {
         const result = stop(toolCall)
         if (result !== undefined) return result
-        const outcome =
-          toolCall.name === 'edit_context'
-            ? await attempt(() => {
-                const a = toolCall.arguments as Record<string, unknown>
-                return editContext(agent, String(a.old ?? ''), String(a.new ?? ''))
-              })
-            : await attempt(() => run(toolCall))
+        const outcome = await attempt(() => contextTool(context, messages, toolCall) ?? run(toolCall))
         store.act(agent, 'result', `${toolCall.name}: ${short(outcome.text.replace(/\s+/g, ' '))}`)
         messages.push({
           role: 'toolResult',
@@ -248,17 +198,8 @@ export async function runAgent<T>(options: {
           isError: outcome.isError,
           timestamp: Date.now(),
         })
-        save(messages)
       }
-    }
-    // ターンが終わった後に、AGENT_DIET.summaryEvery ターンごとに古いメッセージを要約ノードにまとめる。
-    // 要約を作れなくてもエージェントの実行は止めない
-    if ((turn + 1) % AGENT_DIET.summaryEvery === 0) {
-      try {
-        ctx(agent).summarizeOld(SUMMARY_KEEP)
-      } catch {
-        // 要約の失敗は握りつぶす
-      }
+      noteSize(messages, tokens)
     }
   }
   throw new Error(`${agent} がモデルを ${MAX_TURNS} 回呼んでも終わりませんでした`)

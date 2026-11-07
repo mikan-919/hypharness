@@ -47,6 +47,8 @@ test('127.0.0.1 と、192.168.1.1 に解決されるホスト名は取得しな�
   try {
     await expect(webFetch('https://127.0.0.1/a')).rejects.toThrow('内部を指す宛先')
     await expect(webFetch('https://internal.example/a')).rejects.toThrow('内部を指す宛先')
+    await expect(webFetch('http://0.0.0.0:4173/')).rejects.toThrow('内部を指す宛先')
+    await expect(webFetch('http://[fe80::1]/')).rejects.toThrow('内部を指す宛先')
     expect(calls).toEqual([])
   } finally {
     restore()

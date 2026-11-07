@@ -42,18 +42,18 @@ const parseHttp = (raw: string) => {
   return url
 }
 
-// 内部を指す宛先か。127.0.0.0/8・10.0.0.0/8・172.16.0.0/12・192.168.0.0/16・169.254.0.0/16・::1・fc00::/7
+// 内部を指す宛先か。0.0.0.0/8・127.0.0.0/8・10.0.0.0/8・172.16.0.0/12・192.168.0.0/16・169.254.0.0/16・::1・fc00::/7・fe80::/10
 const blocked = (raw: string) => {
   const address = raw.trim().toLowerCase().replace(/^\[|\]$/g, '').split('%')[0]
   const v4 = address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address
   const parts = v4.split('.')
   if (parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p))) {
     const [a, b] = parts.map(Number)
-    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
+    return a === 0 || a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
   }
   if (address === '::1' || address === '0:0:0:0:0:0:0:1') return true
   const first = address.split(':')[0]
-  return /^f[cd][0-9a-f]{0,2}$/.test(first)
+  return /^f[cd][0-9a-f]{0,2}$/.test(first) || /^fe[89ab][0-9a-f]$/.test(first)
 }
 
 // ホスト名を解決し、どの宛先も内部を指していないことを確かめる

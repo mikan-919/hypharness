@@ -6,4 +6,4 @@
 - ツールの引数の形（必須と任意）を決め、呼び出しの引数を読む。
 - ツールを実行し、結果を会話に返す。作業ツリーの外を指すパスの拒否と、隔離環境でのコマンドの実行を含む。
 
-コード: `harness/agent.ts` の `object`・`inside`・`listFiles`・`readFile`・`READ_TOOLS`・`RECALL_TOOL`・`recall`、`harness/roles.ts` の `DECOMPOSE_TOOLS`・`SOLVE_TOOLS` と各 `run` の分岐、`harness/topic.ts` の `TOOLS`、`harness/fetch.ts` の `webFetch`、`harness/sandbox.ts`。
+コード: `harness/agent.ts` の `object`・`inside`・`listFiles`・`readFile`・`READ_TOOLS`、`harness/roles.ts` の `DECOMPOSE_TOOLS`・`SOLVE_TOOLS` と各 `run` の分岐、`harness/topic.ts` の `TOOLS`、`harness/fetch.ts` の `webFetch`、`harness/sandbox.ts`。

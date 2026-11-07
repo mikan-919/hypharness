@@ -2,7 +2,8 @@
 import { relative } from 'node:path'
 import type { AssistantMessage, Context, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { Edit } from '../shared/dialog.ts'
-import { EDIT_CONTEXT_TOOL, inside, listFiles, noteReply, object, readFile } from './agent.ts'
+import { contextTool, EDIT_CONTEXT_TOOL, inside, listFiles, noteReply, noteSize, object, readFile, RECALL_TOOL } from './agent.ts'
+import { promptTokens, workingContext } from './ctx.ts'
 import { webFetch } from './fetch.ts'
 import { type AgentStore, CostLimitError } from '../shared/contract.ts'
 
@@ -150,6 +151,7 @@ const TOOLS_BASE = [
     ),
   },
   EDIT_CONTEXT_TOOL,
+  RECALL_TOOL,
   { name: 'ready', description: '最終目的が課題に分けられるところまで決まったときに呼ぶ', parameters: object({}, []) },
 ] as Tool[]
 
@@ -275,6 +277,8 @@ export async function runTopic(store: AgentStore, call: Call, topicId: string, r
     { role: 'user', content: 'FINAL_GOAL.md を利用者と一緒に書き換えて、課題に分けられるところまで具体的にしてください。', timestamp: Date.now() },
   ]
   const save = () => store.saveTranscript(topicId, messages)
+  const context = workingContext(`topic:${repo}:${topicId}`)
+  let tokens = 0
   let refused = 0
   store.setTopic(topicId, { state: 'researching' })
   try {
@@ -286,7 +290,9 @@ export async function runTopic(store: AgentStore, call: Call, topicId: string, r
           store.setSeen(topicId, (await store.snapshot()).goal.version)
         }
         // ponytail: 対話は1つの課題として費用の上限を受ける。論点が増えたら論点ごとに分ける
-        const reply = await call({ topicId, taskId: 'dialog', context: { systemPrompt: SYSTEM, messages, tools: TOOLS() } })
+        if (context.compact(messages, tokens)) store.act(topicId, 'text', '文脈がしきい値を超えたため、古い会話を要約に置き換えた')
+        const reply = await call({ topicId, taskId: 'dialog', context: { systemPrompt: SYSTEM, messages: context.view(messages), tools: TOOLS() } })
+        tokens = promptTokens(reply)
         messages.push(reply)
         noteReply(store, topicId, reply)
         save()
@@ -311,7 +317,7 @@ export async function runTopic(store: AgentStore, call: Call, topicId: string, r
         const result =
           toolCall.name === 'ready'
             ? { text: '決定を write_doc で ADR に書いてから ready を呼んでください', isError: true }
-            : await run(store, topicId, repo, toolCall, charge).then(
+            : await (async () => contextTool(context, messages, toolCall) ?? run(store, topicId, repo, toolCall, charge))().then(
                 (text) => ({ text, isError: false }),
                 (e: Error) => ({ text: e.message, isError: true }),
               )
@@ -327,6 +333,8 @@ export async function runTopic(store: AgentStore, call: Call, topicId: string, r
         })
         save()
       }
+      noteSize(messages, tokens)
+      save()
     }
   } catch (e) {
     store.record({ topicId, kind: 'fail', text: (e as Error).message, evidence: '中継' })
