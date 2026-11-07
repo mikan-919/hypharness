@@ -1,4 +1,5 @@
 import { Readable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite-plus'
 import { irisoutHono } from 'irisout/hono/vite'
 import { app, boot } from './server/app.ts'
@@ -44,5 +45,7 @@ const clientAlias = {
 
 export default defineConfig({
   plugins: [irisoutHono(app), honoDevelopment, clientAlias],
+  // ponytail: irisout は相対 import を仮想 module から解決できず、動的 import も断る。Monaco を遅く読む小さな module だけを別名で Vite に渡す
+  resolve: { alias: { 'hyph-monaco': fileURLToPath(new URL('./routes/monaco.mjs', import.meta.url)) } },
   build: { rollupOptions: { input: {} } },
 })

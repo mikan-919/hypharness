@@ -2,7 +2,8 @@
 import { relative } from 'node:path'
 import type { AssistantMessage, Context, Message, Tool, ToolCall } from '@earendil-works/pi-ai'
 import type { Edit } from '../shared/dialog.ts'
-import { inside, listFiles, noteReply, object, readFile } from './agent.ts'
+import { EDIT_CONTEXT_TOOL, inside, listFiles, noteReply, object, readFile } from './agent.ts'
+import { webFetch } from './fetch.ts'
 import { type AgentStore, CostLimitError } from '../shared/contract.ts'
 
 export type Call = (body: { topicId: string; taskId: string; context: Context }) => Promise<AssistantMessage>
@@ -137,6 +138,18 @@ const TOOLS_BASE = [
       ['path', 'content'],
     ),
   },
+  {
+    name: 'web_fetch',
+    description: 'URL の本文を取得する。text/html と text/* だけを扱い、タグを除いた本文を返す',
+    parameters: object(
+      {
+        url: { type: 'string', description: '取得する URL。http: か https: だけ' },
+        max_chars: { type: 'number', description: '返す本文の文字数。既定は 20,000、上限は 50,000' },
+      },
+      ['url'],
+    ),
+  },
+  EDIT_CONTEXT_TOOL,
   { name: 'ready', description: '最終目的が課題に分けられるところまで決まったときに呼ぶ', parameters: object({}, []) },
 ] as Tool[]
 
@@ -228,6 +241,10 @@ async function run(store: AgentStore, topicId: string, repo: string, call: ToolC
     // 検索が成功したときだけ費用を数える
     await charge?.({ topicId, taskId: 'dialog', costUsd: SEARCH_COST })
     return found
+  }
+  if (call.name === 'web_fetch') {
+    if (!a.url) throw new Error('web_fetch には url が要ります')
+    return await webFetch(String(a.url), a.max_chars)
   }
   if (call.name === 'list_files') return listFiles(repo, a.path)
   if (call.name === 'read_file') return readFile(repo, a.path)
