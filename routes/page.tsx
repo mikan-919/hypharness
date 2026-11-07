@@ -205,6 +205,15 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
             )}
             {saved() && <p class="hint">{saved()}</p>}
           </form>
+          {items().length > 0 && (
+            <div class="queue">
+              {items().map((q) => (
+                <span key={q.id} class={`chip ${pending()[0] === q.id ? 'head' : ''} ${q.answer !== '' ? 'answered' : ''}`}>
+                  {q.id}
+                </span>
+              ))}
+            </div>
+          )}
           {head() && (
             <article class="question head">
               <h2>{head().text}</h2>
