@@ -2,11 +2,12 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AssistantMessage, Message } from '@earendil-works/pi-ai'
-import { sandboxed } from '../../harness/sandbox.ts'
+import type { Call } from '../../harness/topic.ts'
 import type { Dialog, Task } from '../../shared/dialog.ts'
 import { MODULE_SUMMARY, type Candidate } from '../../shared/evolve.ts'
 import { deepinfra } from '../model.ts'
 import { createStore } from '../store.ts'
+import { applyAndCheck } from './apply.ts'
 import { runRound, type Proposal, type ProposeInput, type RoundResult } from './round.ts'
 import { evoPaths, listArchive, listCandidates } from './store.ts'
 
@@ -20,6 +21,8 @@ export type EvolveOptions = {
   check?: (candidate: Candidate) => 0 | 1 | Promise<0 | 1>
   spent?: () => number
   limitUsd?: number
+  // 候補を当てるハーネスのリポジトリ。既定はこのファイルのあるリポジトリ
+  harness?: string
   // 採用した候補を、提案に使わなかった課題で測る。渡さないときは測らない
   holdout?: (candidate: Candidate, tasks: Task[]) => 0 | 1
 }
@@ -116,7 +119,7 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
   const limitUsd = Number.isFinite(limit) ? limit : 1
 
   let cost = 0
-  const stream = options.propose ? undefined : deepinfra()
+  const stream = options.propose && options.check ? undefined : deepinfra()
 
   const propose =
     options.propose ??
@@ -132,17 +135,29 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
       }
     })
 
+  // 解答役が呼ぶモデル。費用を cost に足す
+  const call: Call = async ({ context }) => {
+    if (!stream) throw new Error('モデルの呼び出し先を作れませんでした')
+    for await (const event of stream(context)) {
+      if (event.type === 'error') throw new Error(event.error.errorMessage ?? 'モデルの呼び出しに失敗しました')
+      if (event.type === 'done') {
+        cost += event.message.usage.cost.total
+        return event.message
+      }
+    }
+    throw new Error('モデルの応答がありませんでした')
+  }
+
+  // 候補の変更を解答役にコードへ当てさせ、検査を通るかで 0 か 1 にする
   const check =
     options.check ??
-    (async (): Promise<0 | 1> => {
-      try {
-        const typecheck = await sandboxed(repo, 'bun run typecheck')
-        const test = await sandboxed(repo, 'bun test')
-        return typecheck.code === 0 && test.code === 0 ? 1 : 0
-      } catch {
-        return 0
-      }
-    })
+    ((candidate: Candidate) =>
+      applyAndCheck(candidate, {
+        repo: options.harness ?? join(import.meta.dir, '..', '..'),
+        call,
+        check: process.env.CHECK_COMMAND || 'bun run typecheck && bun test',
+        parent: listArchive(root).find((c) => c.id === candidate.parent),
+      }))
 
   const spent = options.spent ?? (() => cost)
 

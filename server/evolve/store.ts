@@ -29,7 +29,7 @@ const parse = (text: string): Candidate => {
   return { ...c, cost: typeof c.cost === 'number' ? c.cost : 0 }
 }
 
-// 候補のコードの本文。# <id>、module、round、changes と変更の行を並べる
+// 候補のコードの本文。# <id>、module、round、changes と変更の行、当てた差分を並べる
 const codeText = (c: Candidate): string =>
   [
     `# ${c.id}`,
@@ -37,6 +37,7 @@ const codeText = (c: Candidate): string =>
     `round: ${c.round}`,
     'changes:',
     ...c.changes.map((change) => `- ${change}`),
+    ...(c.diff ? ['', '```diff', c.diff.trimEnd(), '```'] : []),
     '',
   ].join('\n')
 

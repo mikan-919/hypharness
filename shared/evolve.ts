@@ -14,7 +14,8 @@ export const MODULE_SUMMARY: Record<Module, string> = {
 }
 
 // 1つの変更案。round は周の番号、score は回帰テストの報酬（0 か 1）、cost は検証に使った費用（ドル）。
-// holdout は採用した候補を提案に使わなかった課題で測った結果（0 か 1）。未測定は undefined
+// holdout は採用した候補を提案に使わなかった課題で測った結果（0 か 1）。未測定は undefined。
+// parent は出発点にした候補の id、diff は統合ブランチの先端から当てたコードの差分（出発点の分を含む）
 export type Candidate = {
   id: string
   round: number
@@ -24,6 +25,8 @@ export type Candidate = {
   note: string
   cost: number
   holdout?: 0 | 1
+  parent?: string
+  diff?: string
 }
 
 // モジュールごとのプロンプトの候補（最終目的の 6 の 8）。

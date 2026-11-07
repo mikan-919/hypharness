@@ -250,6 +250,7 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
       score: 0,
       note: proposal.note ?? '',
       cost: 0,
+      ...(start ? { parent: start.id } : {}),
     }
     writeCandidate(candidate, root)
 
