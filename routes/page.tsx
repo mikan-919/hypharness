@@ -30,7 +30,7 @@ const stages = [
 const evolutionStageLabel = { proposing: '変更案を作っている', validating: '候補を検査している', done: '終えた' }
 
 // タブの見出しに件数を添える。
-// ponytail: irisout 0.3.7 は derived(() => ({ ... })) の括弧を落とすため、オブジェクトを返す derived を使わずに関数にする
+// ponytail: irisout 0.3.7 は derived(() => ({ ... })) の括弧を落とすため、オブジェクトを返す derived を使わずに関数にする（mikan-919/irisout#7）
 function tabTitle(name: keyof typeof tabLabel, tasks: number, entries: number, edits: number) {
   const count = name === 'tasks' ? tasks : name === 'context' ? entries : name === 'history' ? edits : -1
   return count < 0 ? tabLabel[name] : `${tabLabel[name]} ${count}`

@@ -1,4 +1,4 @@
-// ponytail: irisout 0.3.7 は相対 import の .ts/.tsx を自前で解析し、動的 import を scope limit として断る。
+// ponytail: irisout 0.3.7 は相対 import の .ts/.tsx を自前で解析し、動的 import を scope limit として断る（mikan-919/irisout#8）。
 // このファイルは vite.config.ts の別名（hyph-monaco）で読み込み、irisout に解析させず Vite に任せる。
 // SSR では page.tsx の onMount の中でしか使わないので、サーバー側の描画では monaco-editor を読まない
 export async function mountMonaco(element, value, onChange) {
