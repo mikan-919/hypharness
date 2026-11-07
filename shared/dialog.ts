@@ -1,5 +1,6 @@
 // 対話の画面に流すデータの形。ハーネスが画面へ渡す（ADR 0016）。
 import type { DiffLine } from './diff.ts'
+import type { Candidate } from './evolve.ts'
 
 export type TopicState = 'researching' | 'asking' | 'ready' | 'blocked'
 
@@ -54,6 +55,15 @@ export type Edit = {
   before: string
 }
 
+// 自己改良の1周の進み。stage は提案づくり（proposing）、候補の採否（validating）、終えた（done）
+export type Evolution = {
+  round: number
+  stage: 'proposing' | 'validating' | 'done'
+  // この周で使った費用（ドル）
+  spent: number
+  candidates: Candidate[]
+}
+
 export type Dialog = {
   topics: Topic[]
   // 質問の待ち行列。先頭が利用者に出す質問
@@ -74,6 +84,8 @@ export type Dialog = {
   stopping: boolean
   // 分解役が最終目的を満たしたと判断して流れを終えた理由。動き出したら空にする
   finished: string
+  // 自己改良の1周の進み。回していないときは null
+  evolution: Evolution | null
 }
 
 export type TaskState = 'solving' | 'checking' | 'committed' | 'held'

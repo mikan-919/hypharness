@@ -14,6 +14,14 @@ import { evoPaths, listArchive, listCandidates } from './store.ts'
 
 export type EvolveResult = RoundResult & { spent: number }
 
+// 進みの報告。spent は終えたときだけ入る
+export type EvolveProgress = {
+  stage: 'proposing' | 'validating' | 'done'
+  round: number
+  candidates: Candidate[]
+  spent?: number
+}
+
 export type EvolveOptions = {
   repo?: string
   root?: string
@@ -30,6 +38,8 @@ export type EvolveOptions = {
   adopt?: boolean
   // 採用した候補を、提案に使わなかった課題で測る。渡さないときは測らない
   holdout?: (candidate: Candidate, tasks: Task[]) => 0 | 1
+  // 進みの報告。始めと、候補が増えるたびと、終わりに呼ぶ
+  onProgress?: (progress: EvolveProgress) => void
 }
 
 const defaultRoot = () => process.env.HYPH_EVO || join(homedir(), '.hyph', 'evo')
@@ -122,6 +132,10 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
   const dialog = options.dialog ?? dialogOf(repo)
   const limit = options.limitUsd ?? Number(process.env.EVOLVE_LIMIT_USD ?? 1)
   const limitUsd = Number.isFinite(limit) ? limit : 1
+  const round = nextRound(root)
+  const report = (stage: EvolveProgress['stage'], candidates: Candidate[], value?: number) => {
+    options.onProgress?.({ stage, round, candidates, ...(value === undefined ? {} : { spent: value }) })
+  }
 
   let cost = 0
   const stream = options.stream ?? (options.propose && options.check ? undefined : deepinfra())
@@ -167,8 +181,9 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
 
   const spent = options.spent ?? (() => cost)
 
+  report('proposing', [])
   const result = await runRound({
-    round: nextRound(root),
+    round,
     dialog,
     propose,
     check,
@@ -176,7 +191,11 @@ export async function runEvolve(options: EvolveOptions = {}): Promise<EvolveResu
     limitUsd,
     root,
     holdout: options.holdout,
+    report: (candidates) => report('validating', candidates),
   })
-  return { ...result, spent: spent() }
+  const total = spent()
+  const final = { ...result, spent: total }
+  report('done', final.candidates, total)
+  return final
 }
 

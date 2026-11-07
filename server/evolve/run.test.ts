@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Dialog } from '../../shared/dialog.ts'
 import type { Candidate } from '../../shared/evolve.ts'
-import { proposeMaterial, runEvolve, readProposal } from './run.ts'
+import { proposeMaterial, runEvolve, readProposal, type EvolveProgress } from './run.ts'
 import type { ProposeInput } from './round.ts'
 import { archiveCandidate, evoPaths, listArchive, listCandidates, writeCandidate } from './store.ts'
 
@@ -29,6 +29,7 @@ const emptyDialog = (): Dialog => ({
   halted: '',
   stopping: false,
   finished: '',
+  evolution: null,
 })
 
 test('検証が 1 の候補だけ archive に移り、0 の候補は candidates に残る', async () => {
@@ -196,4 +197,29 @@ test('JSON として読めない応答は changes を空にし、理由を note 
 
 test('JSON の応答から changes と note を読む', () => {
   expect(readProposal('{"changes": ["a", "b"], "note": "n"}')).toEqual({ changes: ['a', 'b'], note: 'n' })
+})
+
+test('onProgress は proposing から validating を経て done になり、最後に round・spent・candidates が入る', async () => {
+  const root = evo()
+  const events: EvolveProgress[] = []
+  const result = await runEvolve({
+    repo: mkdtempSync(join(tmpdir(), 'hyph-evo-repo-')),
+    dialog: emptyDialog(),
+    propose: (input) => ({ changes: [`${input.module} の変更`], note: '' }),
+    check: () => 1,
+    spent: () => 2,
+    limitUsd: 100,
+    onProgress: (progress) => events.push({ ...progress, candidates: [...progress.candidates] }),
+  })
+
+  expect(events[0].stage).toBe('proposing')
+  expect(events[0].round).toBe(1)
+  expect(events[0].candidates).toEqual([])
+  expect(events.filter((e) => e.stage === 'validating').map((e) => e.candidates.length)).toEqual([1, 2, 3, 4, 5])
+  const last = events.at(-1)!
+  expect(last.stage).toBe('done')
+  expect(last.round).toBe(result.round)
+  expect(last.spent).toBe(result.spent)
+  expect(last.candidates.map((c) => c.id)).toEqual(result.candidates.map((c) => c.id))
+  expect(listArchive(root).map((c) => c.id)).toEqual(['1-1', '1-2', '1-3', '1-4', '1-5'])
 })

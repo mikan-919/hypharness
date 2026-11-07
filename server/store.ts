@@ -2,7 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { Message } from '@earendil-works/pi-ai'
-import type { Activity, Dialog, Entry, Question, Task, Topic } from '../shared/dialog.ts'
+import type { Activity, Dialog, Entry, Evolution, Question, Task, Topic } from '../shared/dialog.ts'
 import { diffLines } from '../shared/diff.ts'
 
 // seen は論点ごとの、エージェントが既に知っている本文の版
@@ -22,6 +22,7 @@ const EMPTY: Dialog = {
   halted: '',
   stopping: false,
   finished: '',
+  evolution: null,
 }
 
 // ponytail: 動きは新しい 200 件だけを残す。遡って見る必要が出たら別のファイルに全件を書く
@@ -80,6 +81,18 @@ export function createStore(file?: string, goalFile?: string) {
   return {
     snapshot: () => dialog,
     editGoal,
+    // 自己改良の1周の進みを保存する。まだ無ければ初期の値から始める
+    setEvolution(patch: Partial<Evolution>) {
+      dialog.evolution = {
+        round: 0,
+        stage: 'proposing',
+        spent: 0,
+        candidates: [],
+        ...dialog.evolution,
+        ...patch,
+      }
+      changed()
+    },
     // ある書き換えの前の版に戻す。戻すことも1回の書き換えとして履歴に残す
     revert(editId: string) {
       const edit = dialog.edits.find((e) => e.id === editId)
