@@ -1,6 +1,6 @@
 import { derived, onMount, render, signal } from 'irisout'
 import { Layout } from './Layout.tsx'
-import type { Dialog, TaskUsage, Usage } from '../shared/dialog.ts'
+import type { Dialog, Evolution, TaskUsage, Usage } from '../shared/dialog.ts'
 import { mountMonaco } from 'hyph-monaco'
 
 const stateLabel = {
@@ -18,6 +18,20 @@ const agentLabel = { decompose: '分解役', solve: '解答役', host: '固定�
 
 const tabLabel = { context: '共有文脈', history: '書き換えの履歴', cost: '費用' }
 
+// ループの段階。上から順に、今の段階を1つだけ強調する
+const stages = [
+  { n: 1, label: '目的を詰める' },
+  { n: 2, label: '開始の合図' },
+  { n: 3, label: '課題を解く' },
+  { n: 4, label: '統合' },
+  { n: 5, label: '自己改良の1周' },
+]
+
+// 自己改良の1周の補足。まだ始まっていなければ空
+function evolutionNote(e: Evolution | null) {
+  return e ? `第 ${e.round} 周（${e.stage}）` : ''
+}
+
 // 課題ごとの記録の1行。キャッシュの割合は、入力のうちキャッシュから読んだ分
 function usageLine(u: TaskUsage | undefined) {
   if (!u) return ''
@@ -25,7 +39,7 @@ function usageLine(u: TaskUsage | undefined) {
   return `呼び出し ${u.calls} 回・入力 ${u.input + u.cacheRead}（キャッシュ ${cached}%）・出力 ${u.output}・最大の文脈 ${u.maxPrompt}・edit_context ${u.edits} 回・作り直し ${u.rebuilds} 回・$${u.costUsd.toFixed(4)}`
 }
 
-export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping, finished }: Dialog) {
+export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping, finished, evolution }: Dialog) {
   const topicList = signal(topics)
   const items = signal(questions)
   const pending = signal(queue)
@@ -53,6 +67,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const haltedReason = signal(halted)
   const finishedReason = signal(finished)
   const isStopping = signal(stopping)
+  const evolutionNow = signal<Evolution | null>(evolution)
   const recent = derived(() => [...activityList()].reverse().slice(0, 60))
   const writing = derived(() =>
     Object.entries(liveText())
@@ -64,6 +79,22 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const history = derived(() => [...editList()].reverse())
   const readyCount = derived(() => topicList().filter((t) => t.ready).length)
   const majority = derived(() => readyCount() * 2 > topicList().length)
+  // 今の段階の番号（1 始まり）。止まっていないときにだけ使う
+  const stage = derived(() =>
+    !isStarted() ? (majority() ? 2 : 1) : !finishedReason() ? 3 : evolutionNow() ? 5 : 4,
+  )
+  // 今の段階の補足
+  const stageNote = derived(() =>
+    stage() === 1
+      ? `開始可 ${readyCount()} / ${topicList().length}`
+      : stage() === 2
+        ? '論点の過半数が開始可になった'
+        : stage() === 3
+          ? isStopping() ? '今の課題を終えたら止める' : '分解役と解答役が課題を進めている'
+          : stage() === 4
+            ? finishedReason()
+            : evolutionNote(evolutionNow()),
+  )
   const startHint = derived(() =>
     isStarted()
       ? '分解役と解答役が課題を進めている'
@@ -82,6 +113,24 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     <Layout title="hypharness">
       <div class="shell">
         <aside class="threads">
+          {haltedReason() !== '' && (
+            <div class="stage halted">
+              <span class="number">!</span>
+              <span class="name">止まり</span>
+              <span class="note">{haltedReason()}</span>
+            </div>
+          )}
+          {haltedReason() === '' && (
+            <div class="stages">
+              {stages.map((s) => (
+                <div key={s.label} class={`stage ${stage() === s.n ? 'current' : ''}`}>
+                  <span class="number">{s.n}</span>
+                  <span class="name">{s.label}</span>
+                  <span class="note">{stage() === s.n ? stageNote() : ''}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <h2>論点</h2>
           {topicList().map((topic) => (
             <div key={topic.id} class={`thread ${topic.state}`}>
@@ -323,6 +372,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
       haltedReason(next.halted)
       finishedReason(next.finished ?? '')
       isStopping(next.stopping)
+      evolutionNow(next.evolution ?? null)
       // 書きかけでなければ、他の書き手の書き換えをそのまま映す。書きかけなら入力中の本文を変えない。
       // 保存の応答を待つ間に届いた古い版は映さない（保存済みの版を巻き戻さない）
       if (draft() === savedText() && next.goal.version >= savedVersion()) {

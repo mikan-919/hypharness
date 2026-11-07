@@ -34,7 +34,7 @@ h1 { font-size: 18px; margin: 0 0 12px; }
 h2 { font-size: 12px; color: var(--muted); letter-spacing: 0.08em; margin: 16px 0 8px; }
 .shell {
   display: grid;
-  grid-template-columns: 240px 1fr 300px;
+  grid-template-columns: 260px 1fr 340px;
   gap: 12px;
   height: 100vh;
   padding: 12px;
@@ -154,6 +154,20 @@ button:disabled { opacity: 0.5; cursor: default; }
 .activity.live p { color: var(--ink); }
 .activity.fail { border-color: var(--fail); }
 .activity.commit, .activity.check { border-color: var(--done); }
+.stage {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  column-gap: 8px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+.stage .number { color: var(--muted); }
+.stage .note { grid-column: 2; color: var(--muted); font-size: 11px; }
+.stage.halted { color: var(--fail); }
+.stage.halted .note { color: var(--fail); }
+.stage.current { color: var(--accent); font-weight: 700; }
+.stage.current .number { color: var(--accent); }
 @media (max-width: 900px) {
   .shell { grid-template-columns: 1fr; height: auto; }
 }
