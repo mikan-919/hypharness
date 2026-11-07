@@ -29,6 +29,8 @@ export type Candidate = {
   parent?: string
   diff?: string
   commit?: string
+  // 検査コマンドの標準出力と標準エラー。未記録は undefined
+  checkOutput?: { stdout: string; stderr: string }
 }
 
 // モジュールごとのプロンプトの候補（最終目的の 6 の 8）。

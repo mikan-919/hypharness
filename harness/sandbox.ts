@@ -42,9 +42,15 @@ export async function sandboxed(dir: string, command: string, timeoutMs = 300_00
     { stdout: 'pipe', stderr: 'pipe' },
   )
   const timer = setTimeout(() => proc.kill(), timeoutMs)
-  const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
+  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
   const code = await proc.exited
   clearTimeout(timer)
-  const output = out + err
-  return { code, output: output.length > MAX_OUTPUT ? `…${output.slice(-MAX_OUTPUT)}` : output }
+  const output = stdout + stderr
+  return {
+    code,
+    output: output.length > MAX_OUTPUT ? `…${output.slice(-MAX_OUTPUT)}` : output,
+    // 呼び出し元が完全な検査記録を必要とする場合に使う。output の表示上限は維持する
+    stdout,
+    stderr,
+  }
 }

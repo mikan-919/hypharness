@@ -68,6 +68,7 @@ export async function applyAndCheck(candidate: Candidate, options: ApplyOptions)
     }
     candidate.diff = `${diff}\n`
     const result = await sandboxed(tree, check)
+    candidate.checkOutput = { stdout: result.stdout, stderr: result.stderr }
     if (result.code !== 0) {
       candidate.note = `${candidate.note}\n検査に落ちました: ${result.output.slice(-1000)}`.trim()
       return 0

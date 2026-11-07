@@ -284,6 +284,20 @@ p.banner { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color:
 .change { font-size: 12px; padding-left: 12px; position: relative; margin-top: 4px; }
 .change::before { content: "・"; position: absolute; left: 0; color: var(--muted); }
 .note { font-size: 12px; color: var(--muted); white-space: pre-wrap; margin-top: 4px; max-height: 8em; overflow: hidden; }
+.check-output { border: 1px solid var(--line); border-radius: 6px; margin: 4px 0 8px; font-size: 12px; }
+.check-output summary { cursor: pointer; padding: 5px 8px; color: var(--muted); }
+.check-output > div { padding: 0 8px 4px; }
+.check-output strong { color: var(--muted); font-size: 11px; }
+.check-output pre {
+  font: 12px/1.5 ui-monospace, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  background: var(--sunken);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin: 4px 0 8px;
+}
 
 @media (max-width: 900px) {
   .shell { grid-template-columns: 1fr; height: auto; }

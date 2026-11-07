@@ -6,6 +6,7 @@ import type { AssistantMessage } from '@earendil-works/pi-ai'
 import type { Call } from '../../harness/topic.ts'
 import type { Candidate } from '../../shared/evolve.ts'
 import { applyAndCheck } from './apply.ts'
+import { readCandidate, writeCandidate } from './store.ts'
 
 process.env.HYPH_CTX_DIR = mkdtempSync(join(tmpdir(), 'hyph-ctx-'))
 
@@ -60,6 +61,28 @@ test('検査に落ちたら 0 にし、理由を note に残す。作業ツリ�
   expect(c.note).toContain('だめ')
   const worktrees = Bun.spawnSync(['git', '-C', repo, 'worktree', 'list']).stdout.toString().trim().split('\n')
   expect(worktrees).toHaveLength(1)
+})
+
+test('成功・失敗の検査出力を8000文字を超えて全文保存し、JSONから読み戻せる', async () => {
+  const repo = harness()
+  const root = mkdtempSync(join(tmpdir(), 'hyph-evo-output-'))
+  const stdout = `stdout-start${'x'.repeat(9_000)}stdout-end`
+  const stderr = `stderr-start${'y'.repeat(9_000)}stderr-end`
+
+  for (const [id, exitCode, score] of [
+    ['1-4', 0, 1],
+    ['1-5', 1, 0],
+  ] as const) {
+    const c = candidate(id)
+    const command = `printf '${stdout}'; printf '${stderr}' >&2; exit ${exitCode}`
+    expect(await applyAndCheck(c, { repo, call: writes(`${id}.txt`), check: command })).toBe(score)
+    expect(c.checkOutput).toEqual({ stdout, stderr })
+    expect(c.checkOutput!.stdout.length).toBeGreaterThan(8_000)
+    expect(c.checkOutput!.stderr.length).toBeGreaterThan(8_000)
+    c.score = score
+    writeCandidate(c, root)
+    expect(readCandidate(id, root).checkOutput).toEqual({ stdout, stderr })
+  }
 })
 
 test('解答役がコードを変えなければ 0 にする', async () => {

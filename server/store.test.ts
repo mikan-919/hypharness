@@ -47,6 +47,25 @@ test('setEvolution は今の値に重ねて保存し、subscribe の購読者に
   expect(seen).toHaveLength(2)
 })
 
+test('Dialog.evolution は長い検査出力を保存し、store を作り直した後も全文を読める', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'hyph-dialog-evolution-')), 'dialog.json')
+  const checkOutput = {
+    stdout: `stdout-start${'x'.repeat(9_000)}stdout-end`,
+    stderr: `stderr-start${'y'.repeat(9_000)}stderr-end`,
+  }
+  const store = createStore(file)
+  store.setEvolution({
+    round: 1,
+    stage: 'validating',
+    candidates: [{ ...candidate, checkOutput }],
+  })
+
+  const loaded = createStore(file).snapshot().evolution
+  expect(loaded?.candidates[0].checkOutput).toEqual(checkOutput)
+  expect(loaded?.candidates[0].checkOutput?.stdout.length).toBeGreaterThan(8_000)
+  expect(loaded?.candidates[0].checkOutput?.stderr.length).toBeGreaterThan(8_000)
+})
+
 test('欄が増える前に保存した課題は、増えた欄を空の値で埋めて読む', () => {
   const file = join(mkdtempSync(join(tmpdir(), 'hyph-old-')), 'dialog.json')
   writeFileSync(file, JSON.stringify({ dialog: { tasks: [{ id: 't1', statement: '課題', state: 'committed', attempts: 1, commit: 'abc' }] }, transcripts: {} }))

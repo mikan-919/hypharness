@@ -81,6 +81,16 @@ function evolutionRowList(e: Evolution | null) {
   return rows
 }
 
+// 候補ごとの検査出力。候補の一覧と別の map にし、各行の構造を固定する
+function evolutionOutputList(e: Evolution | null) {
+  if (!e) return []
+  return e.candidates.map((candidate) => ({
+    key: `${candidate.id}-check-output`,
+    id: candidate.id,
+    checkOutput: candidate.checkOutput,
+  }))
+}
+
 export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping, finished, evolution }: Dialog) {
   const topicList = signal(topics)
   const items = signal(questions)
@@ -141,6 +151,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
           : evolutionNote(evolutionNow()),
   )
   const evolutionRows = derived(() => evolutionRowList(evolutionNow()))
+  const evolutionOutputs = derived(() => evolutionOutputList(evolutionNow()))
   const totalUsed = derived(() => Object.values(usage()).reduce((sum, u) => sum + totalTokens(u), 0))
   const totalCost = derived(() =>
     Object.values(usage())
@@ -361,6 +372,17 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                   <p key={row.key} class={row.kind}>
                     {row.text}
                   </p>
+                ))}
+                {evolutionOutputs().map((row) => (
+                  <details key={row.key} class="check-output">
+                    <summary>{row.checkOutput ? `候補 ${row.id} の検査出力を表示` : `候補 ${row.id} の検査出力は保存されていません`}</summary>
+                    <div>
+                      <strong>標準出力</strong>
+                      <pre>{row.checkOutput?.stdout ?? '検査出力は保存されていません'}</pre>
+                      <strong>標準エラー</strong>
+                      <pre>{row.checkOutput?.stderr ?? '検査出力は保存されていません'}</pre>
+                    </div>
+                  </details>
                 ))}
               </div>
             )}
