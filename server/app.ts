@@ -12,6 +12,7 @@ import { createRelay } from './relay.ts'
 import { createStore } from './store.ts'
 import { weaknesses } from './evolve/round.ts'
 import { runEvolve } from './evolve/run.ts'
+import { listArchive, listCandidates } from './evolve/store.ts'
 import { createWorkers } from './workers.ts'
 
 // Vite の開発サーバーには Bun が .env を読み込まないため、ここで読む。既にある環境変数は上書きしない
@@ -204,6 +205,9 @@ app.post('/api/answer', async (c) => {
 app.route(
   '/',
   createFileRouter('./routes', {
-    loaders: { '/': () => store.snapshot(), '/metrics': () => store.snapshot() },
+    loaders: {
+      '/': () => ({ ...store.snapshot(), evolutionCandidates: [...listCandidates(), ...listArchive()] }),
+      '/metrics': () => store.snapshot(),
+    },
   }),
 )

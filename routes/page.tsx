@@ -1,6 +1,8 @@
 import { derived, onMount, render, signal } from 'irisout'
 import { Layout } from './Layout.tsx'
 import type { Dialog, Evolution, TaskUsage, Usage } from '../shared/dialog.ts'
+import type { Candidate } from '../shared/evolve.ts'
+import { candidatesInEvolutionRound, evolutionCandidateView, evolutionRoundList } from '../shared/evolution-history.ts'
 import { mountMonaco } from 'hyph-monaco'
 
 const stateLabel = {
@@ -66,32 +68,63 @@ function usageLine(u: TaskUsage | undefined) {
   return `呼び出し ${u.calls} 回・入力 ${n(u.input + u.cacheRead)}（キャッシュ ${cached}%）・出力 ${n(u.output)}・最大の文脈 ${n(u.maxPrompt)}・edit_context ${u.edits} 回・作り直し ${u.rebuilds} 回・$${u.costUsd.toFixed(4)}`
 }
 
-// 進化タブに並べる行。候補ごとの入れ子を避け、1段の並びにする
-function evolutionRowList(e: Evolution | null) {
-  if (!e) return []
-  const rows: { key: string; text: string; kind: string }[] = []
-  for (const candidate of e.candidates) {
-    const verdict = candidate.commit ? `積んだ ${candidate.commit.slice(0, 8)}` : candidate.score === 1 ? '検査に通った' : '採用しなかった'
-    rows.push({ key: `${candidate.id}-id`, text: `${candidate.id}・${candidate.module}・${verdict}`, kind: `candidate ${candidate.commit ? 'adopted' : 'rejected'}` })
-    candidate.changes.forEach((change, i) => {
-      rows.push({ key: `${candidate.id}-change-${i}`, text: change, kind: 'change' })
+// 候補ごとの行を1段に並べ、irisout の入れ子 map と条件描画を避ける
+type EvolutionRow = {
+  key: string
+  kind: 'candidate' | 'change' | 'memo' | 'diff' | 'check'
+  id: string
+  module: string
+  score: string
+  commit: string
+  change: string
+  noteSummary: string
+  note: string
+  diffSummary: string
+  diff: string
+  checkSummary: string
+  stdout: string
+  stderr: string
+}
+
+function evolutionRowList(candidates: Candidate[]): EvolutionRow[] {
+  const rows: EvolutionRow[] = []
+  const base = (id: string, kind: EvolutionRow['kind']): EvolutionRow => ({
+    key: id + '-' + kind, kind, id: '', module: '', score: '', commit: '', change: '',
+    noteSummary: '', note: '', diffSummary: '', diff: '', checkSummary: '', stdout: '', stderr: '',
+  })
+  for (const candidate of candidates) {
+    const view = evolutionCandidateView(candidate)
+    const heading = base(view.id, 'candidate')
+    heading.id = view.id
+    heading.module = view.module
+    heading.score = String(view.score)
+    heading.commit = view.commit ?? 'なし'
+    rows.push(heading)
+    view.changes.forEach((change, index) => {
+      const row = base(view.id + '-change-' + index, 'change')
+      row.change = change
+      rows.push(row)
     })
-    if (candidate.note) rows.push({ key: `${candidate.id}-note`, text: candidate.note, kind: 'note' })
+    const note = base(view.id, 'memo')
+    note.noteSummary = view.note === null ? 'メモの記録はありません' : 'メモを表示'
+    note.note = view.note ?? 'メモの記録はありません'
+    rows.push(note)
+    const diff = base(view.id, 'diff')
+    diff.diffSummary = view.diff === null ? '差分の記録はありません' : '差分を表示'
+    diff.diff = view.diff ?? '差分の記録はありません'
+    rows.push(diff)
+    const check = base(view.id, 'check')
+    check.checkSummary = view.checkOutput === null ? '検査出力の記録はありません' : '検査出力を表示'
+    check.stdout = view.checkOutput?.stdout ?? '検査出力の記録はありません'
+    check.stderr = view.checkOutput?.stderr ?? '検査出力の記録はありません'
+    rows.push(check)
   }
   return rows
 }
 
-// 候補ごとの検査出力。候補の一覧と別の map にし、各行の構造を固定する
-function evolutionOutputList(e: Evolution | null) {
-  if (!e) return []
-  return e.candidates.map((candidate) => ({
-    key: `${candidate.id}-check-output`,
-    id: candidate.id,
-    checkOutput: candidate.checkOutput,
-  }))
-}
+type DialogPageProps = Dialog & { evolutionCandidates: Candidate[] }
 
-export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping, finished, evolution }: Dialog) {
+export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping, finished, evolution, evolutionCandidates }: DialogPageProps) {
   const topicList = signal(topics)
   const items = signal(questions)
   const pending = signal(queue)
@@ -120,6 +153,10 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const finishedReason = signal(finished)
   const isStopping = signal(stopping)
   const evolutionNow = signal<Evolution | null>(evolution)
+  const savedEvolutionCandidates = signal(evolutionCandidates)
+  const availableEvolutionRounds = derived(() => evolutionRoundList(evolutionNow(), savedEvolutionCandidates()))
+  const selectedEvolutionRound = signal(String(evolutionRoundList(evolution, evolutionCandidates).at(-1) ?? ''))
+  const evolutionSelectionTouched = signal(false)
   const recent = derived(() => [...activityList()].reverse().slice(0, 60))
   const newestTasks = derived(() => [...taskList()].reverse())
   const newestEntries = derived(() => [...entryList()].reverse())
@@ -150,8 +187,12 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
           ? isStopping() ? '今の課題を終えたら止める' : `課題 ${taskList().length} 件目まで進んだ`
           : evolutionNote(evolutionNow()),
   )
-  const evolutionRows = derived(() => evolutionRowList(evolutionNow()))
-  const evolutionOutputs = derived(() => evolutionOutputList(evolutionNow()))
+  const selectedEvolutionCandidates = derived(() =>
+    selectedEvolutionRound()
+      ? candidatesInEvolutionRound(Number(selectedEvolutionRound()), evolutionNow(), savedEvolutionCandidates())
+      : [],
+  )
+  const evolutionRows = derived(() => evolutionRowList(selectedEvolutionCandidates()))
   const totalUsed = derived(() => Object.values(usage()).reduce((sum, u) => sum + totalTokens(u), 0))
   const totalCost = derived(() =>
     Object.values(usage())
@@ -362,27 +403,47 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
             )}
             {tab() === 'evolution' && (
               <div>
-                {!evolutionNow() && <p class="hint">まだ自己改良の周がありません</p>}
                 {evolutionNow() && (
                   <p class="evolution-head">
                     {`第 ${evolutionNow().round} 周・${evolutionStageLabel[evolutionNow().stage]}・$${evolutionNow().spent.toFixed(4)}`}
                   </p>
                 )}
+                {availableEvolutionRounds().length === 0 && <p class="hint">まだ自己改良の周がありません</p>}
+                {availableEvolutionRounds().length > 0 && (
+                  <label class="evolution-round-picker">
+                    <span>表示する周</span>
+                    <select value={selectedEvolutionRound()} onInput={pickEvolutionRound}>
+                      {[...availableEvolutionRounds()].reverse().map((round) => (
+                        <option key={round} value={String(round)}>{`第 ${round} 周`}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {selectedEvolutionRound() !== '' && selectedEvolutionCandidates().length === 0 && (
+                  <p class="hint">{`第 ${selectedEvolutionRound()} 周に候補はありません`}</p>
+                )}
                 {evolutionRows().map((row) => (
-                  <p key={row.key} class={row.kind}>
-                    {row.text}
-                  </p>
-                ))}
-                {evolutionOutputs().map((row) => (
-                  <details key={row.key} class="check-output">
-                    <summary>{row.checkOutput ? `候補 ${row.id} の検査出力を表示` : `候補 ${row.id} の検査出力は保存されていません`}</summary>
-                    <div>
-                      <strong>標準出力</strong>
-                      <pre>{row.checkOutput?.stdout ?? '検査出力は保存されていません'}</pre>
-                      <strong>標準エラー</strong>
-                      <pre>{row.checkOutput?.stderr ?? '検査出力は保存されていません'}</pre>
+                  <div key={row.key} class={`evolution-row ${row.kind}`}>
+                    <div class={`evolution-candidate ${row.commit !== 'なし' ? 'adopted' : ''}`}>
+                      <strong>{row.id}</strong>
+                      <span>{`module: ${row.module}`}</span>
+                      <span>{`score: ${row.score}`}</span>
+                      <span>{`commit: ${row.commit}`}</span>
+                      <strong>変更</strong>
                     </div>
-                  </details>
+                    <pre class="evolution-change">{row.change}</pre>
+                    <details class="evolution-detail note-detail">
+                      <summary>{row.noteSummary}</summary><pre>{row.note}</pre>
+                    </details>
+                    <details class="evolution-detail diff-detail">
+                      <summary>{row.diffSummary}</summary><pre>{row.diff}</pre>
+                    </details>
+                    <details class="evolution-detail check-detail">
+                      <summary>{row.checkSummary}</summary>
+                      <strong>標準出力</strong><pre>{row.stdout}</pre>
+                      <strong>標準エラー</strong><pre>{row.stderr}</pre>
+                    </details>
+                  </div>
                 ))}
               </div>
             )}
@@ -470,7 +531,9 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
       haltedReason(next.halted)
       finishedReason(next.finished ?? '')
       isStopping(next.stopping)
-      evolutionNow(next.evolution ?? null)
+      const nextEvolution = next.evolution ?? null
+      evolutionNow(nextEvolution)
+      if (!evolutionSelectionTouched() && nextEvolution) selectedEvolutionRound(String(nextEvolution.round))
       // 書きかけでなければ、他の書き手の書き換えをそのまま映す。書きかけなら入力中の本文を変えない。
       // 保存の応答を待つ間に届いた古い版は映さない（保存済みの版を巻き戻さない）
       if (draft() === savedText() && next.goal.version >= savedVersion()) {
@@ -490,6 +553,11 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
 
   function pickTab(event) {
     tab(event.currentTarget.dataset.tab)
+  }
+
+  function pickEvolutionRound(event) {
+    evolutionSelectionTouched(true)
+    selectedEvolutionRound(event.currentTarget.value)
   }
 
   function updateReply(event) {
