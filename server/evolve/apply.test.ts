@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AssistantMessage } from '@earendil-works/pi-ai'
 import type { Call } from '../../harness/topic.ts'
+import { evolutionCandidateView } from '../../shared/evolution-history.ts'
 import type { Candidate } from '../../shared/evolve.ts'
 import { applyAndCheck } from './apply.ts'
 import { readCandidate, writeCandidate } from './store.ts'
@@ -63,7 +64,7 @@ test('検査に落ちたら 0 にし、理由を note に残す。作業ツリ�
   expect(worktrees).toHaveLength(1)
 })
 
-test('成功・失敗の検査出力を8000文字を超えて全文保存し、JSONから読み戻せる', async () => {
+test('成功・失敗の検査出力を8000文字を超えて全文保存し、noteも候補のJSONと画面用の形式で読み戻せる', async () => {
   const repo = harness()
   const root = mkdtempSync(join(tmpdir(), 'hyph-evo-output-'))
   const stdout = `stdout-start${'x'.repeat(9_000)}stdout-end`
@@ -79,9 +80,13 @@ test('成功・失敗の検査出力を8000文字を超えて全文保存し、J
     expect(c.checkOutput).toEqual({ stdout, stderr })
     expect(c.checkOutput!.stdout.length).toBeGreaterThan(8_000)
     expect(c.checkOutput!.stderr.length).toBeGreaterThan(8_000)
+    if (score === 0) expect(c.note).toBe(`検査に落ちました: ${stdout}${stderr}`)
     c.score = score
     writeCandidate(c, root)
-    expect(readCandidate(id, root).checkOutput).toEqual({ stdout, stderr })
+    const saved = readCandidate(id, root)
+    expect(saved.checkOutput).toEqual({ stdout, stderr })
+    expect(saved.note).toBe(c.note)
+    expect(evolutionCandidateView(saved).note).toBe(c.note)
   }
 })
 
