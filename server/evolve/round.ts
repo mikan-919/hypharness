@@ -54,6 +54,8 @@ export type RoundOptions = {
   holdout?: Holdout
   // 失敗したテストの一覧。渡されたときは仕様の候補も作って書く
   failures?: Failure[]
+  // 候補が増えるたびに、その時点の候補の一覧を受け取る
+  report?: (candidates: Candidate[]) => void
 }
 
 export type RoundResult = {
@@ -176,7 +178,7 @@ export function pruner(history: Candidate[]): Set<string> {
 
 // 1周を順に進める。費用が上限を超えたら、残りの検証と採用をせずに止める
 export async function runRound(options: RoundOptions): Promise<RoundResult> {
-  const { round, dialog, propose, check, spent, limitUsd, root, pass, holdout, failures } = options
+  const { round, dialog, propose, check, spent, limitUsd, root, pass, holdout, failures, report } = options
   const weak = weaknesses(dialog)
   // 前の周までの候補。この周で採用した候補を後の提案に混ぜないよう、始めに1回だけ取る
   const archive = listArchive(root)
@@ -271,6 +273,7 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
     }
 
     candidates.push(candidate)
+    report?.([...candidates])
   }
 
   // 失敗したテストが渡されたときは、仕様の候補も作って書く。
@@ -279,6 +282,7 @@ export async function runRound(options: RoundOptions): Promise<RoundResult> {
     for (const candidate of specCandidates(failures, round)) {
       writeCandidate(candidate, root)
       candidates.push(candidate)
+      report?.([...candidates])
     }
   }
 

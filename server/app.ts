@@ -135,6 +135,7 @@ app.post('/api/start', (c) => {
 async function evolve() {
   store.setRun({ started: true })
   store.act('evolve', 'text', '自己改良の1周を始めた')
+  store.setEvolution({ stage: 'proposing', candidates: [], spent: 0 })
   try {
     const result = await runEvolve({
       repo: REPO,
@@ -144,11 +145,14 @@ async function evolve() {
       adopt: true,
       store,
       log: (kind, text) => store.act('evolve', kind, text),
+      // 周の進みを対話の状態に保存し、画面へ流す
+      onProgress: (progress) => store.setEvolution(progress),
     })
     for (const r of result.rejected) store.act('evolve', 'fail', `${r.module}: ${r.reason}`)
     store.act('evolve', 'text', `自己改良の1周 ${result.round} を終えた。費用 ${result.spent.toFixed(4)} ドル`)
   } catch (e) {
     store.act('evolve', 'fail', `自己改良の1周に失敗した: ${(e as Error).message}`)
+    store.setEvolution({ stage: 'done' })
   } finally {
     // 周の費用が上限に達して中継が止まっていても、課題の流れは終わっているので解く
     relay.resume()

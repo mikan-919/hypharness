@@ -1,6 +1,6 @@
 import { derived, onMount, render, signal } from 'irisout'
 import { Layout } from './Layout.tsx'
-import type { Dialog, TaskUsage, Usage } from '../shared/dialog.ts'
+import type { Dialog, Evolution, TaskUsage, Usage } from '../shared/dialog.ts'
 import { mountMonaco } from 'hyph-monaco'
 
 const stateLabel = {
@@ -16,7 +16,21 @@ const taskLabel = { solving: '解いている', checking: '検査中', committed
 
 const agentLabel = { decompose: '分解役', solve: '解答役', host: '固定部', evolve: '自己改良' }
 
-const tabLabel = { context: '共有文脈', history: '書き換えの履歴', cost: '費用' }
+const tabLabel = { tasks: '課題', activity: '活動', evolution: '進化', context: '共有文脈', history: '履歴' }
+
+// ループの段階。上から順に、今の段階を1つだけ強調する
+const stages = [
+  { n: 1, label: '目的を詰める' },
+  { n: 2, label: '開始の合図' },
+  { n: 3, label: '課題を解く' },
+  { n: 4, label: '統合' },
+  { n: 5, label: '自己改良の1周' },
+]
+
+// 自己改良の1周の補足。まだ始まっていなければ空
+function evolutionNote(e: Evolution | null) {
+  return e ? `第 ${e.round} 周（${e.stage}）` : ''
+}
 
 // 課題ごとの記録の1行。キャッシュの割合は、入力のうちキャッシュから読んだ分
 function usageLine(u: TaskUsage | undefined) {
@@ -25,7 +39,28 @@ function usageLine(u: TaskUsage | undefined) {
   return `呼び出し ${u.calls} 回・入力 ${u.input + u.cacheRead}（キャッシュ ${cached}%）・出力 ${u.output}・最大の文脈 ${u.maxPrompt}・edit_context ${u.edits} 回・作り直し ${u.rebuilds} 回・$${u.costUsd.toFixed(4)}`
 }
 
-export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping, finished }: Dialog) {
+// 進化タブに並べる行。候補ごとの入れ子を避け、1段の並びにする
+function evolutionRowList(e: Evolution | null) {
+  if (!e) return []
+  const rows: { key: string; text: string; kind: string }[] = [
+    { key: 'round', text: `第 ${e.round} 周`, kind: '' },
+    { key: 'summary', text: `段階 ${e.stage}・費用 $${e.spent.toFixed(4)}`, kind: 'hint' },
+  ]
+  for (const candidate of e.candidates) {
+    rows.push({ key: `${candidate.id}-id`, text: `# ${candidate.id}`, kind: 'candidate' })
+    rows.push({ key: `${candidate.id}-module`, text: candidate.module, kind: 'hint' })
+    candidate.changes.forEach((change, i) => {
+      rows.push({ key: `${candidate.id}-change-${i}`, text: change, kind: 'change' })
+    })
+    rows.push({ key: `${candidate.id}-score`, text: `score ${candidate.score}`, kind: 'hint' })
+    if (candidate.note) rows.push({ key: `${candidate.id}-note`, text: candidate.note, kind: 'note' })
+    if (candidate.commit)
+      rows.push({ key: `${candidate.id}-commit`, text: `コミット ${candidate.commit.slice(0, 8)}`, kind: 'hint' })
+  }
+  return rows
+}
+
+export function DialogPage({ topics, queue, questions, entries, started, goal, edits, tasks, activity, live, halted, stopping, finished, evolution }: Dialog) {
   const topicList = signal(topics)
   const items = signal(questions)
   const pending = signal(queue)
@@ -53,6 +88,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const haltedReason = signal(halted)
   const finishedReason = signal(finished)
   const isStopping = signal(stopping)
+  const evolutionNow = signal<Evolution | null>(evolution)
   const recent = derived(() => [...activityList()].reverse().slice(0, 60))
   const writing = derived(() =>
     Object.entries(liveText())
@@ -64,6 +100,22 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
   const history = derived(() => [...editList()].reverse())
   const readyCount = derived(() => topicList().filter((t) => t.ready).length)
   const majority = derived(() => readyCount() * 2 > topicList().length)
+  // 今の段階の番号（1 始まり）。止まっていないときにだけ使う
+  const stage = derived(() =>
+    !isStarted() ? (majority() ? 2 : 1) : !finishedReason() ? 3 : evolutionNow() ? 5 : 4,
+  )
+  // 今の段階の補足
+  const stageNote = derived(() =>
+    stage() === 1
+      ? `開始可 ${readyCount()} / ${topicList().length}`
+      : stage() === 2
+        ? '論点の過半数が開始可になった'
+        : stage() === 3
+          ? isStopping() ? '今の課題を終えたら止める' : '分解役と解答役が課題を進めている'
+          : stage() === 4
+            ? finishedReason()
+            : evolutionNote(evolutionNow()),
+  )
   const startHint = derived(() =>
     isStarted()
       ? '分解役と解答役が課題を進めている'
@@ -71,6 +123,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
         ? '過半数の論点が開始可になった。押すと課題を進め始める'
         : '論点の過半数が開始可になると押せる',
   )
+  const evolutionRows = derived(() => evolutionRowList(evolutionNow()))
   const totalOutput = derived(() => Object.values(usage()).reduce((sum, u) => sum + u.output, 0))
   const totalCost = derived(() =>
     Object.values(usage())
@@ -82,6 +135,24 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
     <Layout title="hypharness">
       <div class="shell">
         <aside class="threads">
+          {haltedReason() !== '' && (
+            <div class="stage halted">
+              <span class="number">!</span>
+              <span class="name">止まり</span>
+              <span class="note">{haltedReason()}</span>
+            </div>
+          )}
+          {haltedReason() === '' && (
+            <div class="stages">
+              {stages.map((s) => (
+                <div key={s.label} class={`stage ${stage() === s.n ? 'current' : ''}`}>
+                  <span class="number">{s.n}</span>
+                  <span class="name">{s.label}</span>
+                  <span class="note">{stage() === s.n ? stageNote() : ''}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <h2>論点</h2>
           {topicList().map((topic) => (
             <div key={topic.id} class={`thread ${topic.state}`}>
@@ -111,22 +182,6 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
           {haltedReason() && <p class="conflict">{`流れが止まりました: ${haltedReason()}`}</p>}
           {finishedReason() && <p class="finished">{`最終目的を満たしたため、流れを終えました: ${finishedReason()}`}</p>}
           {failure() && <p class="conflict">{failure()}</p>}
-          {taskList().length > 0 && (
-            <section class="tasks">
-              <h2>課題</h2>
-              {taskList().map((task) => (
-                <div key={task.id} class={`task ${task.state}`}>
-                  <strong>{task.id}</strong>
-                  <span class="state">
-                    {`${taskLabel[task.state]}${task.attempts > 1 ? `（${task.attempts} 回目）` : ''} ${task.commit.slice(0, 8)}`}
-                  </span>
-                  <p>{task.statement.split('\n')[0]}</p>
-                  {task.state === 'held' && <p class="reason">{`${task.reason}（使った費用 ${task.spent} ドル）`}</p>}
-                  {task.state === 'committed' && task.diff && <pre class="diff">{task.diff}</pre>}
-                </div>
-              ))}
-            </section>
-          )}
           <div class="goal-head">
             <h1>FINAL_GOAL.md</h1>
             <span class="hint">版 {savedVersion()}</span>
@@ -150,6 +205,15 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
             )}
             {saved() && <p class="hint">{saved()}</p>}
           </form>
+          {items().length > 0 && (
+            <div class="queue">
+              {items().map((q) => (
+                <span key={q.id} class={`chip ${pending()[0] === q.id ? 'head' : ''} ${q.answer !== '' ? 'answered' : ''}`}>
+                  {q.id}
+                </span>
+              ))}
+            </div>
+          )}
           {head() && (
             <article class="question head">
               <h2>{head().text}</h2>
@@ -194,6 +258,10 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
         </main>
 
         <aside class="context">
+          <div class="totals">
+            <span>{`$${totalCost()}`}</span>
+            <span>{`出力 ${totalOutput()} トークン`}</span>
+          </div>
           <div class="tabs">
             {(Object.keys(tabLabel) as (keyof typeof tabLabel)[]).map((name) => (
               <button
@@ -208,7 +276,24 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
             ))}
           </div>
           <div class="tab-body">
-            {tab() === 'context' && (
+            {tab() === 'tasks' && (
+              <div>
+                <h2>課題</h2>
+                {taskList().length === 0 && <p class="hint">まだ課題がありません</p>}
+                {taskList().map((task) => (
+                  <div key={task.id} class={`task ${task.state}`}>
+                    <strong>{task.id}</strong>
+                    <span class="state">{taskLabel[task.state]}</span>
+                    <p>{task.statement.split('\n')[0]}</p>
+                    <p class="hint">{`試行 ${task.attempts} 回・コミット ${task.commit.slice(0, 8)}・費用 ${task.spent} ドル`}</p>
+                    {task.state === 'held' && <p class="reason">{`${task.reason}（使った費用 ${task.spent} ドル）`}</p>}
+                    {task.state === 'committed' && task.diff && <pre class="diff">{task.diff}</pre>}
+                    {task.usage && <p class="hint">{usageLine(task.usage)}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
+            {tab() === 'activity' && (
               <div>
                 <h2>動き</h2>
                 {writing().map((w) => (
@@ -223,6 +308,25 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                     <p>{a.text}</p>
                   </div>
                 ))}
+              </div>
+            )}
+            {tab() === 'evolution' && (
+              <div>
+                <h2>自己改良</h2>
+                {!evolutionNow() && <p class="hint">まだ自己改良の周がありません</p>}
+                {evolutionNow() && (
+                  <div>
+                    {evolutionRows().map((row) => (
+                      <p key={row.key} class={row.kind}>
+                        {row.text}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {tab() === 'context' && (
+              <div>
                 <h2>共有文脈</h2>
                 {entryList().map((entry) => (
                   <div key={entry.id} class={`entry ${entry.kind}`}>
@@ -257,23 +361,6 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
                   </div>
                 ))}
               </div>
-            )}
-            {tab() === 'cost' && (
-              <section class="metrics">
-                <h2>トークン</h2>
-                <p class="big">{totalOutput()}</p>
-                <p>出力の合計（ストリーミング中）</p>
-                <p>${totalCost()}</p>
-                <h2>課題ごと</h2>
-                {taskList()
-                  .filter((task) => task.usage)
-                  .map((task) => (
-                    <div key={task.id} class="task-usage">
-                      <strong>{task.id}</strong>
-                      <p>{usageLine(task.usage)}</p>
-                    </div>
-                  ))}
-              </section>
             )}
           </div>
         </aside>
@@ -323,6 +410,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
       haltedReason(next.halted)
       finishedReason(next.finished ?? '')
       isStopping(next.stopping)
+      evolutionNow(next.evolution ?? null)
       // 書きかけでなければ、他の書き手の書き換えをそのまま映す。書きかけなら入力中の本文を変えない。
       // 保存の応答を待つ間に届いた古い版は映さない（保存済みの版を巻き戻さない）
       if (draft() === savedText() && next.goal.version >= savedVersion()) {
