@@ -42,6 +42,11 @@ function headline(text: string) {
   return first.length > 80 ? `${first.slice(0, 80)}…` : first
 }
 
+// 総利用トークン数。入力（キャッシュから読んだ分を含む）と出力の合計。出力はストリーミング中の見積もりを含む
+function totalTokens(u: Usage | undefined) {
+  return u ? u.input + u.cacheRead + u.output : 0
+}
+
 // 動きの時刻（時:分:秒）
 function clock(at: number) {
   return new Date(at).toLocaleTimeString('ja-JP', { hour12: false })
@@ -135,7 +140,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
           : evolutionNote(evolutionNow()),
   )
   const evolutionRows = derived(() => evolutionRowList(evolutionNow()))
-  const totalOutput = derived(() => Object.values(usage()).reduce((sum, u) => sum + u.output, 0))
+  const totalUsed = derived(() => Object.values(usage()).reduce((sum, u) => sum + totalTokens(u), 0))
   const totalCost = derived(() =>
     Object.values(usage())
       .reduce((sum, u) => sum + u.costUsd, 0)
@@ -183,7 +188,7 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
               <span class="dot" />
               <span class="name">{topic.title}</span>
               <span class="state">{stateLabel[topic.state]}</span>
-              <span class="tokens">{`出力 ${usage()[topic.id]?.output ?? 0}`}</span>
+              <span class="tokens">{`${totalTokens(usage()[topic.id]).toLocaleString('ja-JP')} トークン`}</span>
             </div>
           ))}
         </aside>
@@ -280,8 +285,8 @@ export function DialogPage({ topics, queue, questions, entries, started, goal, e
               <span class="hint">費用</span>
             </div>
             <div>
-              <span class="value">{totalOutput()}</span>
-              <span class="hint">出力トークン</span>
+              <span class="value">{totalUsed().toLocaleString('ja-JP')}</span>
+              <span class="hint">総利用トークン</span>
             </div>
           </div>
           <div class="tabs">
