@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
@@ -52,13 +53,20 @@ func TestCompleted(t *testing.T) {
 
 func TestClaim(t *testing.T) {
 	l := &lab{dir: t.TempDir()}
-	if _, err := l.claim(0, "仮説A"); err != nil {
+	bpb := 2.0
+	if err := errors.Join(l.append(run{ID: 0, Agent: -1, BPB: &bpb}), l.append(run{ID: 1, Agent: 0})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.claim(0, "仮説B"); err == nil {
+	if _, err := l.claim(0, "仮説A", 1); err == nil {
+		t.Fatal("val_bpb のない実験を比較元にさせないこと")
+	}
+	if _, err := l.claim(0, "仮説A", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.claim(0, "仮説B", 0); err == nil {
 		t.Fatal("未完了の申告があるうちは次の申告を拒否すること")
 	}
-	if _, err := l.claim(1, "仮説B"); err != nil {
+	if _, err := l.claim(1, "仮説B", 0); err != nil {
 		t.Fatal("別の個体は申告できること:", err)
 	}
 	run := 3
@@ -72,7 +80,30 @@ func TestClaim(t *testing.T) {
 	if c := openClaim(es, 1); c == nil || c.Text != "仮説B" {
 		t.Fatalf("他の個体の申告は閉じないこと: %+v", c)
 	}
-	if _, err := l.claim(0, "仮説C"); err != nil {
+	if _, err := l.claim(0, "仮説C", 0); err != nil {
 		t.Fatal("閉じた後は申告できること:", err)
+	}
+}
+
+func TestOutcome(t *testing.T) {
+	base, baseBPB, bpb, best := 5, 1.9, 1.8, 1.7
+	r := run{Hypothesis: "h", Base: &base, BaseBPB: &baseBPB, BPB: &bpb, Against: &best, Improved: true}
+	if kind, _ := outcome(r); kind != "fact" {
+		t.Fatal("最良を更新しなくても、比較元に対して改善したら fact にすること")
+	}
+	r.Improved = false
+	if kind, _ := outcome(r); kind != "fail" {
+		t.Fatal("比較元に対して改善しなければ fail にすること")
+	}
+	r.Error = "打ち切り"
+	if kind, _ := outcome(r); kind != "fail" {
+		t.Fatal("失敗した学習は fail にすること")
+	}
+}
+
+func TestUsageLimit(t *testing.T) {
+	sse := `data: {"type":"error","error":{"code":"subscription_sharing_usage_limit_exceeded"}}` + "\n"
+	if _, err := completed(strings.NewReader(sse)); !errors.Is(err, errUsageLimit) {
+		t.Fatalf("利用上限を見分けること: %v", err)
 	}
 }

@@ -3,8 +3,9 @@ package main
 // 研究室。研究エージェントに Unix ソケットで model・train・runs を提供し、GPU の待ち行列と実験の記録を持つ。
 //
 // ~/.hyph/lab/
-//   best/train.py   今の最良の学習スクリプト。全エージェントに読み取り専用で見せる
-//   best.json       最良の val bpb と、それを出した実験の番号
+//   best/           全エージェントに読み取り専用で見せる
+//     train.py      今の最良の学習スクリプト
+//     best.json     最良の val bpb と、それを出した実験の番号
 //   noise.json      基準を繰り返し学習した val bpb の平均と標準偏差
 //   runs.jsonl      実験ノート。1行が1回の学習
 //   runs/<番号>/    学習したスクリプトと出力
@@ -40,6 +41,9 @@ type run struct {
 	BPB        *float64 `json:"val_bpb"`           // 失敗したら null
 	Best       bool     `json:"best"`              // 最良を更新したか
 	Against    *float64 `json:"against,omitempty"` // 比べた最良の val bpb
+	Base       *int     `json:"base,omitempty"`    // 比較元の実験。出発点にした train.py
+	BaseBPB    *float64 `json:"base_val_bpb,omitempty"`
+	Improved   bool     `json:"improved"` // 比較元をばらつきの2倍より大きく下回ったか
 	Error      string   `json:"error,omitempty"`
 	Seconds    float64  `json:"seconds"`
 	At         string   `json:"at"`
@@ -111,10 +115,10 @@ func tail(s string, n int) string {
 }
 
 // src を GPU の隔離環境で学習させ、記録して返す。待ち行列が空くまで待つ
-func (l *lab) train(ctx context.Context, agent int, hypothesis string, src []byte) (run, string) {
+func (l *lab) train(ctx context.Context, agent int, hypothesis string, base *int, src []byte) (run, string) {
 	l.gpu.Lock()
 	defer l.gpu.Unlock()
-	r := run{Agent: agent, Hypothesis: hypothesis, At: time.Now().Format(time.RFC3339)}
+	r := run{Agent: agent, Hypothesis: hypothesis, Base: base, At: time.Now().Format(time.RFC3339)}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	r.ID = l.count()
@@ -179,6 +183,20 @@ func (l *lab) execute(ctx context.Context, r *run, dir string) (string, error) {
 	return output, nil
 }
 
+// runs.jsonl の id 番目の実験。呼び出し側が l.mu を持つこと
+func (l *lab) runAt(id int) (run, error) {
+	var r run
+	raw, err := os.ReadFile(l.path("runs.jsonl"))
+	if err != nil {
+		return r, err
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	if id < 0 || id >= len(lines) {
+		return r, fmt.Errorf("実験 %d はありません", id)
+	}
+	return r, json.Unmarshal([]byte(lines[id]), &r)
+}
+
 func (l *lab) count() int {
 	f, err := os.Open(l.path("runs.jsonl"))
 	if err != nil {
@@ -208,10 +226,18 @@ func (l *lab) finish(r *run) error {
 	if r.BPB != nil && r.Agent >= 0 {
 		var best record
 		var n noise
-		if err := errors.Join(readJSON(l.path("best.json"), &best), readJSON(l.path("noise.json"), &n)); err != nil {
+		if err := errors.Join(readJSON(l.path("best", "best.json"), &best), readJSON(l.path("noise.json"), &n)); err != nil {
 			return err
 		}
 		r.Against = &best.BPB
+		if r.Base != nil {
+			b, err := l.runAt(*r.Base)
+			if err != nil {
+				return err
+			}
+			r.BaseBPB = b.BPB
+			r.Improved = b.BPB != nil && improves(*r.BPB, record{BPB: *b.BPB}, n)
+		}
 		if improves(*r.BPB, best, n) {
 			src, err := os.ReadFile(l.path("runs", strconv.Itoa(r.ID), "train.py"))
 			if err != nil {
@@ -224,7 +250,7 @@ func (l *lab) finish(r *run) error {
 				return err
 			}
 			r.Best = true
-			if err := writeJSON(l.path("best.json"), record{r.ID, *r.BPB}); err != nil {
+			if err := writeJSON(l.path("best", "best.json"), record{r.ID, *r.BPB}); err != nil {
 				return err
 			}
 		}
@@ -242,7 +268,7 @@ func (l *lab) finish(r *run) error {
 	return os.Rename(l.path("runs.jsonl.tmp"), l.path("runs.jsonl"))
 }
 
-// 基準の train.py を k 回学習させ、平均とばらつきを noise.json に、平均を最良の値として best.json に置く
+// 基準の train.py を k 回学習させ、平均とばらつきを noise.json に、平均を最良の値として best/best.json に置く
 func (l *lab) baseline(ctx context.Context, k int) error {
 	src, err := os.ReadFile(filepath.Join(l.research, "train.py"))
 	if err != nil {
@@ -254,7 +280,7 @@ func (l *lab) baseline(ctx context.Context, k int) error {
 	var values []float64
 	first := -1
 	for i := range k {
-		r, output := l.train(ctx, -1, "基準の計測", src)
+		r, output := l.train(ctx, -1, "基準の計測", nil, src)
 		if r.Error != "" {
 			return fmt.Errorf("基準の学習 %d が失敗しました: %s\n%s", r.ID, r.Error, output)
 		}
@@ -277,7 +303,7 @@ func (l *lab) baseline(ctx context.Context, k int) error {
 	if err := os.WriteFile(l.path("best", "train.py"), src, 0o644); err != nil {
 		return err
 	}
-	return errors.Join(writeJSON(l.path("noise.json"), n), writeJSON(l.path("best.json"), record{first, n.Mean}))
+	return errors.Join(writeJSON(l.path("noise.json"), n), writeJSON(l.path("best", "best.json"), record{first, n.Mean}))
 }
 
 // エージェント i のソケットで、モデルの呼び出し・共有の文脈・学習を受け付ける。cursor は共有の文脈を読んだ位置
@@ -333,11 +359,15 @@ func (l *lab) serve(i int, socket, work string, cursor *atomic.Int64) (*http.Ser
 		return body.Text, true
 	}
 	mux.HandleFunc("POST /claim", func(w http.ResponseWriter, r *http.Request) {
-		t, ok := text(w, r)
-		if !ok {
+		var body struct {
+			Text string `json:"text"`
+			Base *int   `json:"base"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Text) == "" || body.Base == nil {
+			http.Error(w, `{"text": "...", "base": 比較元の実験の番号} を送ってください`, 400)
 			return
 		}
-		e, err := l.claim(i, t)
+		e, err := l.claim(i, body.Text, *body.Base)
 		if err != nil {
 			http.Error(w, err.Error(), 409)
 			return
@@ -388,7 +418,7 @@ func (l *lab) serve(i int, socket, work string, cursor *atomic.Int64) (*http.Ser
 			http.Error(w, "/work/train.py を読めません: "+err.Error(), 400)
 			return
 		}
-		res, output := l.train(r.Context(), i, c.Text, src)
+		res, output := l.train(r.Context(), i, c.Text, c.Base, src)
 		kind, summary := outcome(res)
 		if err := l.close(i, kind, summary, &res.ID); err != nil {
 			http.Error(w, err.Error(), 500)
@@ -472,7 +502,7 @@ func errOrOK(err error) string {
 }
 
 func (l *lab) start(ctx context.Context, agents int) error {
-	if err := errors.Join(readJSON(l.path("best.json"), &record{}), readJSON(l.path("noise.json"), &noise{})); err != nil {
+	if err := errors.Join(readJSON(l.path("best", "best.json"), &record{}), readJSON(l.path("noise.json"), &noise{})); err != nil {
 		return fmt.Errorf("先に hyph baseline でばらつきを測ってください: %w", err)
 	}
 	binary := l.path("agent")

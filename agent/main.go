@@ -25,14 +25,14 @@ const instructions = `あなたは LLM のアーキテクチャと学習法を�
 
 環境:
 - /research/prepare.py は固定部です（読み取り専用）。データ、学習の予算（TOKEN_BUDGET バイト。prepare.batches が返す分）、評価を決めています。必ず読んでから始めてください。
-- /best/train.py が今の最良です。/work/train.py は研究の開始時にその複製になっています。
+- /best/train.py が今の最良で、/best/best.json にその実験の番号（run）と val bpb があります。/work/train.py は研究の開始時にその複製になっています。
 - /runs/<番号>/ に過去の実験のスクリプト（train.py）と出力（output.log）があります。
 - ネットワークはありません。GPU は train で学習するときだけ使えます。sh では CPU しか使えません。
 
 共有の文脈（全員が追記だけをするログ）:
-- claim: これから検証する仮説の申告。他の研究者の未完了の claim と同じ仮説は選ばない。
+- claim: これから検証する仮説の申告。base に比較元の実験の番号（出発点にした train.py の実験。/best/train.py なら /best/best.json の run、/runs/<番号>/train.py ならその番号）を書く。他の研究者の未完了の claim と同じ仮説は選ばない。
 - fact: 根拠のある発見。fail: 否定された仮説や失敗した方法。他の研究者は fail を制約として扱い、同じ失敗を避ける。
-- train の結果は、ハーネスが fact か fail として書き、あなたの claim を閉じる。
+- train の結果は、ハーネスが比較元の val bpb と比べて fact（改善した）か fail（改善しなかった）として書き、あなたの claim を閉じる。全体の最良を更新したかも添える。
 - 既存の項目は書き換えられない。誤りを見つけたら、根拠を添えて新しい fail を書く。
 - read は前回読んだ後に増えた項目だけを返す。
 
@@ -46,7 +46,7 @@ const instructions = `あなたは LLM のアーキテクチャと学習法を�
 1. read で共有の文脈を読む。試された仮説、失敗、他の研究者が申告中の仮説を確かめる。
 2. 根拠のある仮説を1つ選び、claim で申告する。
 3. /work/train.py を変え、sh で CPU と小さな設定で動くことを短く確かめる（例: 数ステップだけ回す）。学習の失敗は GPU の待ち時間を無駄にする。
-4. 申告の前に read し直し、同じ仮説を他の研究者が先に申告していたら release で手放して別の仮説を選ぶ。
+4. train の前に read し直し、同じ仮説を他の研究者が先に申告していたら release で手放して別の仮説を選ぶ。
 5. train で学習させる。待ち行列があるため、結果が返るまで数十分かかることがある。
 6. 結果から、他の研究者の役に立つ発見があれば fact か fail に書く。学んだことを最後の応答に短く書いて終える。`
 
@@ -72,7 +72,17 @@ var tools = []map[string]any{
 		},
 	},
 	{"type": "function", "name": "read", "strict": true, "description": "共有の文脈のうち、前回読んだ後に増えた項目を返す", "parameters": noArgs},
-	textTool("claim", "検証する仮説と、加える変更を申告する。未完了の申告は1つまで"),
+	{
+		"type": "function", "name": "claim", "strict": true,
+		"description": "検証する仮説と、加える変更を申告する。未完了の申告は1つまで",
+		"parameters": map[string]any{
+			"type": "object", "additionalProperties": false, "required": []string{"text", "base"},
+			"properties": map[string]any{
+				"text": map[string]any{"type": "string"},
+				"base": map[string]any{"type": "integer", "description": "比較元の実験の番号。出発点にした train.py の実験"},
+			},
+		},
+	},
 	textTool("release", "検証せずに申告を手放す。理由を書く"),
 	textTool("fact", "根拠のある発見を共有の文脈に書く。根拠（実験の番号や出力）を含める"),
 	textTool("fail", "否定された仮説や失敗した方法を共有の文脈に書く。根拠を含める"),
@@ -144,6 +154,7 @@ func use(name, arguments string) string {
 	var args struct {
 		Command string `json:"command"`
 		Text    string `json:"text"`
+		Base    int    `json:"base"`
 	}
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return "引数を読めません: " + err.Error()
@@ -156,7 +167,9 @@ func use(name, arguments string) string {
 	case "read":
 		// ponytail: 新しい項目は省略せずに渡す。文脈が溢れるようになったら古い項目を要約する
 		out, err = call("GET", "/context", nil)
-	case "claim", "release", "fact", "fail":
+	case "claim":
+		out, err = call("POST", "/claim", map[string]any{"text": args.Text, "base": args.Base})
+	case "release", "fact", "fail":
 		out, err = call("POST", "/"+name, map[string]string{"text": args.Text})
 	case "train":
 		out, err = call("POST", "/train", map[string]string{})

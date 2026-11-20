@@ -293,6 +293,9 @@ func completed(body io.Reader) ([]byte, error) {
 		case "response.completed", "response.incomplete":
 			return e.Response, nil
 		case "response.failed", "error":
+			if strings.Contains(data, "usage_limit") {
+				return nil, fmt.Errorf("%w: %s", errUsageLimit, data)
+			}
 			return nil, fmt.Errorf("モデルの応答が失敗しました: %s", data)
 		}
 	}
@@ -305,6 +308,13 @@ func completed(body io.Reader) ([]byte, error) {
 // 混雑とサーバー側の失敗だけを間隔を空けて呼び直す。それ以外の失敗はそのまま返す
 var retryDelays = []time.Duration{10 * time.Second, 30 * time.Second, 2 * time.Minute}
 
+var errUsageLimit = errors.New("ChatGPT のサブスクリプションの利用上限に達しました")
+
+// 利用上限が戻ったかを確かめる間隔
+const limitWait = 10 * time.Minute
+
+// 利用上限に当たったら、戻るまで limitWait ごとに試し直す。失敗として返すと、エージェントが研究を終えて起き直し、
+// 上限が戻るまで呼び出しを繰り返すため
 func (o *openAI) respond(body []byte) ([]byte, int, error) {
 	for i := 0; ; i++ {
 		token, err := o.token()
@@ -325,6 +335,12 @@ func (o *openAI) respond(body []byte) ([]byte, int, error) {
 				out, err = io.ReadAll(resp.Body)
 			}
 			resp.Body.Close()
+		}
+		if errors.Is(err, errUsageLimit) || status == 429 && bytes.Contains(out, []byte("usage_limit")) {
+			fmt.Fprintf(os.Stderr, "%s。%v後に試し直します\n", errUsageLimit, limitWait)
+			time.Sleep(limitWait)
+			i--
+			continue
 		}
 		if err == nil && status != 429 && status < 500 {
 			return out, status, nil

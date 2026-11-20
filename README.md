@@ -21,14 +21,24 @@ go run . baseline 3    # 基準の train.py を3回学習させ、val bpb のば
 go run . lab 10        # 研究エージェントを10体動かす。Ctrl-C で止める
 ```
 
-モデルは `MODEL`（既定 `gpt-6-luna`）、推論の深さは `REASONING`（既定 `medium`）で選ぶ。
+ターミナルやセッションを閉じても動かし続けるときは、`nix develop` の中で次を実行し、独立したユーザーのサービスにする。
+
+```sh
+go build -o ~/.hyph/hyph .
+systemd-run --user --unit=hyph-lab --working-directory=$PWD --setenv=PATH=$PATH --setenv=NIX_LD=$NIX_LD \
+  --setenv=NIX_LD_LIBRARY_PATH=$NIX_LD_LIBRARY_PATH -p StandardOutput=append:$HOME/.hyph/lab.log \
+  -p StandardError=append:$HOME/.hyph/lab.log ~/.hyph/hyph lab 10
+systemctl --user stop hyph-lab   # 止める
+```
+
+モデルは `MODEL`（既定 `gpt-6-luna`。例: `MODEL=gpt-6.2-sol`）、推論の深さは `REASONING`（既定 `medium`）で選ぶ。
 
 ## 置き場
 
 | 場所 | 中身 |
 | --- | --- |
-| `~/.hyph/lab/best/train.py` | 今の最良の学習スクリプト |
-| `~/.hyph/lab/best.json`、`noise.json` | 最良の val bpb、基準のばらつき |
+| `~/.hyph/lab/best/train.py`、`best.json` | 今の最良の学習スクリプトと、その実験の番号と val bpb |
+| `~/.hyph/lab/noise.json` | 基準のばらつき |
 | `~/.hyph/lab/runs.jsonl`、`runs/<番号>/` | 実験ノートと、各実験のスクリプトと出力 |
 | `~/.hyph/lab/context.jsonl` | 共有の文脈 |
 | `~/.hyph/lab/agents/<番号>/` | 研究エージェントの作業用ディレクトリとログ |
